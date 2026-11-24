@@ -13,9 +13,10 @@ const leg = (o: Partial<ScalperLeg> = {}): ScalperLeg => ({
   id: '102', securityId: '102', product: '', symbol: 'NIFTY-Dec2026-25550-CE', strike: 25550, type: 'CE', netQty: 65, avg: 120, ltp: 125, sim: true, ...o,
 });
 
-test('nearest strike to spot; middle strike without spot; null without strikes', () => {
+test('nearest strike to spot; null without spot (never a guess) or without strikes', () => {
   assert.equal(nearestStrike([25500, 25550, 25600], 25561), 25550);
-  assert.equal(nearestStrike([25500, 25550, 25600], null), 25550);
+  assert.equal(nearestStrike([25500, 25550, 25600], null), null);
+  assert.equal(nearestStrike([25500, 25550, 25600], 0), null);
   assert.equal(nearestStrike([], 25561), null);
 });
 
@@ -26,6 +27,10 @@ test('resolve: listed strike keeps its ids, a missing strike falls back to ATM, 
   assert.equal(atm.strike, 25550);
   assert.equal(atm.dhanId, '102');
   assert.equal(atm.kotakSymbol, 'NIFTY2612025550CE');
+  // ATM requested (strike 0) before any spot: unresolved, no contract (the pane waits rather than pinning a guess)
+  const early = resolveSource({ kind: 'option', type: 'CE', strike: 0 }, 'NIFTY', ids, null);
+  assert.equal(early.strike, null);
+  assert.equal(early.dhanId, null);
   assert.equal(resolveSource({ kind: 'option', type: 'CE', strike: 6100 }, 'CRUDEOILM', new Map(), 6100).tick, 0.1);
   assert.equal(resolveSource({ kind: 'option', type: 'CE', strike: 6100 }, 'CRUDEOILM', new Map(), 6100).dhanId, null);
   assert.equal(resolveSource({ kind: 'underlying' }, 'CRUDEOILM', ids, 6100).tick, 1);

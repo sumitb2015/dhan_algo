@@ -85,18 +85,18 @@ function StrikeStepper({ strike, atm, onStep, tone, label }: { strike: number | 
 
 /** Dhan's margin to SELL `lots` of one contract, from /api/options/margin, refreshed when the contract or size changes
  *  (debounced; not on every tick: the premium it is priced at is read when the request goes out). */
-function useSellMargin(expiry: string, strike: number | null, type: 'CE' | 'PE', lots: number, ltp: number | null, enabled: boolean): number | null {
+function useSellMargin(underlying: string, expiry: string, strike: number | null, type: 'CE' | 'PE', lots: number, ltp: number | null, enabled: boolean): number | null {
   const [margin, setMargin] = useState<{ key: string; value: number | null } | null>(null);
   const ltpRef = useRef(ltp);
   useEffect(() => { ltpRef.current = ltp; });
-  const key = `${expiry}|${strike}|${type}|${lots}`;
+  const key = `${underlying}|${expiry}|${strike}|${type}|${lots}`;
   useEffect(() => {
     if (!enabled || !expiry || strike === null || lots < 1) return;
     let dead = false;
     const t = setTimeout(() => {
       fetch('/api/options/margin', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ underlying: 'NIFTY', expiry, legs: [{ strike, type, side: 'SELL', qtyLots: lots, price: ltpRef.current ?? 0 }] }),
+        body: JSON.stringify({ underlying, expiry, legs: [{ strike, type, side: 'SELL', qtyLots: lots, price: ltpRef.current ?? 0 }] }),
       })
         .then(r => r.json())
         .then((j: { success: boolean; data?: { total_margin?: number } }) => {
@@ -105,7 +105,7 @@ function useSellMargin(expiry: string, strike: number | null, type: 'CE' | 'PE',
         .catch(() => { if (!dead) setMargin({ key, value: null }); });
     }, 600);
     return () => { dead = true; clearTimeout(t); };
-  }, [key, enabled, expiry, strike, type, lots]);
+  }, [key, enabled, underlying, expiry, strike, type, lots]);
   return margin && margin.key === key ? margin.value : null;
 }
 
@@ -182,8 +182,12 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
   };
 
   // Dhan's margin calculator is asked only for a Dhan account: on Kotak it would be another broker's figure.
-  const ceSellReq = useSellMargin(expiry, ceStrike, 'CE', ceLots, ceLtp, ceCardOpen && !kotakReal);
-  const peSellReq = useSellMargin(expiry, peStrike, 'PE', peLots, peLtp, peCardOpen && !kotakReal);
+  const ceSellReq = useSellMargin(feed.underlying, expiry, ceStrike, 'CE', ceLots, ceLtp, ceCardOpen && !kotakReal);
+  const peSellReq = useSellMargin(feed.underlying, expiry, peStrike, 'PE', peLots, peLtp, peCardOpen && !kotakReal);
+  // The top row SELLs the ATM pair: what it needs is Dhan's sell margin, not the buy premium.
+  const atmPeSellReq = useSellMargin(feed.underlying, expiry, base?.peStrike ?? null, 'PE', topLots, atmLtp('PE'), !kotakReal);
+  const atmCeSellReq = useSellMargin(feed.underlying, expiry, base?.ceStrike ?? null, 'CE', topLots, atmLtp('CE'), !kotakReal);
+  const marginTitle = kotakReal ? 'Kotak has no basket-aware margin calculator: check margin at Kotak' : "Dhan's margin calculator for this sell";
 
   const ready = strikes !== null && lotSize !== null;
   const why = spot === null ? 'Waiting for a NIFTY price' : lotSize === null ? (kotakReal ? 'Waiting for Kotak contracts for this expiry' : 'Waiting for the lot size of this expiry') : null;
@@ -227,7 +231,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
                 className={cn(tradeBtn, 'h-9 text-xs bg-sky-600 hover:bg-sky-500')}>Buy</button>
             </div>
             <div className="grid grid-cols-2 gap-2 text-[10px] text-zinc-400 tabular-nums px-0.5 mt-0.5">
-              <div title={kotakReal ? 'Kotak has no basket-aware margin calculator: check margin at Kotak' : "Dhan's margin calculator for this sell"}>Margin: {kotakReal ? '—' : inr(sellReq)}</div>
+              <div title={marginTitle}>Margin: {kotakReal ? '—' : inr(sellReq)}</div>
               <div className="text-right" title="Premium to buy at the shown price">Premium: {inr(buyReq)}</div>
             </div>
           </div>
@@ -276,7 +280,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
                   className={cn(tradeBtn, 'h-10 text-sm bg-rose-600 hover:bg-rose-500 flex items-center justify-center gap-1')}>
                   <span>SELL PUT</span>
                 </button>
-                <span className="text-[11px] text-zinc-400 text-center mt-1 tabular-nums">{inr(calcOptionBuyReq(atmLtp('PE'), topLots, lotSize))}</span>
+                <span className="text-[11px] text-zinc-400 text-center mt-1 tabular-nums" title={marginTitle}>Margin: {kotakReal ? '—' : inr(atmPeSellReq)}</span>
               </div>
               <div className="flex justify-center"><Stepper lots={topLots} lotSize={lotSize} onChange={onTopLotsChange} label="ATM" /></div>
               <div className="flex flex-col items-center">
@@ -286,7 +290,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
                   className={cn(tradeBtn, 'h-10 text-sm bg-sky-600 hover:bg-sky-500 flex items-center justify-center gap-1')}>
                   <span>SELL CALL</span>
                 </button>
-                <span className="text-[11px] text-zinc-400 text-center mt-1 tabular-nums">{inr(calcOptionBuyReq(atmLtp('CE'), topLots, lotSize))}</span>
+                <span className="text-[11px] text-zinc-400 text-center mt-1 tabular-nums" title={marginTitle}>Margin: {kotakReal ? '—' : inr(atmCeSellReq)}</span>
               </div>
             </div>
           </div>

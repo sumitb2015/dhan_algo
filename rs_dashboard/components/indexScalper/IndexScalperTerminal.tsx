@@ -43,7 +43,10 @@ import {
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
 
-const LAYOUT_KEY = 'indexScalper.layout.v1';
+// v2: v1 could hold an ATM pin taken before any spot was known (the middle of the strike list, e.g. 24200). v1 is
+// read for the layout, instruments and timeframes only; its option strikes go back to ATM.
+const LAYOUT_KEY = 'indexScalper.layout.v2';
+const LAYOUT_KEY_V1 = 'indexScalper.layout.v1';
 /** Default panes: the underlying, and its ATM CE (strike 0 resolves to ATM once, then stays pinned). */
 const DEFAULT_PANES: [PaneCfg, PaneCfg] = [
   { source: { kind: 'underlying' }, interval: '5' },
@@ -59,7 +62,7 @@ function validPane(x: unknown, fallback: PaneCfg): PaneCfg {
   const src = c?.source as PaneCfg['source'] | undefined;
   if (src?.kind === 'underlying') return { source: src, interval };
   if (src?.kind === 'option' && (src.type === 'CE' || src.type === 'PE') && Number.isFinite(src.strike)) {
-    return { source: { kind: 'option', type: src.type, strike: src.strike }, interval };
+    return { source: { kind: 'option', type: src.type, strike: src.auto ? 0 : src.strike }, interval };
   }
   return { ...fallback, interval };
 }
@@ -202,14 +205,23 @@ export default function IndexScalperTerminal() {
     setSimReady(true);
     const sp = loadJson<{ day: string; spots: Record<string, number> } | null>(SPOT_KEY, null);
     if (sp && sp.day === istDayKey()) setEntrySpots(sp.spots);
-    const lay = loadJson<{ layout?: unknown; panes?: unknown[] } | null>(LAYOUT_KEY, null);
+    const layV2 = loadJson<{ layout?: unknown; panes?: unknown[] } | null>(LAYOUT_KEY, null);
+    const lay = layV2 ?? loadJson<{ layout?: unknown; panes?: unknown[] } | null>(LAYOUT_KEY_V1, null);
     if (lay) {
       if (lay.layout === 1 || lay.layout === 2) setLayout(lay.layout);
-      if (Array.isArray(lay.panes)) setPanes([validPane(lay.panes[0], DEFAULT_PANES[0]), validPane(lay.panes[1], DEFAULT_PANES[1])]);
+      if (Array.isArray(lay.panes)) {
+        const atmOnly = (x: unknown) => (layV2 ? x : { ...(x as object), source: { ...((x as PaneCfg)?.source ?? {}), auto: true } });
+        setPanes([validPane(atmOnly(lay.panes[0]), DEFAULT_PANES[0]), validPane(atmOnly(lay.panes[1]), DEFAULT_PANES[1])]);
+      }
     }
     setLayoutReady(true);
   }, []);
-  useEffect(() => { if (layoutReady) savePref(LAYOUT_KEY, JSON.stringify({ layout, panes })); }, [layout, panes, layoutReady]);
+  // An ATM pin the pane made itself is saved as ATM (0), so the next session resolves today's ATM; a picked strike is kept.
+  useEffect(() => {
+    if (!layoutReady) return;
+    const saved = panes.map(c => (c.source.kind === 'option' && c.source.auto ? { ...c, source: { kind: 'option', type: c.source.type, strike: 0 } } : c));
+    savePref(LAYOUT_KEY, JSON.stringify({ layout, panes: saved }));
+  }, [layout, panes, layoutReady]);
   const onPaneCfg = useCallback((i: number, cfg: PaneCfg) => {
     setPanes(ps => {
       const cur = ps[i];
@@ -218,6 +230,8 @@ export default function IndexScalperTerminal() {
       next[i] = cfg;
       return next;
     });
+    // A newly chosen instrument is shown auto-scaled: the shared "auto" switch goes back on (the pane fits itself).
+    setAutoScale(true);
   }, []);
   const onPaneStatus = useCallback((i: number, st: PaneStatus) => {
     setPaneStatus(ps => {

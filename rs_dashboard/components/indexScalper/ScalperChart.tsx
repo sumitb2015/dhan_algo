@@ -85,6 +85,9 @@ interface Props {
   tickSize?: number;
   /** localStorage key for this chart's drawings, read at mount (remount the chart, via `key`, to switch it). */
   drawKey?: string;
+  /** What is plotted (instrument | contract | interval). When it changes, the view is fitted once its bars land: price
+   *  axis back on auto-scale, time axis on the chosen range (1D / 1W ... button) or, with none chosen, all the bars. */
+  viewKey?: string;
 }
 
 interface Hover { o: number; h: number; l: number; c: number; t: number }
@@ -100,7 +103,8 @@ function istLabel(shifted: number): string {
 
 /** Split a coloured line into one series per colour, blank where the colour differs, so a flip leaves a gap instead of a diagonal. */
 /** Whole rupees with Indian grouping ("+9,120", "-2,640"), as the TP / SL / position chips show them. */
-const inrWhole = (n: number) => Math.round(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+// `|| 0` turns a rounded -0 into 0: a flat leg read "+-0 INR".
+const inrWhole = (n: number) => (Math.round(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
 
 /** One indicator series as chart points: whitespace for a null, a per-point colour where the line has one. */
 function seriesData(s: OutSeries, bars: Bar[]) {
@@ -117,7 +121,7 @@ function ScalperChart(props: Props) {
     onExitLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
-    premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY,
+    premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey,
   } = props;
   const drawKeyRef = useRef(drawKeyProp);
   const tickSize = tickProp ?? (underlying === 'CRUDEOILM' ? 1.0 : 0.05);
@@ -413,6 +417,28 @@ function ScalperChart(props: Props) {
     const end = b[b.length - 1].t + IST_SHIFT;
     try { chart.timeScale().setVisibleRange({ from: (end - focus.seconds) as UTCTimestamp, to: (end + 20 * 60) as UTCTimestamp }); } catch { /* range outside data */ }
   }, [focus, firstT]);
+
+  // Fit the view to a newly chosen instrument / strike / timeframe, once its bars are drawn (declared after the data
+  // effect, so setData has run). Ticks never re-fit: only a new viewKey does.
+  const fittedRef = useRef<string | undefined>(undefined);
+  const hasBars = bars.length > 0;
+  useEffect(() => {
+    const chart = chartRef.current;
+    const b = barsRef.current;
+    if (!chart || !hasBars || b.length === 0 || fittedRef.current === viewKey) return;
+    fittedRef.current = viewKey;
+    // A price axis dragged by hand turns lightweight-charts' auto-scale off: turn it back on for the new instrument.
+    chart.priceScale('right').applyOptions({ autoScale: true });
+    const ts = chart.timeScale();
+    try {
+      if (focus) {
+        const end = b[b.length - 1].t + IST_SHIFT;
+        ts.setVisibleRange({ from: (end - focus.seconds) as UTCTimestamp, to: (end + 20 * 60) as UTCTimestamp });
+      } else {
+        ts.fitContent();
+      }
+    } catch { ts.fitContent(); }
+  }, [viewKey, hasBars, focus]);
 
   // ── position lines ────────────────────────────────────────────────
   const placed = useMemo(() => legs.map(leg => ({ leg, anchor: legAnchor(leg, entrySpots[leg.securityId], { premium }), pnl: legPnl(leg) })), [legs, entrySpots, premium]);
@@ -1294,6 +1320,7 @@ function ScalperChart(props: Props) {
           <div
             key={p.leg.id}
             data-testid="position-chip"
+            data-side={isLong ? 'long' : 'short'}
             style={{ top: top - 11 }}
             className="absolute right-[84px] z-[55] flex items-center gap-1.5 px-1.5 h-[24px] rounded border border-sky-500/70 bg-zinc-900 shadow-md font-mono text-[11px]"
           >
@@ -1343,7 +1370,7 @@ function ScalperChart(props: Props) {
             </button>
 
             {/* Lots quantity */}
-            <span className="h-[18px] px-1.5 flex items-center rounded bg-zinc-800/80 text-zinc-200 border border-zinc-700 text-[10px] font-semibold">
+            <span data-testid="position-lots" title={`${isLong ? 'Long' : 'Short'} ${lots} lot${lots === 1 ? '' : 's'} (${Math.abs(totalUnits)} units)`} className="h-[18px] px-1.5 flex items-center rounded bg-zinc-800/80 text-zinc-200 border border-zinc-700 text-[10px] font-semibold">
               {lots}
             </span>
 

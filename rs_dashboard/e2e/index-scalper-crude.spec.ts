@@ -56,7 +56,8 @@ async function mockCrudeApi(page: Page, state: MockState) {
           success: true,
           data: {
             lotSize: 1,
-            future: { dhanId: '9001', kotakSymbol: 'CRUDEOILM26DECFUT', expiry: '2026-12-18', ltp: 6125 },
+            // the shape scripts/tools/scalper_api.py `lookup` returns
+            future: { securityId: '9001', expiry: '2026-12-18' },
             strikes,
           },
         });
@@ -100,20 +101,27 @@ async function mockCrudeApi(page: Page, state: MockState) {
       return json(route, { success: true, order_id: '8001' });
     }
     if (p === '/api/index-scalper/kotak-order') {
+      if (method === 'GET') return json(route, { success: true, day: '2026-11-25', records: [] });
       state.calls.push({ path: p, body });
       return json(route, { success: true, order_id: 'K8001' });
     }
-    if (p === '/api/index-scalper/kotak-contracts') {
+    // Kotak contracts, in the shapes /api/scalper/kotak/lookup and /symbol-lookup return
+    if (p === '/api/scalper/kotak/lookup') {
       return json(route, {
         success: true,
-        expiry: '2026-12-15',
-        lotSize: 10,
-        symbols: {
-          CRUDEOILM26DECFUT: { strike: 0, side: 'FUT', expiry: '2026-12-18' },
+        data: {
+          lotSize: 10, exchangeSegment: 'mcx_fo', future: { trading_symbol: 'CRUDEOILM26DECFUT' },
+          strikes: Object.fromEntries(Object.keys(CRUDE_IDS).map(k => [k, { ceSymbol: `CRUDEOILM26DEC${k}CE`, peSymbol: `CRUDEOILM26DEC${k}PE` }])),
         },
-        future: { symbol: 'CRUDEOILM26DECFUT', expiry: '2026-12-18' },
       });
     }
+    if (p === '/api/scalper/kotak/symbol-lookup') {
+      return json(route, { success: true, data: { CRUDEOILM26DECFUT: { expiry: '2026-12-18', strike: 0, side: 'FUT' } } });
+    }
+    if (p === '/api/scalper/kotak/funds') return json(route, { success: true, data: { availabelBalance: 1000000, availableBalance: 1000000, utilizedAmount: 0 } });
+    if (p === '/api/scalper/kotak/positions' || p === '/api/index-scalper/kotak-positions') return json(route, { success: true, data: [] });
+    if (p === '/api/scalper/kotak/orders' && method === 'GET') return json(route, { success: true, data: [] });
+    if (p === '/api/equity-order/holdings') return json(route, { success: true, data: {} });
     if (method === 'POST' && (p === '/api/live-indices' || p === '/api/live-equity')) return json(route, { success: true });
     if (method !== 'GET') {
       state.blocked.push({ path: p, body });
@@ -148,8 +156,8 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
     await crudeBtn.click();
 
     // Verify Buy FUT and Sell FUT buttons appear in toolbar
-    await expect(page.getByRole('button', { name: 'Buy FUT' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Sell FUT' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Buy FUT', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sell FUT', exact: true })).toBeVisible();
 
     // Verify option chain displays the pinned FUT row
     await page.getByRole('button', { name: 'Option chain' }).click();
@@ -164,9 +172,11 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
     await expect(crudeBtn).toBeDisabled();
     await expect(page.getByRole('button', { name: 'NIFTY' })).toBeDisabled();
 
+    // One-click (Scalper) mode: without it Buy FUT only opens the order ticket
+    await page.getByRole('button', { name: 'Scalper', exact: true }).click();
     // Click Buy FUT in Dhan REAL mode: should send fast-order with exchangeSegment: 'MCX_COMM' and quantity: 1 lot
-    await page.getByRole('button', { name: 'Buy FUT' }).click();
-    expect(state.calls.length).toBe(1);
+    await page.getByRole('button', { name: 'Buy FUT', exact: true }).first().click(); // the toolbar's (the Scalper window has one too)
+    await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
     const dhanCall = state.calls[0];
     expect(dhanCall.path).toBe('/api/scalper/fast-order');
     expect(dhanCall.body?.exchangeSegment).toBe('MCX_COMM');
@@ -189,8 +199,9 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
     await expect(page.locator('[data-testid="index-scalper"]')).toBeVisible();
 
     // Select Kotak broker
-    await page.getByRole('button', { name: /dhan/i }).click();
-    await page.getByRole('option', { name: /Kotak/i }).click();
+    const brokerSel = page.getByLabel('Broker for new orders');
+    await expect(brokerSel).toBeEnabled({ timeout: 30_000 });
+    await brokerSel.selectOption('kotak');
 
     // Select CRUDEOILM
     await page.getByRole('button', { name: 'CRUDEOILM' }).click();
@@ -199,9 +210,10 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
     await page.getByRole('button', { name: 'REAL' }).click();
     await page.getByRole('button', { name: /Arm REAL on Kotak/i }).click();
 
+    await page.getByRole('button', { name: 'Scalper', exact: true }).click();
     // Click Buy FUT in Kotak REAL mode: should send kotak-order with exchange: 'mcx_fo' and quantity: 10 barrels
-    await page.getByRole('button', { name: 'Buy FUT' }).click();
-    expect(state.calls.length).toBe(1);
+    await page.getByRole('button', { name: 'Buy FUT', exact: true }).first().click(); // the toolbar's (the Scalper window has one too)
+    await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
     const kotakCall = state.calls[0];
     expect(kotakCall.path).toBe('/api/index-scalper/kotak-order');
     expect(kotakCall.body?.tradingSymbol).toBe('CRUDEOILM26DECFUT');

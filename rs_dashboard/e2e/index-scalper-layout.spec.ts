@@ -8,6 +8,9 @@ import { installSessionClock, sessionIso } from './isxClock';
 interface Call { path: string; body: Record<string, unknown> | null }
 const SPOT = 25350;
 const IDS: Record<string, [string, string]> = { '25300': ['301', '401'], '25350': ['302', '402'], '25400': ['303', '403'] };
+// The expiry lists many more strikes than the bridge ticks: 23000-27000 step 50 (middle 25000, which is NOT ATM).
+const ALL_STRIKES = Array.from({ length: 81 }, (_, i) => 23000 + i * 50);
+const idsOf = (k: number): [string, string] => IDS[String(k)] ?? [`9${k}1`, `9${k}2`];
 
 function bars(level: number, swing: number) {
   const start = Date.UTC(2026, 10, 20, 3, 45, 0) / 1000;
@@ -17,7 +20,7 @@ function bars(level: number, swing: number) {
   });
 }
 
-interface State { calls: Call[]; blocked: Call[]; candleReqs: string[]; positions: Record<string, unknown>[]; orders: Record<string, unknown>[] }
+interface State { calls: Call[]; blocked: Call[]; candleReqs: string[]; positions: Record<string, unknown>[]; orders: Record<string, unknown>[]; noSpot?: boolean }
 
 async function mockApi(page: Page, state: State) {
   await page.route('**/api/**', async (route: Route) => {
@@ -33,11 +36,12 @@ async function mockApi(page: Page, state: State) {
     }
     if (p === '/api/options/expiries') return json(route, { success: true, data: ['2026-12-01'] });
     if (p === '/api/scalper/lookup') {
-      const strikes = Object.fromEntries(Object.entries(IDS).map(([k, [ce, pe]]) => [k, { ceId: ce, peId: pe }]));
+      const strikes = Object.fromEntries(ALL_STRIKES.map(k => { const [ce, pe] = idsOf(k); return [String(k), { ceId: ce, peId: pe }]; }));
       return json(route, { success: true, data: { lotSize: 65, strikes } });
     }
     if (p === '/api/options/live') {
       if (method === 'POST') return json(route, { success: true });
+      if (state.noSpot) return json(route, { success: true, status: { status: 'STARTING' }, quotes: null });
       const strikes = Object.fromEntries(Object.keys(IDS).map(k => [k, {
         strike: Number(k),
         ce: { ltp: 210.5, oi: 1_200_000, oi_chg_pct: 1, change_pct: -3, buildup: 'SB' },
@@ -78,6 +82,47 @@ async function dragFrom(page: Page, locator: ReturnType<Page['locator']>, dy: nu
 test.describe('Index Scalper layout + option charts', () => {
   test.beforeEach(async ({ page }) => { await installSessionClock(page); });
 
+  test('ATM waits for a price (never the middle of the strike list), and the strike list shows every strike', async ({ page, context }) => {
+    const state = newState();
+    state.noSpot = true; // the bridge has not sent a price yet, and there is no chain snapshot
+    await signIn(context);
+    await page.addInitScript(() => {
+      // a pane config saved before this fix, pinned to a guessed strike: it must go back to ATM
+      if (!localStorage.getItem('indexScalper.layout.v2')) {
+        localStorage.setItem('indexScalper.layout.v1', JSON.stringify({ layout: 2, panes: [
+          { source: { kind: 'underlying' }, interval: '5' }, { source: { kind: 'option', type: 'CE', strike: 24200 }, interval: '3' },
+        ] }));
+      }
+    });
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    const right = page.getByTestId('chart-pane-1');
+    await expect(right).toBeVisible({ timeout: 60_000 });
+    await expect(right).toContainText('Waiting for the NIFTY price to pick the ATM strike', { timeout: 30_000 });
+    await page.waitForTimeout(1500);
+    expect(state.candleReqs.filter(q => q.includes('kind=option'))).toEqual([]); // nothing pinned, nothing loaded
+
+    state.noSpot = false; // NIFTY at 25350 arrives
+    await expect(right.getByLabel('Chart 2 strike')).toHaveValue('25350', { timeout: 30_000 });
+    await expect(right.getByRole('button', { name: '3m', exact: true })).toHaveAttribute('aria-pressed', 'true'); // v1 timeframe kept
+    expect(state.candleReqs.some(q => q.includes('securityId=250001'))).toBe(false); // 25000 (list middle) never charted
+    expect(state.candleReqs.some(q => q.includes('securityId=242001'))).toBe(false); // v1's 24200 never charted
+
+    // every strike of the expiry, ATM marked
+    const opts = right.getByLabel('Chart 2 strike').locator('option');
+    await expect(opts).toHaveCount(ALL_STRIKES.length);
+    await expect(opts.first()).toHaveText('23000');
+    await expect(opts.last()).toHaveText('27000');
+    await expect(right.getByLabel('Chart 2 strike').locator('option:checked')).toHaveText('25350 (ATM)');
+
+    // a picked far strike is a user choice: kept across a reload; the pane's own ATM pin is saved as ATM
+    await right.getByLabel('Chart 2 strike').selectOption('23500');
+    await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('indexScalper.layout.v2') ?? '{}').panes?.[1]?.source?.strike)).toBe(23500);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-1').getByLabel('Chart 2 strike')).toHaveValue('23500', { timeout: 60_000 });
+    expect(state.blocked).toEqual([]);
+  });
+
   test('2-chart layout: right pane plots the ATM CE premium, picks a PE and its own timeframe, survives a reload', async ({ page, context }) => {
     const state = newState();
     await signIn(context);
@@ -94,7 +139,11 @@ test.describe('Index Scalper layout + option charts', () => {
     await expect.poll(() => state.candleReqs.some(q => q.includes('kind=option') && q.includes('securityId=302'))).toBe(true);
     await expect(right.locator('canvas').first()).toBeVisible();
 
+    // choosing an instrument shows it auto-scaled, even after auto-scale was turned off
+    await page.getByRole('button', { name: 'auto', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'auto', exact: true })).toHaveAttribute('aria-pressed', 'false');
     await right.getByRole('button', { name: 'PE', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'auto', exact: true })).toHaveAttribute('aria-pressed', 'true');
     await right.getByLabel('Chart 2 strike').selectOption('25400');
     await expect(right).toContainText('NIFTY 25400 PE');
     await expect.poll(() => state.candleReqs.some(q => q.includes('securityId=403'))).toBe(true);

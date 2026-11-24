@@ -120,7 +120,9 @@ test.describe('Index Scalper', () => {
     const chip = page.getByTestId('position-chip');
     await expect(chip).toBeVisible({ timeout: 15_000 });
     await expect(chip).toContainText('PE 25350');
-    await expect(chip).toContainText('65');
+    await expect(chip).toHaveAttribute('data-side', 'long');
+    await expect(chip.getByTestId('position-lots')).toHaveText('1'); // 1 lot of 65
+    await expect(chip.getByTestId('position-lots')).toHaveAttribute('title', 'Long 1 lot (65 units)');
     await expect(chip).toContainText('SIM');
 
     await page.getByRole('button', { name: 'Exit PE 25350' }).click();
@@ -180,7 +182,9 @@ test.describe('Index Scalper', () => {
     const chip = page.getByTestId('position-chip');
     await expect(chip).toBeVisible({ timeout: 15_000 });
     await expect(chip).toContainText('PE 25350');
-    await expect(chip).toContainText('@ 200.00');
+    // the broker's whole position (715 = 11 lots) is drawn; Exit below still closes only this page's 65
+    await expect(chip.getByTestId('position-lots')).toHaveText('11');
+    await expect(chip).toContainText('+21,414 INR');
     await expect(page.getByTestId('day-pnl')).toHaveText('21,414.25'); // 715 x (229.95 - 200), live LTP
 
     await page.getByRole('button', { name: 'Exit PE 25350' }).click();
@@ -279,7 +283,9 @@ test.describe('Index Scalper', () => {
     await row.getByRole('button', { name: 'Sell 25350 PE' }).click();
     const chip = page.getByTestId('position-chip');
     await expect(chip).toBeVisible({ timeout: 15_000 });
-    await expect(chip).toHaveText(/^S\s*PE 25350\s*65\b/); // short ("S"), 1 lot of 65
+    await expect(chip).toHaveAttribute('data-side', 'short');
+    await expect(chip).toContainText('PE 25350');
+    await expect(chip.getByTestId('position-lots')).toHaveAttribute('title', 'Short 1 lot (65 units)');
     expect(state.calls).toEqual([]);
     expect(state.blocked).toEqual([]);
   });
@@ -328,17 +334,19 @@ test.describe('Index Scalper', () => {
     await page.getByRole('button', { name: 'Scalper' }).click();
     const w = page.getByTestId('dhan-scalper-widget');
     await expect(w).toBeVisible();
-    // Dhan's margin calculator, not a formula
-    await expect(w).toContainText('Margin: ₹2,15,121.01', { timeout: 15_000 });
+    // the top row SELLs: under each button is Dhan's margin calculator, not a premium or a formula
+    await expect(w.getByText('Margin: ₹2,15,121.01')).toHaveCount(2, { timeout: 15_000 });
+    await expect(w).not.toContainText('₹14,946.75'); // the PE's buy premium (229.95 x 65) is not a sell requirement
 
     // +/- must register even while live ticks re-render the widget
     await w.getByRole('button', { name: 'More lots (ATM)' }).click();
     await expect(w).toContainText('Lot: 2');
-    await w.getByRole('button', { name: /^Buy ATM call/ }).click();
+    await w.getByRole('button', { name: /^Sell ATM call/ }).click();
     const chip = page.getByTestId('position-chip');
     await expect(chip).toBeVisible({ timeout: 15_000 });
     await expect(chip).toContainText('CE 25350');
-    await expect(chip).toContainText('130'); // 2 lots x 65
+    await expect(chip).toHaveAttribute('data-side', 'short');
+    await expect(chip.getByTestId('position-lots')).toHaveAttribute('title', 'Short 2 lots (130 units)'); // 2 lots x 65
 
     // X closes the widget AND disarms one-click: the chain's B opens the ticket again instead of trading
     await w.getByRole('button', { name: 'Close scalper' }).click();
@@ -367,10 +375,10 @@ test.describe('Index Scalper', () => {
     await page.getByRole('button', { name: 'Scalper' }).click();
     const w = page.getByTestId('dhan-scalper-widget');
     await expect(w).toContainText('08 DEC');
-    await expect(w.getByRole('button', { name: /^Buy ATM put/ })).toBeEnabled({ timeout: 15_000 });
-    await w.getByRole('button', { name: /^Buy ATM put/ }).click();
+    await expect(w.getByRole('button', { name: /^Sell ATM put/ })).toBeEnabled({ timeout: 15_000 });
+    await w.getByRole('button', { name: /^Sell ATM put/ }).click();
     await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
-    expect(state.calls[0].body).toMatchObject({ securityId: '4028', quantity: 65, side: 'BUY', orderType: 'MARKET', source: 'isx' }); // the 08-Dec contract
+    expect(state.calls[0].body).toMatchObject({ securityId: '4028', quantity: 65, side: 'SELL', orderType: 'MARKET', source: 'isx' }); // the 08-Dec contract
     expect(state.blocked).toEqual([]);
   });
 

@@ -25,8 +25,6 @@ import { cn } from '@/lib/utils';
 export interface PaneCfg { source: ChartSource; interval: Interval }
 
 export const INTERVALS: Interval[] = ['1', '3', '5', '15'];
-/** Strikes offered in the picker on each side of ATM (the bridge ticks 35 around ATM; further ones get no live bars). */
-const PICK_WINGS = 20;
 
 type ChartOrderReq = { side: 'BUY' | 'SELL'; price: number; lots: number; orderType?: 'LIMIT' | 'STOP_LOSS' };
 
@@ -77,21 +75,26 @@ function ChartPane(p: Props) {
   const { index, cfg, onCfgChange, onStatus, underlying, feed } = p;
   const { source, interval } = cfg;
 
+  // ATM reference: the live spot, else the chain snapshot's (market closed / bridge not up yet). With neither, an ATM
+  // pane waits: it never pins a guessed strike.
+  const spot = feed.spot ?? feed.chain?.spot ?? null;
+  const needsSpot = source.kind === 'option' && !feed.strikeIds.has(source.strike);
   const resolved = useMemo(
-    () => resolveSource(source, underlying, feed.strikeIds, feed.spot, feed.kotak?.strikes ?? null),
+    () => resolveSource(source, underlying, feed.strikeIds, spot, feed.kotak?.strikes ?? null),
     // Spot only matters until the strike is pinned (below); a strike already listed ignores it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [source, underlying, feed.strikeIds, feed.kotak?.strikes, source.kind === 'option' && !feed.strikeIds.has(source.strike) ? feed.spot : null],
+    [source, underlying, feed.strikeIds, feed.kotak?.strikes, needsSpot ? spot : null],
   );
 
   // Pin the strike: a pane opened on "ATM" (or on a strike this expiry does not list) keeps the strike it resolved to,
-  // so the chart does not hop to a new contract as spot moves.
+  // so the chart does not hop to a new contract as spot moves. `auto` = pinned by the pane, so a reload resolves ATM
+  // again instead of reopening yesterday's ATM.
   useEffect(() => {
     if (source.kind !== 'option' || resolved.strike === null || resolved.strike === source.strike) return;
-    onCfgChange(index, { ...cfg, source: { ...source, strike: resolved.strike } });
+    onCfgChange(index, { ...cfg, source: { kind: 'option', type: source.type, strike: resolved.strike, auto: true } });
   }, [resolved.strike, source, cfg, index, onCfgChange]);
 
-  const { bars, loading, error, noLiveTicks } = useChartBars(underlying, resolved, interval, p.days, p.refreshTick, feed);
+  const { bars, loading, error, noLiveTicks, tag: viewKey } = useChartBars(underlying, resolved, interval, p.days, p.refreshTick, feed);
 
   const lastT = bars.length ? bars[bars.length - 1].t : null;
   const date = lastT !== null ? toIsoDate(String(lastT)) : null;
@@ -120,19 +123,15 @@ function ChartPane(p: Props) {
   const paneLegs = useMemo(() => paneLegsAll, [legsSig]);
   const paneOrders = useMemo(() => p.openOrders.filter(o => orderOnChart(o, resolved)), [p.openOrders, resolved]);
 
-  // Strike picker: ATM +- PICK_WINGS of the expiry's strikes, plus the pinned one.
-  const strikes = useMemo(() => [...feed.strikeIds.keys()].sort((a, b) => a - b), [feed.strikeIds]);
-  const atm = useMemo(() => nearestStrike(strikes, feed.spot), [strikes, feed.spot]);
-  const pickList = useMemo(() => {
-    if (atm === null) return strikes;
-    const i = strikes.indexOf(atm);
-    const out = strikes.slice(Math.max(0, i - PICK_WINGS), i + PICK_WINGS + 1);
-    if (resolved.strike !== null && !out.includes(resolved.strike)) out.push(resolved.strike);
-    return out.sort((a, b) => a - b);
-  }, [strikes, atm, resolved.strike]);
+  // Strike picker: every strike the expiry lists. Strikes far from ATM get history only (the bridge ticks 35 around ATM).
+  const pickList = useMemo(() => [...feed.strikeIds.keys()].sort((a, b) => a - b), [feed.strikeIds]);
+  const atm = useMemo(() => nearestStrike(pickList, spot), [pickList, spot]);
 
   const setSource = (s: ChartSource) => onCfgChange(index, { ...cfg, source: s });
-  const pickType = (t: 'CE' | 'PE') => setSource({ kind: 'option', type: t, strike: resolved.strike ?? (source.kind === 'option' ? source.strike : 0) });
+  // CE <-> PE keeps the strike (and whether it was the pane's own ATM pin); Index -> option starts at ATM.
+  const pickType = (t: 'CE' | 'PE') => setSource(source.kind === 'option'
+    ? { ...source, type: t }
+    : { kind: 'option', type: t, strike: 0 });
 
   const seg = 'h-6 px-2 text-[11px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60';
   const tf = 'h-6 px-1.5 rounded text-[11px] font-semibold text-zinc-300 hover:bg-zinc-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60';
@@ -158,10 +157,10 @@ function ChartPane(p: Props) {
             aria-label={`Chart ${index + 1} strike`}
             value={resolved.strike ?? ''}
             disabled={pickList.length === 0}
-            onChange={e => setSource({ kind: 'option', type: resolved.type ?? 'CE', strike: Number(e.target.value) })}
+            onChange={e => setSource({ kind: 'option', type: resolved.type ?? 'CE', strike: Number(e.target.value) })} // a user pick: kept across reloads
             className="h-6 px-1 rounded border border-zinc-700 bg-zinc-900 text-[11px] font-mono text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60"
           >
-            {pickList.length === 0 && <option value="">loading…</option>}
+            {(pickList.length === 0 || resolved.strike === null) && <option value="">{pickList.length === 0 ? 'loading…' : 'ATM…'}</option>}
             {pickList.map(s => <option key={s} value={s}>{s}{s === atm ? ' (ATM)' : ''}</option>)}
           </select>
         )}
@@ -208,10 +207,13 @@ function ChartPane(p: Props) {
           premium={isOption}
           tickSize={resolved.tick}
           drawKey={drawKey}
+          viewKey={viewKey}
         />
         {bars.length === 0 && !loading && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500 pointer-events-none">
-            {isOption && !resolved.dhanId ? 'Waiting for the option contract…' : `No candles to show${error ? '' : ' yet'}.`}
+            {isOption && resolved.strike === null && pickList.length > 0
+              ? `Waiting for the ${underlying} price to pick the ATM strike…`
+              : isOption && !resolved.dhanId ? 'Waiting for the option contract…' : `No candles to show${error ? '' : ' yet'}.`}
           </div>
         )}
       </div>

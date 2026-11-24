@@ -297,7 +297,7 @@ test.describe('Index Scalper Kotak order route refuses bad orders before reachin
 
   for (const [name, patch, message] of [
     ['no idempotency key', { idempotencyKey: undefined }, /idempotencyKey/],
-    ['a non-NIFTY contract', { tradingSymbol: 'BANKNIFTY26120550000CE' }, /NIFTY contract/],
+    ['a non-NIFTY contract', { tradingSymbol: 'BANKNIFTY26120550000CE' }, /NIFTY or CRUDEOILM contract/],
     ['an unknown product', { product: 'CO' }, /Unsupported product/],
     ['no open/close intent', { intent: 'maybe' }, /intent/],
     ['a contract not in the Kotak cache', {}, /not in the Kotak instrument cache/],

@@ -9,7 +9,9 @@
 import { INSTRUMENTS, type Underlying } from './indexScalperInstrument.ts';
 import type { ScalperLeg } from './indexScalperPositions.ts';
 
-export type ChartSource = { kind: 'underlying' } | { kind: 'option'; type: 'CE' | 'PE'; strike: number };
+/** `strike: 0` means "ATM, not resolved yet". `auto` marks a strike the pane pinned itself from ATM (saved as 0, so a
+ *  reload resolves ATM again); a strike the user picked has no `auto` and is kept. */
+export type ChartSource = { kind: 'underlying' } | { kind: 'option'; type: 'CE' | 'PE'; strike: number; auto?: boolean };
 
 export interface StrikeIdsLike { ceId?: string; peId?: string }
 export interface KotakStrikeLike { ceSymbol?: string; peSymbol?: string }
@@ -26,10 +28,11 @@ export interface ResolvedSource {
   tick: number;
 }
 
-/** Nearest listed strike to `spot`; null without strikes or spot. */
+/** Nearest listed strike to `spot`; null without strikes or without a spot. Never a guess: the middle of an expiry's
+ *  strike list is far from ATM (24200 with NIFTY at 26000), and the pane pins whatever this returns. */
 export function nearestStrike(strikes: number[], spot: number | null): number | null {
   if (strikes.length === 0) return null;
-  if (spot === null || !Number.isFinite(spot) || spot <= 0) return strikes[Math.floor(strikes.length / 2)];
+  if (spot === null || !Number.isFinite(spot) || spot <= 0) return null;
   let best = strikes[0];
   for (const s of strikes) if (Math.abs(s - spot) < Math.abs(best - spot)) best = s;
   return best;

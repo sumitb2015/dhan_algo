@@ -14,12 +14,16 @@ import type { IndexScalperFeed } from './useIndexScalperFeed';
 
 export type Interval = '1' | '3' | '5' | '15';
 
+const EMPTY: Bar[] = [];
+
 export interface ChartBars {
   bars: Bar[];
   loading: boolean;
   error: string | null;
   /** Option pane: the bridge has no live price for this contract (outside its strike window, or not ticked yet). */
   noLiveTicks: boolean;
+  /** What `bars` are of (underlying | contract | interval): the chart fits its view once per new value. */
+  tag: string;
 }
 
 export function useChartBars(
@@ -37,7 +41,15 @@ export function useChartBars(
   const tag = `${underlying}|${contractId ?? ''}|${interval}`;
 
   const [history, setHistory] = useState<{ tag: string; bars: Bar[] } | null>(null);
-  const [bars, setBars] = useState<Bar[]>([]);
+  // Bars are stored with the tag they were built for: right after a switch the state still holds the previous
+  // contract's bars for one render, and those must never reach the chart as if they were the new contract's.
+  const [state, setState] = useState<{ tag: string; bars: Bar[] }>({ tag: '', bars: [] });
+  const setBars = (f: Bar[] | ((prev: Bar[]) => Bar[]), forTag: string) =>
+    setState(cur => {
+      const prev = cur.tag === forTag ? cur.bars : [];
+      const next = typeof f === 'function' ? f(prev) : f;
+      return next === cur.bars && cur.tag === forTag ? cur : { tag: forTag, bars: next };
+    });
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -71,12 +83,12 @@ export function useChartBars(
       // Switched contract / interval, history not loaded yet: show nothing rather than the old bars, and take no ticks.
       liveTagRef.current = null;
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setBars([]);
+      setBars([], tag);
       return;
     }
     const same = liveTagRef.current === tag;
     liveTagRef.current = tag;
-    setBars(prev => (same ? mergeHistory(history.bars, prev, Number(interval), Date.now() / 1000) : history.bars));
+    setBars(prev => (same ? mergeHistory(history.bars, prev, Number(interval), Date.now() / 1000) : history.bars), tag);
   }, [history, tag, interval]);
 
   // Live price: spot for the underlying; the option's live bridge LTP (never a snapshot or prev close) for an option.
@@ -85,11 +97,12 @@ export function useChartBars(
     if (livePrice === null || !(livePrice > 0) || feed.stale || feed.feedAgeSec === null) return;
     // Outside the market session a held-over price must not invent a candle.
     if (!inMarketSession(underlying, Date.now())) return;
-    setBars(prev => (liveTagRef.current === tag ? applyTick(prev, livePrice, Number(interval), Date.now() / 1000, underlying) : prev));
+    setBars(prev => (liveTagRef.current === tag ? applyTick(prev, livePrice, Number(interval), Date.now() / 1000, underlying) : prev), tag);
     // feed.stale / feedAgeSec are read as guards only: a new tick is what moves a bar.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [livePrice, feed.quotes, tag, interval, underlying]);
 
   const noLiveTicks = isOption && feed.quotes !== null && livePrice === null;
-  return { bars, loading, error, noLiveTicks };
+  const bars = state.tag === tag ? state.bars : EMPTY;
+  return { bars, loading, error, noLiveTicks, tag };
 }
