@@ -3,7 +3,7 @@
 // Positions come from the broker (REAL) or from the SIM ledger; both are normalised to ScalperLeg so the chart overlay and
 // the positions strip have one shape. Quantity is always UNITS (NSE index options: lots x lot size).
 
-import { parseTradingSymbol } from './positionLegs.ts';
+import { parseTradingSymbol, symbolMatchesUnderlying } from './positionLegs.ts';
 import { dedupePositions, positionProduct } from './positionProduct.ts';
 import { pnlMultiplier, type Underlying } from './indexScalperInstrument.ts';
 
@@ -126,9 +126,12 @@ export function parseScalperContract(tradingSymbol: string, underlying: Underlyi
   if (p && p.underlying === underlying && (p.type === 'CE' || p.type === 'PE')) {
     return { strike: p.strike, type: p.type };
   }
+  // Futures are traded on this page for CRUDEOILM only (NIFTY's chart is the index, not its future), so a NIFTY future
+  // held by a strategy never lands in this page's legs or P&L. The root must be followed by "-" or a digit
+  // (symbolMatchesUnderlying), so CRUDEOIL's full-size future and NIFTYNXT50 are never read as ours.
+  if (underlying !== 'CRUDEOILM') return null;
   const s = tradingSymbol.trim().toUpperCase();
-  // Check future: starts with the underlying root, followed by digits/hyphen, ending with FUT
-  if (s.startsWith(underlying) && (/-(?:FUT|\d{2}[A-Z]{3}\d{4}-FUT)$/.test(s) || /FUT$/.test(s))) {
+  if (symbolMatchesUnderlying(s, underlying) && s.startsWith(underlying) && /FUT$/.test(s)) {
     return { strike: 0, type: 'FUT' };
   }
   return null;

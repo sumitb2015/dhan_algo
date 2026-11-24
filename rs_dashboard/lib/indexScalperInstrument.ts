@@ -52,7 +52,8 @@ export const INSTRUMENTS: Record<Underlying, InstrumentSpec> = {
 export function dhanOrderQty(underlying: Underlying, lots: number, lotSize: number): number {
   if (lots <= 0) return 0;
   if (underlying === 'CRUDEOILM') return lots;
-  return lots * (lotSize > 0 ? lotSize : 65);
+  // No guessed lot size: 0 (refused by the caller) while the lookup has not answered.
+  return lotSize > 0 ? lots * lotSize : 0;
 }
 
 /** Kotak order quantity:
@@ -61,8 +62,8 @@ export function dhanOrderQty(underlying: Underlying, lots: number, lotSize: numb
  */
 export function kotakOrderQty(underlying: Underlying, lots: number, lotSize: number): number {
   if (lots <= 0) return 0;
-  if (underlying === 'CRUDEOILM') return lots * 10;
-  return lots * (lotSize > 0 ? lotSize : 65);
+  if (underlying === 'CRUDEOILM') return lots * (MCX_LOT_MULTIPLIER.CRUDEOILM ?? 10);
+  return lotSize > 0 ? lots * lotSize : 0;
 }
 
 /** P&L multiplier (rupees per point per netQty unit):
@@ -85,4 +86,28 @@ export function pnlMultiplier(underlying: Underlying, broker: string): number {
 export function displayLotUnits(underlying: Underlying, lotSize?: number | null): number {
   if (underlying === 'CRUDEOILM') return 10;
   return lotSize && lotSize > 0 ? lotSize : 65;
+}
+
+/** Contract units per lot for ORDER SIZING: CRUDEOILM 10 barrels; NIFTY the lot size the lookup returned for the expiry
+ *  on screen, null while it is unknown (no guessed lot size: the order is refused instead). */
+export function lotUnits(underlying: Underlying, lotSize: number | null | undefined): number | null {
+  if (underlying === 'CRUDEOILM') return MCX_LOT_MULTIPLIER.CRUDEOILM ?? 10;
+  return lotSize && lotSize > 0 ? lotSize : null;
+}
+
+/** Contract units (NIFTY units, CRUDEOILM barrels) in a quantity counted in the broker's own unit. `qtyMult` is a
+ *  leg's `mult` / pnlMultiplier: Dhan MCX quantities are LOTS (10), Kotak rows and SIM legs are units (1). */
+export function qtyUnits(qty: number, qtyMult = 1): number {
+  return Math.abs(qty) * (qtyMult > 0 ? qtyMult : 1);
+}
+
+/** Whole lots in a quantity counted in the broker's own unit, or null when the lot size is unknown or the quantity is
+ *  not a whole number of lots. Never rounded: an exit / bracket / reverse sized off a rounded figure could send more
+ *  than the position holds (a Kotak 2-lot crude position is netQty 20 barrels, i.e. 2 lots, never 20). */
+export function qtyLots(underlying: Underlying, qty: number, qtyMult: number, lotSize: number | null | undefined): number | null {
+  const per = lotUnits(underlying, lotSize);
+  if (per === null) return null;
+  const lots = qtyUnits(qty, qtyMult) / per;
+  const whole = Math.round(lots);
+  return whole >= 1 && Math.abs(lots - whole) < 1e-9 ? whole : null;
 }

@@ -30,7 +30,7 @@ import {
 import { istDateIso, isRegularSession } from '@/lib/nseHolidays';
 import { inMarketSession } from '@/lib/indexScalperSession';
 import {
-  INSTRUMENTS, dhanOrderQty, kotakOrderQty, pnlMultiplier, displayLotUnits, type Underlying,
+  INSTRUMENTS, dhanOrderQty, kotakOrderQty, pnlMultiplier, lotUnits, qtyLots, type Underlying,
 } from '@/lib/indexScalperInstrument';
 import {
   MAX_LOTS, applyFill, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, type ScalperLeg,
@@ -367,7 +367,8 @@ export default function IndexScalperTerminal() {
   // contract (expiry, strike, side). Only the expiry on screen is in the feed; anything else is unpriced (null).
   const kotakPrice = useCallback((info: KotakSymbolInfo): number | null => {
     if (info.side === 'FUT') {
-      return (info.expiry === feed.future?.expiry || info.expiry === feed.expiry) ? feed.future?.ltp ?? null : null;
+      // Only the future on screen has a price; another month's future (even one expiring with the options) has none.
+      return info.expiry === feed.future?.expiry ? feed.future?.ltp ?? null : null;
     }
     if (info.expiry !== feed.expiry) return null;
     const ids = feed.strikeIds.get(info.strike);
@@ -486,23 +487,26 @@ export default function IndexScalperTerminal() {
 
   const placeContract = useCallback(async (req: TicketRequest): Promise<Outcome> => {
     const f = feedRef.current;
-    const isCrude = underlying === 'CRUDEOILM';
     const isFut = req.contract.type === 'FUT';
-    const defaultLot = isCrude ? 1 : 65;
-    const size = orderUnits(req.lots, f.lotSize ?? defaultLot);
+    // The lookup that gives the lot size must have landed for the expiry on screen (f.lotSize is null until then):
+    // no guessed lot size, the order is refused instead.
+    const unitsPerLot = f.lotSize === null ? null : lotUnits(underlying, f.lotSize);
+    const size = orderUnits(req.lots, unitsPerLot);
     if (!size.ok) return { ok: false, text: size.error };
     const c = req.contract;
     if (!c.securityId && !c.tradingSymbol) return { ok: false, text: 'No contract identifier for this order' };
     // The security id was picked for one expiry; never send it under a ticket that now shows another (except futures).
     if (!isFut && c.expiry !== f.expiry) return { ok: false, text: `This ticket was opened for the ${c.expiry || 'previous'} expiry: reopen it from the chain` };
-    const live = (c.securityId ? f.ltpById.get(c.securityId) : null) ?? c.ltp ?? null;
+    // Live tick only (ltpById is built from the bridge's live chain): never the ticket's display price, which can be a
+    // REST snapshot or the previous close.
+    const live = c.securityId ? f.ltpById.get(c.securityId) ?? null : null;
     const symbol = isFut
       ? `${underlying}-${c.expiry}-FUT`
       : `${underlying}-${f.expiry}-${c.strike}-${c.type}`;
 
     if (!real) {
       if (req.orderType !== 'MARKET' && req.orderType !== 'LIMIT') return { ok: false, text: 'SIM fills market and marketable limit orders only' };
-      if (!(live && live > 0)) return { ok: false, text: 'No live price to fill the paper order' };
+      if (!(live && live > 0) || f.feedAgeSec === null) return { ok: false, text: 'No live price to fill the paper order' };
       if (f.stale) return { ok: false, text: 'Live prices are stale: not filling a paper order on an old price' };
       if (!f.marketOpen) return { ok: false, text: `${underlying === 'CRUDEOILM' ? 'MCX' : 'NSE'} is closed: paper orders fill only during the session` };
       let fillPx = live;
@@ -512,8 +516,7 @@ export default function IndexScalperTerminal() {
         if (!marketable) return { ok: false, text: `Limit ${lim} is not marketable at ${live.toFixed(2)} (SIM does not rest orders)` };
         fillPx = live;
       }
-      const simUnits = displayLotUnits(underlying, f.lotSize) * req.lots;
-      simFill(c, req.side, simUnits, fillPx, symbol);
+      simFill(c, req.side, size.units, fillPx, symbol);
       return { ok: true, text: `SIM ${req.side} ${req.lots} lot${req.lots > 1 ? 's' : ''} ${isFut ? 'FUT' : `${c.strike} ${c.type}`} @ ${fillPx.toFixed(2)}` };
     }
 
@@ -530,7 +533,8 @@ export default function IndexScalperTerminal() {
         ? (f.future?.kotakSymbol ?? c.tradingSymbol)
         : (c.type === 'CE' ? k.strikes.get(c.strike)?.ceSymbol : k.strikes.get(c.strike)?.peSymbol);
       if (!sym) return { ok: false, text: `No Kotak contract for ${isFut ? 'FUT' : `${c.strike} ${c.type}`} on ${c.expiry}` };
-      const kotakLot = isCrude ? 10 : (k.lotSize ?? 65);
+      const kotakLot = lotUnits(underlying, k.lotSize);
+      if (kotakLot === null) return { ok: false, text: 'Kotak lot size unknown for this contract: refusing the order' };
       const kQty = kotakOrderQty(underlying, req.lots, kotakLot);
       const before = legs.find(l => l.securityId === sym)?.netQty ?? 0;
       const out = await sendReal({
@@ -542,8 +546,10 @@ export default function IndexScalperTerminal() {
       void loadOrders();
       return out;
     }
-    if (!c.securityId) return { ok: false, text: 'No Dhan security id for this contract' };
-    const dQty = dhanOrderQty(underlying, req.lots, f.lotSize ?? defaultLot);
+    // A Dhan security id is numeric: a Kotak trading symbol sitting in the field must never reach Dhan's order route.
+    if (!c.securityId || !/^\d+$/.test(c.securityId)) return { ok: false, text: 'No Dhan security id for this contract' };
+    const dQty = dhanOrderQty(underlying, req.lots, unitsPerLot ?? 0);
+    if (!(dQty > 0)) return { ok: false, text: 'Lot size unknown' };
     const before = legs.find(l => l.securityId === c.securityId)?.netQty ?? 0;
     const out = await sendReal({
       securityId: c.securityId, quantity: dQty, side: req.side, orderType: req.orderType,
@@ -566,7 +572,7 @@ export default function IndexScalperTerminal() {
 
   // ── exits ──────────────────────────────────────────────────────────
   const exitSimLeg = useCallback((leg: ScalperLeg): Outcome => {
-    if (leg.ltp === null) return { ok: false, text: 'No live price to close the paper position' };
+    if (leg.ltp === null || feedRef.current.feedAgeSec === null) return { ok: false, text: 'No live price to close the paper position' };
     // Same rule as a paper entry: never book P&L on a price the feed stopped updating.
     if (feedRef.current.stale) return { ok: false, text: 'Live prices are stale: not closing a paper position on an old price' };
     if (!feedRef.current.marketOpen) return { ok: false, text: `${underlying === 'CRUDEOILM' ? 'MCX' : 'NSE'} is closed: paper positions close only during the session` };
@@ -574,7 +580,7 @@ export default function IndexScalperTerminal() {
     if (!sl || sl.netQty === 0) return { ok: true, text: 'Already flat' };
     simFill({ strike: sl.strike, type: sl.type, securityId: sl.securityId, ltp: leg.ltp, expiry: '' }, sl.netQty > 0 ? 'SELL' : 'BUY', Math.abs(sl.netQty), leg.ltp, sl.symbol);
     return { ok: true, text: `SIM closed ${sl.strike} ${sl.type} @ ${leg.ltp.toFixed(2)}` };
-  }, [sim.legs, simFill]);
+  }, [sim.legs, simFill, underlying]);
 
   /** Signed units this page's own (`isx`-tagged) orders filled today, per security + product, from Dhan's order book.
    *  null when the book cannot be read: an exit is then refused rather than sized off the broker's whole position. */
@@ -771,7 +777,7 @@ export default function IndexScalperTerminal() {
     const c: PickedContract = {
       strike: 0,
       type: 'FUT',
-      securityId: f.dhanId ?? f.kotakSymbol ?? 'FUT',
+      securityId: f.dhanId ?? f.kotakSymbol ?? null,
       ltp: f.ltp,
       expiry: f.expiry ?? feed.expiry,
       tradingSymbol: f.kotakSymbol ?? undefined,
@@ -786,7 +792,7 @@ export default function IndexScalperTerminal() {
     return {
       strike: 0,
       type: 'FUT',
-      securityId: f.dhanId ?? f.kotakSymbol ?? 'FUT',
+      securityId: f.dhanId ?? f.kotakSymbol ?? null,
       ltp: f.ltp,
       expiry: f.expiry ?? feed.expiry,
       tradingSymbol: f.kotakSymbol ?? undefined,
@@ -919,10 +925,12 @@ export default function IndexScalperTerminal() {
           ltp: req.leg.ltp ?? req.price,
         };
 
-    const lotSize = displayLotUnits(underlying, feed.lotSize);
-    const lots = underlying === 'CRUDEOILM'
-      ? Math.abs(req.leg.netQty)
-      : Math.max(1, Math.round(Math.abs(req.leg.netQty) / lotSize));
+    // netQty is in the broker's own unit (Dhan MCX: lots; Kotak / SIM / NSE: units): leg.mult converts it.
+    const lots = qtyLots(underlying, req.leg.netQty, req.leg.mult ?? 1, feed.lotSize);
+    if (lots === null) {
+      flash({ ok: false, text: `Cannot size the ${req.kind}: ${Math.abs(req.leg.netQty)} is not a whole number of lots (or the lot size is unknown)` });
+      return;
+    }
 
     const out = await placeContract({
       contract: c,
@@ -953,10 +961,12 @@ export default function IndexScalperTerminal() {
     if (ticketBusy || exitingId) return;
     const isLong = leg.netQty > 0;
     const revSide: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
-    const lotSize = displayLotUnits(underlying, feed.lotSize);
-    const curLots = underlying === 'CRUDEOILM'
-      ? Math.abs(leg.netQty)
-      : Math.max(1, Math.round(Math.abs(leg.netQty) / lotSize));
+    // netQty is in the broker's own unit (Dhan MCX: lots; Kotak / SIM / NSE: units): leg.mult converts it.
+    const curLots = qtyLots(underlying, leg.netQty, leg.mult ?? 1, feed.lotSize);
+    if (curLots === null) {
+      flash({ ok: false, text: `Cannot reverse: ${Math.abs(leg.netQty)} is not a whole number of lots (or the lot size is unknown)` });
+      return;
+    }
     const revLots = curLots * 2;
 
     // Clear any active brackets for this leg
@@ -976,7 +986,9 @@ export default function IndexScalperTerminal() {
     };
 
     if (!real || leg.sim) {
-      exitSimLeg(leg);
+      // Only open the other side once the close went through: otherwise "reverse" would double the position.
+      const closed = exitSimLeg(leg);
+      if (!closed.ok) { flash(closed); return; }
       const out = await placeContract({
         contract: c,
         side: revSide,
@@ -1217,6 +1229,7 @@ export default function IndexScalperTerminal() {
               onReversePosition={onReversePosition}
               underlying={underlying}
               feedLotSize={feed.lotSize}
+              orderQtyMult={real ? pnlMultiplier(underlying, broker) : 1}
             />
           )}
           {liveBars.length === 0 && !loadingBars && (
@@ -1286,6 +1299,7 @@ export default function IndexScalperTerminal() {
           expiry={ticket.expiry}
           lotSize={feed.lotSize}
           underlying={underlying}
+          broker={broker}
           real={real}
           available={funds.available}
           busy={ticketBusy}

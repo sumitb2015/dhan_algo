@@ -104,7 +104,7 @@ export default function OptionChainPanel({ feed, onPick, onTrade, oneClick, onCl
     return {
       strike: 0,
       type: 'FUT',
-      securityId: feed.future.dhanId ?? feed.future.kotakSymbol ?? 'FUT',
+      securityId: feed.future.dhanId ?? feed.future.kotakSymbol ?? null,
       ltp: feed.future.ltp,
       expiry: feed.future.expiry ?? feed.expiry,
       tradingSymbol: feed.future.kotakSymbol ?? undefined,

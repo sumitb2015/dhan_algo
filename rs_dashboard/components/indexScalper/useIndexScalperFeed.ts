@@ -159,10 +159,12 @@ export function useIndexScalperFeed(
   const KOTAK_RETRY_MS = 15_000;
 
   useEffect(() => {
+    // A Kotak future symbol from an earlier broker / underlying / expiry must never stand in for this one.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setKotakFutureSymbol(null);
     if (broker !== 'kotak' || !expiry || expiryOwner !== underlying) return;
     let dead = false;
     let done = false;
-    setKotakFutureSymbol(null);
     const futParam = dhanFuture?.expiry ? `&futureExpiry=${dhanFuture.expiry}` : '';
     const load = () => {
       if (done) return;
@@ -188,14 +190,20 @@ export function useIndexScalperFeed(
   }, [broker, underlying, expiry, expiryOwner, dhanFuture?.expiry]);
 
   useEffect(() => {
+    // Another underlying's symbol map must not be used for this one: drop it, then load once (retrying every 15 s
+    // only until a read succeeds).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setKotakSymbols(null);
     if (broker !== 'kotak') return;
     let dead = false;
+    let done = false;
     const load = () => {
+      if (done) return;
       fetch(`/api/scalper/kotak/symbol-lookup?underlying=${underlying}`)
         .then(r => r.json())
         .then((j: { success: boolean; error?: string; data?: Record<string, KotakSymbolInfo> }) => {
           if (dead) return;
-          if (j.success && j.data) { setKotakSymbols(j.data); setKotakSymbolsError(null); }
+          if (j.success && j.data) { done = true; setKotakSymbols(j.data); setKotakSymbolsError(null); }
           else setKotakSymbolsError(`Kotak symbols: ${j.error ?? 'lookup failed'} (retrying)`);
         })
         .catch(e => { if (!dead) setKotakSymbolsError(`Kotak symbols: ${String((e as Error)?.message ?? e)} (retrying)`); });
@@ -230,9 +238,11 @@ export function useIndexScalperFeed(
   const [snapshot, setSnapshot] = useState<LiveQuotes | null>(null);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
 
+  // LIVE prices only (the bridge's chain): SIM fills, SIM closes and leg P&L read this map, so a REST snapshot (or a
+  // previous close) must never land in it. Display-only fallbacks read `chain` instead.
   const ltpById = useMemo(() => {
     const m = new Map<string, number>();
-    const src = quotes ?? snapshot;
+    const src = quotes;
     if (!src) return m;
     for (const sd of Object.values(src.strikes ?? {})) {
       const ids = strikeIds.get(Number(sd.strike));
@@ -240,13 +250,11 @@ export function useIndexScalperFeed(
       if (ids.ceId && sd.ce?.ltp > 0) m.set(String(ids.ceId), sd.ce.ltp);
       if (ids.peId && sd.pe?.ltp > 0) m.set(String(ids.peId), sd.pe.ltp);
     }
-    // Also add the future's LTP if quoted
-    if (dhanFuture?.securityId) {
-      const futLtp = src.spot > 0 ? src.spot : 0;
-      if (futLtp > 0) m.set(dhanFuture.securityId, futLtp);
-    }
+    // CRUDEOILM only: the bridge's spot IS the option month's own future (the contract the lookup returns). NIFTY's spot
+    // is the index, not its future, so a NIFTY future gets no price here.
+    if (underlying === 'CRUDEOILM' && dhanFuture?.securityId && src.spot > 0) m.set(dhanFuture.securityId, src.spot);
     return m;
-  }, [quotes, snapshot, strikeIds, dhanFuture]);
+  }, [quotes, strikeIds, dhanFuture, underlying]);
 
   const hasLive = !!quotes;
   useEffect(() => {
@@ -277,7 +285,8 @@ export function useIndexScalperFeed(
   const spot = quotes && quotes.spot > 0 ? quotes.spot : null;
 
   const future = useMemo<FutureContractInfo | null>(() => {
-    if (!dhanFuture && !kotakFutureSymbol) return null;
+    // Futures trade on this page for CRUDEOILM only (see ltpById: NIFTY's spot is the index, not a futures price).
+    if (underlying !== 'CRUDEOILM' || (!dhanFuture && !kotakFutureSymbol)) return null;
     const src = quotes ?? snapshot;
     const futLtp = (dhanFuture?.securityId ? ltpById.get(dhanFuture.securityId) : null) ?? (src && src.spot > 0 ? src.spot : null);
     return {
@@ -286,7 +295,7 @@ export function useIndexScalperFeed(
       expiry: dhanFuture?.expiry ?? null,
       ltp: futLtp,
     };
-  }, [dhanFuture, kotakFutureSymbol, ltpById, quotes, snapshot]);
+  }, [underlying, dhanFuture, kotakFutureSymbol, ltpById, quotes, snapshot]);
 
   return {
     underlying,

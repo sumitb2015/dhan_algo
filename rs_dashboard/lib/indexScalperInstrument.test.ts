@@ -55,3 +55,25 @@ test('displayLotUnits: 65 for Nifty, 10 for Crude Mini', () => {
   assert.equal(displayLotUnits('NIFTY', 65), 65);
   assert.equal(displayLotUnits('CRUDEOILM'), 10);
 });
+
+test('qtyLots: a quantity in the broker\'s own unit -> whole lots, never rounded into a bigger order', async () => {
+  const { qtyLots, lotUnits } = await import('./indexScalperInstrument.ts');
+  // Dhan MCX netQty is LOTS (mult 10): 2 -> 2 lots.
+  assert.equal(qtyLots('CRUDEOILM', 2, 10, 1), 2);
+  // Kotak CRUDEOILM netQty is BARRELS (mult 1): 20 -> 2 lots, never 20 (the 10x bracket / reverse bug).
+  assert.equal(qtyLots('CRUDEOILM', -20, 1, null), 2);
+  // SIM crude legs are barrels too.
+  assert.equal(qtyLots('CRUDEOILM', 10, 1, null), 1);
+  // NIFTY units / lot size; unknown lot size or a partial lot is refused (null), not guessed.
+  assert.equal(qtyLots('NIFTY', 130, 1, 65), 2);
+  assert.equal(qtyLots('NIFTY', 130, 1, null), null);
+  assert.equal(qtyLots('NIFTY', 100, 1, 65), null);
+  assert.equal(qtyLots('CRUDEOILM', 15, 1, null), null);
+  assert.equal(lotUnits('NIFTY', null), null);
+  assert.equal(lotUnits('CRUDEOILM', null), 10);
+});
+
+test('order quantity helpers never guess a NIFTY lot size', () => {
+  assert.equal(dhanOrderQty('NIFTY', 2, 0), 0);
+  assert.equal(kotakOrderQty('NIFTY', 2, 0), 0);
+});

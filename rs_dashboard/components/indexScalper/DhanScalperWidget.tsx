@@ -139,7 +139,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
     return {
       strike: 0,
       type: 'FUT',
-      securityId: feed.future.dhanId ?? feed.future.kotakSymbol ?? 'FUT',
+      securityId: feed.future.dhanId ?? feed.future.kotakSymbol ?? null,
       ltp: feed.future.ltp,
       expiry: feed.future.expiry ?? feed.expiry,
       tradingSymbol: feed.future.kotakSymbol ?? undefined,
@@ -270,7 +270,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
                   title={`Sell ATM Put ${base?.peStrike ?? ''}`}
                   onClick={() => { if (base) void tradeAtm('PE'); }}
                   className={cn(tradeBtn, 'h-10 text-sm bg-rose-600 hover:bg-rose-500 flex items-center justify-center gap-1')}>
-                  <span>↓</span><span>PUT</span>
+                  <span>SELL PUT</span>
                 </button>
                 <span className="text-[11px] text-zinc-400 text-center mt-1 tabular-nums">{inr(calcOptionBuyReq(atmLtp('PE'), topLots, lotSize))}</span>
               </div>
@@ -280,7 +280,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
                   title={`Sell ATM Call ${base?.ceStrike ?? ''}`}
                   onClick={() => { if (base) void tradeAtm('CE'); }}
                   className={cn(tradeBtn, 'h-10 text-sm bg-sky-600 hover:bg-sky-500 flex items-center justify-center gap-1')}>
-                  <span>↑</span><span>CALL</span>
+                  <span>SELL CALL</span>
                 </button>
                 <span className="text-[11px] text-zinc-400 text-center mt-1 tabular-nums">{inr(calcOptionBuyReq(atmLtp('CE'), topLots, lotSize))}</span>
               </div>

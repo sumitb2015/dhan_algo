@@ -14,7 +14,7 @@ import { useChartChrome } from '@/lib/chartTheme';
 import { computeIndicator, indicatorLabel, tailUnchanged, type Bar, type IndicatorInstance, pointColor, flipsAtLast } from '@/lib/indexScalperIndicators';
 import { fmtRupees, legAnchor, legPnl, type ScalperLeg } from '@/lib/indexScalperPositions';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
-import { displayLotUnits, type Underlying } from '@/lib/indexScalperInstrument';
+import { displayLotUnits, qtyUnits, type Underlying } from '@/lib/indexScalperInstrument';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
 
@@ -74,6 +74,8 @@ interface Props {
   onReversePosition?: (leg: ScalperLeg) => void;
   underlying?: Underlying;
   feedLotSize?: number | null;
+  /** Contract units per order-book quantity unit: Dhan MCX orders count lots (10), everything else units (1). */
+  orderQtyMult?: number;
 }
 
 interface Hover { o: number; h: number; l: number; c: number; t: number }
@@ -93,7 +95,7 @@ export default function ScalperChart(props: Props) {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, legs, entrySpots,
     onExitLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
-    simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize,
+    simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
   } = props;
   const chrome = useChromeStable();
   const boxRef = useRef<HTMLDivElement>(null);
@@ -969,9 +971,10 @@ export default function ScalperChart(props: Props) {
 
         if (matchedPos && matchedPos.anchor.level > 0) {
           const isLong = matchedPos.leg.netQty > 0;
+          // Order qty is in the broker's own unit (Dhan MCX: lots; Kotak / NSE: units): orderQtyMult converts it.
           const lotSize = displayLotUnits(underlying, feedLotSize);
-          const lots = ord.qty ? (underlying === 'CRUDEOILM' ? ord.qty : Math.max(1, Math.round(ord.qty / lotSize))) : 1;
-          const totalUnits = underlying === 'CRUDEOILM' ? lots * 10 : lots * lotSize;
+          const totalUnits = ord.qty ? qtyUnits(ord.qty, orderQtyMult) : lotSize;
+          const lots = Math.max(1, Math.round(totalUnits / lotSize));
           const ptDiff = isLong ? (p - matchedPos.anchor.level) : (matchedPos.anchor.level - p);
           const pct = (ptDiff / matchedPos.anchor.level) * 100;
           const pnl = ptDiff * totalUnits;
@@ -1050,11 +1053,10 @@ export default function ScalperChart(props: Props) {
         const b = activeBrackets[p.leg.id];
         if (!b) return null;
         const isLong = p.leg.netQty > 0;
+        // netQty is in the broker's own unit (Dhan MCX: lots; Kotak / SIM / NSE: units): leg.mult converts it.
         const lotSize = displayLotUnits(underlying, feedLotSize);
-        const lots = underlying === 'CRUDEOILM'
-          ? Math.abs(p.leg.netQty)
-          : Math.max(1, Math.round(Math.abs(p.leg.netQty) / lotSize));
-        const totalUnits = underlying === 'CRUDEOILM' ? lots * 10 : lots * lotSize;
+        const totalUnits = qtyUnits(p.leg.netQty, p.leg.mult ?? 1);
+        const lots = Math.max(1, Math.round(totalUnits / lotSize));
 
         const tpTop = b.tp ? chipTops[`tp_${p.leg.id}`] : undefined;
         const slTop = b.sl ? chipTops[`sl_${p.leg.id}`] : undefined;
@@ -1213,11 +1215,10 @@ export default function ScalperChart(props: Props) {
         const top = chipTops[p.leg.id];
         if (top === undefined) return null;
         const isLong = p.leg.netQty > 0;
+        // netQty is in the broker's own unit (Dhan MCX: lots; Kotak / SIM / NSE: units): leg.mult converts it.
         const lotSize = displayLotUnits(underlying, feedLotSize);
-        const lots = underlying === 'CRUDEOILM'
-          ? Math.abs(p.leg.netQty)
-          : Math.max(1, Math.round(Math.abs(p.leg.netQty) / lotSize));
-        const totalUnits = underlying === 'CRUDEOILM' ? lots * 10 : lots * lotSize;
+        const totalUnits = qtyUnits(p.leg.netQty, p.leg.mult ?? 1);
+        const lots = Math.max(1, Math.round(totalUnits / lotSize));
 
         const curSpot = (last?.c && last.c > 0) ? last.c : p.anchor.level;
         const curPtDiff = isLong ? (curSpot - p.anchor.level) : (p.anchor.level - curSpot);

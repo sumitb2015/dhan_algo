@@ -32,7 +32,7 @@ const inr = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigi
 
 export default function OrderTicket({
   contract, liveLtp, expiry, lotSize, real, available, busy, message, onSubmit, onClose,
-  underlying = 'NIFTY', initialOrderType, initialPrice, initialLots,
+  underlying = 'NIFTY', broker = 'dhan', initialOrderType, initialPrice, initialLots,
 }: {
   contract: PickedContract;
   liveLtp: number | null;
@@ -45,6 +45,8 @@ export default function OrderTicket({
   onSubmit: (r: TicketRequest) => void;
   onClose: () => void;
   underlying?: Underlying;
+  /** Account a REAL order goes to (the badge names it). */
+  broker?: 'dhan' | 'kotak';
   initialOrderType?: TicketOrderType;
   initialPrice?: number | null;
   initialLots?: number;
@@ -105,7 +107,7 @@ export default function OrderTicket({
       <div {...handle} className="flex items-center justify-between gap-2 px-3 py-2 border-b border-zinc-800 cursor-move">
         <div className="min-w-0">
           <div className="text-sm font-bold text-white truncate">{underlying} {title}</div>
-          <div className={cn('text-[10px] font-bold uppercase tracking-wider', real ? 'text-rose-400' : 'text-amber-300')}>{real ? 'REAL · Dhan' : 'SIM · paper'}</div>
+          <div className={cn('text-[10px] font-bold uppercase tracking-wider', real ? 'text-rose-400' : 'text-amber-300')}>{real ? `REAL · ${broker === 'kotak' ? 'Kotak' : 'Dhan'}` : 'SIM · paper'}</div>
         </div>
         <button type="button" aria-label="Close order ticket" onClick={onClose}
           className="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60"><X className="w-4 h-4" /></button>

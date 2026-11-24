@@ -278,3 +278,17 @@ test('limit / trigger prices must sit on the Rs 0.05 tick; the error names the t
   assert.equal(tickError('Trigger', 99.99), 'Trigger 99.99 is not a multiple of ₹0.05: use 99.95 or 100.00');
   assert.equal(tickError('Price', 12.345), 'Price 12.345 is not a multiple of ₹0.05: use 12.30 or 12.35');
 });
+
+test('futures legs: CRUDEOILM only, and never the full-size CRUDEOIL or a NIFTY future', async () => {
+  const { parseScalperContract } = await import('./indexScalperPositions.ts');
+  assert.deepEqual(parseScalperContract('CRUDEOILM-19Dec2026-FUT', 'CRUDEOILM'), { strike: 0, type: 'FUT' });
+  assert.equal(parseScalperContract('CRUDEOIL-19Dec2026-FUT', 'CRUDEOILM'), null);
+  assert.equal(parseScalperContract('NIFTY-Dec2026-FUT', 'NIFTY'), null);
+  assert.equal(parseScalperContract('NIFTYNXT50-Dec2026-FUT', 'NIFTY'), null);
+  assert.deepEqual(parseScalperContract('CRUDEOILM-17Dec2026-6100-CE', 'CRUDEOILM'), { strike: 6100, type: 'CE' });
+  // A NIFTY future held by a strategy is not one of this page's legs.
+  const legs = legsFromDhanPositions([
+    { tradingSymbol: 'NIFTY-Dec2026-FUT', securityId: '1', netQty: 65, buyAvg: 26000, productType: 'MARGIN' },
+  ], new Map());
+  assert.equal(legs.length, 0);
+});
