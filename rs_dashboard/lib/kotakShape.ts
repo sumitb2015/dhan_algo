@@ -106,6 +106,8 @@ export function shapeKotakOrder(o: Record<string, any>): ScalperOrder {
     ...(o.fldQty != null && o.fldQty !== '' ? { filledQty: Number(o.fldQty) || 0 } : {}),
     ...(o.prod ?? o.prd ? { productType: String(o.prod ?? o.prd) } : {}),
     ...(o.rejRsn ? { reason: String(o.rejRsn) } : {}),
+    // Stop orders' trigger (Neo order book `trgPrc`; field name from the Neo order report, not yet seen on a live stop).
+    ...(Number(o.trgPrc) > 0 ? { triggerPrice: Number(o.trgPrc) } : {}),
   };
 }
 

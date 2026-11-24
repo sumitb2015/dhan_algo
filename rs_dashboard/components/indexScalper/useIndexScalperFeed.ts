@@ -46,6 +46,8 @@ export interface IndexScalperFeed {
   /** Kotak contracts when Kotak is the page's broker (null on Dhan, and until both reads land). Prices stay Dhan's: a
    *  Kotak order only needs Kotak's trading symbol and lot size for the contract on screen. */
   kotak: KotakContracts | null;
+  /** Why Kotak's contracts are not loaded (a read failed; it is retried every 15 s), null while fine or loading. */
+  kotakError: string | null;
 }
 
 export interface KotakContracts {
@@ -53,6 +55,8 @@ export interface KotakContracts {
   expiry: string;
   strikes: Map<number, { ceSymbol?: string; peSymbol?: string }>;
   lotSize: number | null;
+  /** Exchange freeze quantity (max units per order), when Kotak's cache lists it: larger closes are sent in slices. */
+  freezeQty: number | null;
   /** Every NIFTY Kotak symbol -> its contract, to place and price Kotak positions of any expiry. */
   symbols: Record<string, KotakSymbolInfo>;
 }
@@ -131,34 +135,61 @@ export function useIndexScalperFeed(broker: 'dhan' | 'kotak' = 'dhan'): IndexSca
   }, [expiry]);
 
   // Kotak's contracts for the expiry on screen, and its NIFTY symbol map, only while Kotak is the broker.
-  const [kotakLookup, setKotakLookup] = useState<{ expiry: string; strikes: Record<string, { ceSymbol?: string; peSymbol?: string }>; lotSize: number | null } | null>(null);
+  const [kotakLookup, setKotakLookup] = useState<{ expiry: string; strikes: Record<string, { ceSymbol?: string; peSymbol?: string }>; lotSize: number | null; freezeQty: number | null } | null>(null);
   const [kotakSymbols, setKotakSymbols] = useState<Record<string, KotakSymbolInfo> | null>(null);
+  // One error per read: a success of one must not hide the other's failure (the page would look ready while not).
+  const [kotakLookupError, setKotakLookupError] = useState<string | null>(null);
+  const [kotakSymbolsError, setKotakSymbolsError] = useState<string | null>(null);
+  // Both reads retry every 15 s until they succeed: a first read can fail or time out (the lookup route may be
+  // rebuilding Kotak's instrument cache, a Python run of up to 120 s), and a page must not stay unable to trade Kotak.
+  const KOTAK_RETRY_MS = 15_000;
   useEffect(() => {
     if (broker !== 'kotak' || !expiry) return;
     let dead = false;
-    fetch(`/api/scalper/kotak/lookup?underlying=${UNDERLYING}&expiry=${expiry}`)
-      .then(r => r.json())
-      .then((j: { success: boolean; data?: { lotSize?: number; strikes?: Record<string, { ceSymbol?: string; peSymbol?: string }> } }) => {
-        if (dead || !j.success || !j.data) return;
-        setKotakLookup({ expiry, strikes: j.data.strikes ?? {}, lotSize: typeof j.data.lotSize === 'number' && j.data.lotSize > 0 ? j.data.lotSize : null });
-      })
-      .catch(() => {});
-    return () => { dead = true; };
+    let done = false;
+    const load = () => {
+      if (done) return;
+      fetch(`/api/scalper/kotak/lookup?underlying=${UNDERLYING}&expiry=${expiry}`)
+        .then(r => r.json())
+        .then((j: { success: boolean; error?: string; data?: { lotSize?: number; freezeQty?: number; strikes?: Record<string, { ceSymbol?: string; peSymbol?: string }> } }) => {
+          if (dead) return;
+          if (!j.success || !j.data) { setKotakLookupError(`Kotak contracts: ${j.error ?? 'lookup failed'} (retrying)`); return; }
+          done = true;
+          setKotakLookupError(null);
+          setKotakLookup({
+            expiry, strikes: j.data.strikes ?? {},
+            lotSize: typeof j.data.lotSize === 'number' && j.data.lotSize > 0 ? j.data.lotSize : null,
+            freezeQty: typeof j.data.freezeQty === 'number' && j.data.freezeQty > 1 ? j.data.freezeQty : null,
+          });
+        })
+        .catch(e => { if (!dead) setKotakLookupError(`Kotak contracts: ${String((e as Error)?.message ?? e)} (retrying)`); });
+    };
+    load();
+    const t = setInterval(load, KOTAK_RETRY_MS);
+    return () => { dead = true; clearInterval(t); };
   }, [broker, expiry]);
   useEffect(() => {
     if (broker !== 'kotak' || kotakSymbols) return;
     let dead = false;
-    fetch(`/api/scalper/kotak/symbol-lookup?underlying=${UNDERLYING}`)
-      .then(r => r.json())
-      .then((j: { success: boolean; data?: Record<string, KotakSymbolInfo> }) => { if (!dead && j.success && j.data) setKotakSymbols(j.data); })
-      .catch(() => {});
-    return () => { dead = true; };
+    const load = () => {
+      fetch(`/api/scalper/kotak/symbol-lookup?underlying=${UNDERLYING}`)
+        .then(r => r.json())
+        .then((j: { success: boolean; error?: string; data?: Record<string, KotakSymbolInfo> }) => {
+          if (dead) return;
+          if (j.success && j.data) { setKotakSymbols(j.data); setKotakSymbolsError(null); }
+          else setKotakSymbolsError(`Kotak symbols: ${j.error ?? 'lookup failed'} (retrying)`);
+        })
+        .catch(e => { if (!dead) setKotakSymbolsError(`Kotak symbols: ${String((e as Error)?.message ?? e)} (retrying)`); });
+    };
+    load();
+    const t = setInterval(load, KOTAK_RETRY_MS);
+    return () => { dead = true; clearInterval(t); };
   }, [broker, kotakSymbols]);
   const kotak = useMemo<KotakContracts | null>(() => {
     if (broker !== 'kotak' || !kotakSymbols || !kotakLookup || kotakLookup.expiry !== expiry) return null;
     const strikes = new Map<number, { ceSymbol?: string; peSymbol?: string }>();
     for (const [k, v] of Object.entries(kotakLookup.strikes)) strikes.set(Number(k), v);
-    return { expiry, strikes, lotSize: kotakLookup.lotSize, symbols: kotakSymbols };
+    return { expiry, strikes, lotSize: kotakLookup.lotSize, freezeQty: kotakLookup.freezeQty, symbols: kotakSymbols };
   }, [broker, kotakSymbols, kotakLookup, expiry]);
 
   useEffect(() => {
@@ -229,6 +260,6 @@ export function useIndexScalperFeed(broker: 'dhan' | 'kotak' = 'dhan'): IndexSca
     marketOpen: nowMs > 0 && inNseSession(nowMs),
     // The lookup that produced this lot size must be for the expiry on screen; until then an order is refused.
     lotSize: lookupFor === expiry ? lotSize : null,
-    strikeIds, ltpById, kotak,
+    strikeIds, ltpById, kotak, kotakError: broker === 'kotak' && !kotak ? (kotakSymbolsError ?? kotakLookupError) : null,
   };
 }

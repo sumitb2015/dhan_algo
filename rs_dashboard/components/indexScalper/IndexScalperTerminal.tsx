@@ -33,8 +33,8 @@ import {
 } from '@/lib/indexScalperPositions';
 import { closeOrderProduct } from '@/lib/positionProduct';
 import {
-  dashProduct, heldByUnknown, kotakOrdersAsDhan, legsFromKotakPositions, ownedQtyFromKotakOrders, recordedIds,
-  type KotakRecord, type KotakSymbolInfo,
+  dashProduct, freezeSlices, heldByUnknown, kotakOrdersAsDhan, legsFromKotakPositions, ownedQtyFromKotakOrders, recordedIds,
+  withResolvedUnknowns, type KotakRecord, type KotakSymbolInfo,
 } from '@/lib/indexScalperKotak';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
@@ -257,10 +257,12 @@ export default function IndexScalperTerminal() {
     } catch { return null; }
   }, []);
 
-  const loadPositions = useCallback(async (): Promise<Record<string, unknown>[] | null> => {
+  /** `fresh`: a live read for exit sizing. Display polls on Kotak go through the shared Kotak positions cache. */
+  const loadPositions = useCallback(async (fresh = false): Promise<Record<string, unknown>[] | null> => {
     try {
       if (!brokerLoadedRef.current) return null;
-      const r = await fetch(scalperRoute(brokerRef.current, 'positions'));
+      const kotakCached = brokerRef.current === 'kotak' && fresh !== true;
+      const r = await fetch(kotakCached ? '/api/index-scalper/kotak-positions' : scalperRoute(brokerRef.current, 'positions'));
       const j = await r.json() as { success: boolean; data?: Record<string, unknown>[]; error?: string };
       if (!j.success || !j.data) { setPosErr(j.error ?? 'Could not load positions'); return null; }
       setPosErr(null);
@@ -300,7 +302,8 @@ export default function IndexScalperTerminal() {
     setOrderBook([]); setOrdersErr(null); setKotakRecords([]);
     if (!brokerLoaded) return;
     void loadOrders();
-    const t = setInterval(() => { void loadOrders(true); }, 5000);
+    // Kotak rate-limits its account reads (stCode 100025): its order book is read every 10 s, Dhan's every 5 s.
+    const t = setInterval(() => { void loadOrders(true); }, broker === 'kotak' ? 10_000 : 5000);
     const onVis = () => { if (document.visibilityState === 'visible') void loadOrders(); };
     document.addEventListener('visibilitychange', onVis);
     return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVis); };
@@ -332,7 +335,7 @@ export default function IndexScalperTerminal() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!real) { setRealRows([]); setPosErr(null); setRealLoaded(false); return; }
     loadPositions();
-    const t = setInterval(loadPositions, 3000);
+    const t = setInterval(() => { void loadPositions(); }, 3000);
     return () => clearInterval(t);
   }, [real, loadPositions, broker, brokerLoaded]);
 
@@ -390,7 +393,7 @@ export default function IndexScalperTerminal() {
     legs.find(l => (real ? l.id === `${row.securityId}|${row.productCode}` : l.id === row.securityId)), [legs, real]);
   const exitingRowKey = exitingId === null ? null : (panelPositions.find(r => legForRow(r)?.id === exitingId)?.key ?? 'busy');
   const panelOrders = useMemo(
-    () => orderRows(broker === 'kotak' ? kotakOrdersAsDhan(orderBook, kotakSymbols ?? {}, recordedIds(kotakRecords)) : orderBook),
+    () => orderRows(broker === 'kotak' ? kotakOrdersAsDhan(orderBook, kotakSymbols ?? {}, recordedIds(withResolvedUnknowns(kotakRecords, orderBook))) : orderBook),
     [orderBook, broker, kotakSymbols, kotakRecords],
   );
   const panelHoldings = useMemo(() => holdingRows(holdingsRaw), [holdingsRaw]);
@@ -479,7 +482,7 @@ export default function IndexScalperTerminal() {
     if (brokerRef.current === 'kotak') {
       // Kotak: its own trading symbol and lot size for the contract on screen, never the Dhan security id.
       const k = f.kotak;
-      if (!k) return { ok: false, text: 'Kotak contracts are still loading' };
+      if (!k) return { ok: false, text: f.kotakError ?? 'Kotak contracts are still loading' };
       if (k.expiry !== c.expiry) return { ok: false, text: 'Kotak contracts are for another expiry: wait for them to load' };
       const sym = c.type === 'CE' ? k.strikes.get(c.strike)?.ceSymbol : k.strikes.get(c.strike)?.peSymbol;
       if (!sym) return { ok: false, text: `No Kotak contract for ${c.strike} ${c.type} on ${c.expiry}` };
@@ -528,37 +531,55 @@ export default function IndexScalperTerminal() {
 
   /** Signed units this page's own (`isx`-tagged) orders filled today, per security + product, from Dhan's order book.
    *  null when the book cannot be read: an exit is then refused rather than sized off the broker's whole position. */
-  const loadOwned = useCallback(async (): Promise<{ owned: Map<string, number>; records: KotakRecord[] } | null> => {
+  const loadOwned = useCallback(async (): Promise<{ owned: Map<string, number>; records: KotakRecord[]; book: Record<string, unknown>[] } | null> => {
     try {
       if (brokerRef.current === 'kotak') {
         // Kotak: what THIS page's recorded order IDs filled, from Kotak's own order book.
         const [records, r] = await Promise.all([loadKotakRecords(), fetch(scalperRoute('kotak', 'orders'))]);
         const j = await r.json() as { success: boolean; data?: Record<string, unknown>[] };
         if (!records || !j.success || !Array.isArray(j.data)) return null;
-        return { owned: ownedQtyFromKotakOrders(j.data, records), records };
+        return { owned: ownedQtyFromKotakOrders(j.data, records), records, book: j.data };
       }
       const r = await fetch('/api/scalper/orders');
       const j = await r.json() as { success: boolean; data?: Record<string, unknown>[] };
-      return j.success && Array.isArray(j.data) ? { owned: ownedQtyFromOrders(j.data), records: [] } : null;
+      return j.success && Array.isArray(j.data) ? { owned: ownedQtyFromOrders(j.data), records: [], book: [] } : null;
     } catch { return null; }
   }, [loadKotakRecords]);
 
   /** Close what THIS page opened on one broker row (security + product), clamped by what the broker still shows.
    *  Quantity a strategy, another terminal or a manual order holds on the same contract is never touched. */
-  const exitRealRow = useCallback(async (leg: ScalperLeg, owned: Map<string, number>, records: KotakRecord[] = []): Promise<Outcome & { skipped?: boolean }> => {
+  const exitRealRow = useCallback(async (leg: ScalperLeg, owned: Map<string, number>, records: KotakRecord[] = [], book: Record<string, unknown>[] = []): Promise<Outcome & { skipped?: boolean }> => {
     const label = `${leg.strike} ${leg.type}${leg.product ? ` ${leg.product}` : ''}`;
     const kotak = brokerRef.current === 'kotak';
     // Kotak: an order on this contract whose outcome is unknown may still fill; an exit sized before it lands could flip.
-    if (kotak && heldByUnknown(records, leg.securityId, Date.now())) {
+    if (kotak && heldByUnknown(records, leg.securityId, Date.now(), 60_000, book)) {
       return { ok: false, text: `${label}: an order on this contract has an unknown outcome; exit held for up to 60 s (check Orders)` };
     }
     const order = ownedCloseOrder(leg.netQty, owned.get(leg.id) ?? 0);
     if (!order) return { ok: false, skipped: true, text: `${label}: not opened from this page today, left open (square it off where it was opened)` };
     const product = closeOrderProduct(kotak ? 'kotak' : 'dhan', kotak ? (leg.product === 'MARGIN' ? 'NRML' : leg.product === 'INTRADAY' ? 'MIS' : leg.product) : leg.product);
     if (!product || product.assumed) return { ok: false, text: `${label}: unsupported or missing product "${leg.product}", square it off at the broker` };
-    const out = kotak
-      ? await sendReal({ tradingSymbol: leg.securityId, quantity: order.units, side: order.side, orderType: 'MARKET', product: leg.product }, 'close')
-      : await sendReal({ securityId: leg.securityId, quantity: order.units, side: order.side, orderType: 'MARKET', ...product.fields });
+    let out: Outcome;
+    if (kotak) {
+      // Above the exchange freeze quantity a single order is rejected: close in freeze-sized slices, stopping at the
+      // first one that is not placed (an unknown slice is never followed by another).
+      const k = feedRef.current.kotak;
+      const slices = freezeSlices(order.units, k?.freezeQty ?? null, k?.lotSize ?? null);
+      let sent = 0;
+      out = { ok: true, text: 'Closed' };
+      for (const q of slices) {
+        out = await sendReal({ tradingSymbol: leg.securityId, quantity: q, side: order.side, orderType: 'MARKET', product: leg.product }, 'close');
+        if (!out.ok) break;
+        sent += q;
+      }
+      if (slices.length > 1) {
+        out = out.ok
+          ? { ...out, text: `${label}: closed ${sent} in ${slices.length} orders (exchange freeze limit)` }
+          : { ...out, text: `${label}: ${sent} of ${order.units} closed, then: ${out.text}` };
+      }
+    } else {
+      out = await sendReal({ securityId: leg.securityId, quantity: order.units, side: order.side, orderType: 'MARKET', ...product.fields });
+    }
     if (out.ok && order.units < Math.abs(leg.netQty)) {
       return { ...out, text: `${out.text}: closed ${order.units} of ${Math.abs(leg.netQty)}, the rest was not opened from this page` };
     }
@@ -566,16 +587,16 @@ export default function IndexScalperTerminal() {
   }, [sendReal]);
 
   /** Fresh broker rows + ownership, read together right before an exit. */
-  const readExitState = useCallback(async (): Promise<{ live: ScalperLeg[]; owned: Map<string, number>; records: KotakRecord[] } | string> => {
-    const [rows, own] = await Promise.all([loadPositions(), loadOwned()]);
+  const readExitState = useCallback(async (): Promise<{ live: ScalperLeg[]; owned: Map<string, number>; records: KotakRecord[]; book: Record<string, unknown>[] } | string> => {
+    const [rows, own] = await Promise.all([loadPositions(true), loadOwned()]);
     if (!rows) return 'Could not read live positions: nothing was closed';
     if (!own) return 'Could not read the order book to tell which quantity this page opened: nothing was closed';
     const f = feedRef.current;
-    if (brokerRef.current === 'kotak' && !f.kotak) return 'Kotak contracts are not loaded yet: nothing was closed';
+    if (brokerRef.current === 'kotak' && !f.kotak) return `${f.kotakError ?? 'Kotak contracts are not loaded yet'}: nothing was closed`;
     const live = brokerRef.current === 'kotak'
       ? legsFromKotakPositions(rows, f.kotak?.symbols ?? {}, () => null)
       : legsFromDhanPositions(rows, f.ltpById);
-    return { live, owned: own.owned, records: own.records };
+    return { live, owned: own.owned, records: own.records, book: own.book };
   }, [loadPositions, loadOwned]);
 
   const exitLeg = useCallback(async (leg: ScalperLeg) => {
@@ -589,7 +610,7 @@ export default function IndexScalperTerminal() {
         if (typeof st === 'string') out = { ok: false, text: st };
         else {
           const row = st.live.find(l => l.id === leg.id);
-          out = row ? await exitRealRow(row, st.owned, st.records) : { ok: true, text: 'Already flat' };
+          out = row ? await exitRealRow(row, st.owned, st.records, st.book) : { ok: true, text: 'Already flat' };
         }
         loadPositions();
       }
@@ -616,7 +637,7 @@ export default function IndexScalperTerminal() {
       let skipped = 0;
       let sent = 0;
       for (const l of ordered) {
-        const o = await exitRealRow(l, st.owned, st.records);
+        const o = await exitRealRow(l, st.owned, st.records, st.book);
         if (o.skipped) { skipped++; continue; }
         if (!o.ok) { problems.push(o.text); if (o.unknown) break; continue; }
         sent++;
@@ -798,10 +819,11 @@ export default function IndexScalperTerminal() {
         </div>
       </div>
 
-      {(candleErr || posErr || feed.stale || notLive || !feed.marketOpen) && (
+      {(candleErr || posErr || feed.stale || notLive || !feed.marketOpen || feed.kotakError) && (
         <div role="alert" className="px-3 py-1 text-[11px] text-amber-300 bg-amber-500/10 border-b border-amber-500/30">
           {candleErr && <span className="mr-3">Candles: {candleErr}</span>}
           {posErr && <span className="mr-3">Positions: {posErr}</span>}
+          {feed.kotakError && <span data-testid="kotak-error" className="mr-3">{feed.kotakError}: Kotak orders and exits wait for it.</span>}
           {!feed.marketOpen && <span data-testid="market-closed" className="mr-3">NSE is closed (session 09:15-15:30 IST): paper fills and market orders are off.</span>}
           {notLive && <span className="mr-3">No live ticks (market closed or the tick bridge is not running): the option chain is Dhan&apos;s last snapshot, and market orders are refused.</span>}
           {feed.stale && <span>Live ticks are stale ({Math.round(feed.feedAgeSec ?? 0)}s): market closed or bridge down. Market orders are refused.</span>}

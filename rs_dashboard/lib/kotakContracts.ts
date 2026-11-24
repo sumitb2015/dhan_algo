@@ -14,6 +14,8 @@ const MAX_AGE_MS = 12 * 60 * 60 * 1000;
 interface CachedOption {
   tradingsymbol: string; strike: number; expiry: string; instrument_type: 'CE' | 'PE' | 'FUT';
   lot_size: number; exchange_segment: string; tick?: number | null;
+  /** Exchange freeze quantity (max units per order), when the cache lists it. */
+  freeze_qty?: number | null;
 }
 export interface KotakOptionContract { tradingsymbol: string; lotSize: number; segment: string; tick: number | null }
 export interface KotakEquityContract { tradingsymbol: string; tick: number | null; token: string }
@@ -30,7 +32,7 @@ async function optionRows(underlying: string): Promise<CachedOption[]> {
   return JSON.parse(fs.readFileSync(file, 'utf8')) as CachedOption[];
 }
 
-export interface KotakDerivative { lotSize: number; tick: number | null; segment: string; type: 'CE' | 'PE' | 'FUT' }
+export interface KotakDerivative { lotSize: number; tick: number | null; segment: string; type: 'CE' | 'PE' | 'FUT'; freezeQty: number | null }
 
 const bySymbolCache = new Map<string, { mtimeMs: number; rows: Map<string, CachedOption> }>();
 
@@ -53,7 +55,10 @@ export function kotakDerivativeBySymbol(symbol: string, underlying: string): Kot
   }
   const hit = entry.rows.get(symbol);
   if (!hit || !(hit.lot_size > 0)) return null;
-  return { lotSize: hit.lot_size, tick: hit.tick && hit.tick > 0 ? hit.tick : null, segment: hit.exchange_segment || 'nse_fo', type: hit.instrument_type };
+  return {
+    lotSize: hit.lot_size, tick: hit.tick && hit.tick > 0 ? hit.tick : null, segment: hit.exchange_segment || 'nse_fo', type: hit.instrument_type,
+    freezeQty: Number(hit.freeze_qty) > 1 ? Number(hit.freeze_qty) : null,
+  };
 }
 
 /** The Kotak option for (underlying, expiry YYYY-MM-DD, strike, CE/PE), or null when Kotak does not list it. */

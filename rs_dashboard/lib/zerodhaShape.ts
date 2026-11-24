@@ -43,6 +43,8 @@ export interface ScalperOrder {
   productType?: string;
   /** Rejection / status message, when the row carries one. */
   reason?: string;
+  /** Stop orders' trigger, when the row carries one (Kotak `trgPrc`). */
+  triggerPrice?: number;
 }
 
 export interface ScalperTrade {

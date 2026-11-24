@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  appendRecord, freezeSlices, resolveUnknowns, withResolvedUnknowns,
   dashProduct, heldByUnknown, kotakOrdersAsDhan, kotakProduct, legsFromKotakPositions, ownedQtyFromKotakOrders, recordedIds,
   todaysRecords, type KotakRecord,
 } from './indexScalperKotak.ts';
@@ -74,4 +75,54 @@ test('Kotak orders read as Dhan rows for the panel; Cancel only on this page\'s 
 test('Kotak isx opening orders are capped at 20 lots', () => {
   assert.equal(sourceLotCapError(1300, 'isx', SYM, 65), null);
   assert.match(sourceLotCapError(1365, 'isx', SYM, 65) ?? '', /cap of 20 lots/);
+});
+
+const ist = (hms: string) => Date.parse(`2026-11-25T${hms}+05:30`);
+
+test('an unknown outcome is resolved by exactly one matching order in the book, and then counts as owned', () => {
+  const unknown: KotakRecord = { unknown: true, symbol: SYM, side: 'SELL', qty: 65, at: ist('10:20:03') };
+  const book = [
+    { orderId: 'K9', tradingSymbol: SYM, transactionType: 'SELL', quantity: 65, orderStatus: 'COMPLETE', filledQty: 65, productType: 'MIS', createTime: '25-Nov-2026 10:20:05' },
+    { orderId: 'S1', tradingSymbol: SYM, transactionType: 'SELL', quantity: 650, orderStatus: 'COMPLETE', filledQty: 650, productType: 'MIS', createTime: '25-Nov-2026 10:20:04' }, // other size
+    { orderId: 'S2', tradingSymbol: SYM, transactionType: 'SELL', quantity: 65, orderStatus: 'COMPLETE', filledQty: 65, productType: 'MIS', createTime: '25-Nov-2026 09:10:00' },  // too early
+  ];
+  assert.deepEqual([...resolveUnknowns([unknown], book)], [[0, 'K9']]);
+  assert.equal(ownedQtyFromKotakOrders(book, [unknown]).get(`${SYM}|INTRADAY`), -65);
+  assert.equal(heldByUnknown([unknown], SYM, ist('10:20:30'), 60_000, book), false); // resolved: no hold
+  assert.equal(heldByUnknown([unknown], SYM, ist('10:20:30'), 60_000, []), true);    // not in the book yet: held
+  // two matching orders: ambiguous, stays unknown (and is not owned)
+  const twin = [...book, { ...book[0], orderId: 'K10', createTime: '25-Nov-2026 10:20:06' }];
+  assert.equal(resolveUnknowns([unknown], twin).size, 0);
+  assert.equal(ownedQtyFromKotakOrders(twin, [unknown]).size, 0);
+  // an order a recorded order already owns never resolves an unknown
+  assert.equal(resolveUnknowns([rec('K9', 'SELL'), unknown], book).size, 0);
+  assert.equal(withResolvedUnknowns([unknown], book)[0].orderId, 'K9');
+});
+
+test('closes above the freeze quantity are cut into whole-lot slices under it', () => {
+  assert.deepEqual(freezeSlices(1300, 1800, 65), [1300]);
+  assert.deepEqual(freezeSlices(2600, 1800, 65), [1755, 845]);   // 27 lots + 13 lots
+  assert.deepEqual(freezeSlices(195, 130, 65), [130, 65]);
+  assert.deepEqual(freezeSlices(195, null, 65), [195]);
+  assert.deepEqual(freezeSlices(0, 1800, 65), []);
+});
+
+test('recording starts a new day file and appends within the day', () => {
+  const a = appendRecord(null, '2026-11-25', rec('A', 'BUY'));
+  assert.deepEqual(a.records.map(r => r.orderId), ['A']);
+  const b = appendRecord(a, '2026-11-25', rec('B', 'SELL'));
+  assert.deepEqual(b.records.map(r => r.orderId), ['A', 'B']);
+  assert.deepEqual(appendRecord(b, '2026-11-26', rec('C', 'BUY')).records.map(r => r.orderId), ['C']);
+});
+
+test('Kotak stop orders carry their trigger into the panel row', () => {
+  const rows = kotakOrdersAsDhan([{ ...ord('K1', 'SELL', 65, 'TRIGGER PENDING', 0), orderType: 'STOP_LOSS', triggerPrice: 180 }], {}, new Set(['K1']));
+  assert.equal(rows[0].triggerPrice, 180);
+  assert.equal(rows[0].orderStatus, 'PENDING');
+});
+
+test('shapeKotakOrder carries a stop order\'s trigger (trgPrc) and nothing for a plain order', async () => {
+  const { shapeKotakOrder } = await import('./kotakShape.ts');
+  assert.equal(shapeKotakOrder({ nOrdNo: '1', trdSym: SYM, ordSt: 'trigger pending', prcTp: 'SL', trgPrc: '180.00', qty: 65 }).triggerPrice, 180);
+  assert.equal(shapeKotakOrder({ nOrdNo: '2', trdSym: SYM, ordSt: 'open', prcTp: 'L', trgPrc: '0', qty: 65 }).triggerPrice, undefined);
 });

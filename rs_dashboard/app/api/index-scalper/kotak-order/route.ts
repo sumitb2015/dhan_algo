@@ -8,7 +8,7 @@ import { buildKotakOrderPayload } from '@/lib/kotakOrderPayload';
 import { readJsonFile, withFileLock, writeJsonAtomic } from '@/lib/lockedJsonFile';
 import { PROJECT_ROOT } from '@/lib/pyExec';
 import { istDateIso } from '@/lib/nseHolidays';
-import { kotakProduct, todaysRecords, type KotakDayFile, type KotakRecord } from '@/lib/indexScalperKotak';
+import { appendRecord, kotakProduct, todaysRecords, type KotakDayFile, type KotakRecord } from '@/lib/indexScalperKotak';
 
 // REAL-MONEY route: /index-scalper's Kotak orders (NIFTY options only). Places through lib/kotakPlaceOrder.ts (placed /
 // rejected / unknown, order-book reconcile on an unclean reply) and RECORDS every placed or unknown order in the page's
@@ -28,9 +28,7 @@ const today = () => istDateIso(Date.now());
 
 async function record(rec: KotakRecord): Promise<void> {
   await withFileLock(LOCK, 5_000, 'index-scalper kotak orders', () => {
-    const day = today();
-    const records = todaysRecords(readJsonFile<KotakDayFile>(FILE), day);
-    writeJsonAtomic(FILE, { day, records: [...records, rec] } satisfies KotakDayFile, { pretty: true });
+    writeJsonAtomic(FILE, appendRecord(readJsonFile<KotakDayFile>(FILE), today(), rec), { pretty: true });
   });
 }
 
@@ -55,6 +53,11 @@ async function placeOnce(b: Body): Promise<{ status: number; body: Record<string
 
   const contract = kotakDerivativeBySymbol(symbol, 'NIFTY');
   if (!contract) return { status: 400, body: { success: false, error: `${symbol} is not in the Kotak instrument cache` } };
+  // Above the exchange freeze quantity the exchange rejects the order: refuse here with the limit (the page slices).
+  const qty = Number(b.quantity);
+  if (contract.freezeQty && qty > contract.freezeQty) {
+    return { status: 400, body: { success: false, error: `Quantity ${qty} exceeds the exchange freeze quantity ${contract.freezeQty} for ${symbol}: send it in parts` } };
+  }
   const built = buildKotakOrderPayload({
     tradingsymbol: symbol, quantity: Number(b.quantity), side, orderType: String(b.orderType ?? 'MARKET'),
     price: Number(b.price) || 0, triggerPrice: Number(b.triggerPrice) || 0, exchange: 'nse_fo', product,
