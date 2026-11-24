@@ -35,3 +35,20 @@ test('no spot or no strikes is no snapshot', () => {
   assert.equal(chainSnapshot({ spot: 25000, chain: { oc: {} } }, 'NIFTY', 'x', 0), null);
   assert.equal(chainSnapshot({}, 'NIFTY', 'x', 0), null);
 });
+
+test('CRUDEOILM snapshot centers ATM on nearest strike to crude spot', () => {
+  const snap = chainSnapshot({
+    spot: 6123.45,
+    chain: { oc: {
+      '6000.000000': { ce: { last_price: 150 }, pe: { last_price: 30 } },
+      '6100.000000': { ce: { last_price: 90 }, pe: { last_price: 70 } },
+      '6150.000000': { ce: { last_price: 65 }, pe: { last_price: 95 } },
+      '6200.000000': { ce: { last_price: 45 }, pe: { last_price: 130 } },
+    } },
+  }, 'CRUDEOILM', '2026-12-16', Date.UTC(2026, 10, 24, 10, 0));
+  assert.ok(snap);
+  // 6123.45 is closest to 6100 (dist 23.45) vs 6150 (dist 26.55)
+  assert.equal(snap.atm, 6100);
+  assert.equal(snap.spot, 6123.45);
+  assert.equal(snap.straddle_premium, 160);
+});

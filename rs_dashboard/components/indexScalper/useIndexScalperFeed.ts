@@ -22,7 +22,7 @@ export interface FutureContractInfo {
 
 const STALE_FEED_MS = 10_000;
 /** No live chain for this long after an expiry is picked: show Dhan's REST chain as a snapshot instead. */
-const SNAPSHOT_AFTER_MS = 4_000;
+const SNAPSHOT_AFTER_MS = 1_000;
 /** Snapshot refresh while there is still no live chain (the route caches 30 s; Dhan allows ~1 chain call / 3 s). */
 const SNAPSHOT_EVERY_MS = 60_000;
 
@@ -226,10 +226,15 @@ export function useIndexScalperFeed(
     return m;
   }, [strikeIdsRaw, lookupFor, underlying, expiry]);
 
+  // REST snapshot, only while the live bridge has no chain for this expiry
+  const [snapshot, setSnapshot] = useState<LiveQuotes | null>(null);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
+
   const ltpById = useMemo(() => {
     const m = new Map<string, number>();
-    if (!quotes) return m;
-    for (const sd of Object.values(quotes.strikes ?? {})) {
+    const src = quotes ?? snapshot;
+    if (!src) return m;
+    for (const sd of Object.values(src.strikes ?? {})) {
       const ids = strikeIds.get(Number(sd.strike));
       if (!ids) continue;
       if (ids.ceId && sd.ce?.ltp > 0) m.set(String(ids.ceId), sd.ce.ltp);
@@ -237,15 +242,12 @@ export function useIndexScalperFeed(
     }
     // Also add the future's LTP if quoted
     if (dhanFuture?.securityId) {
-      const futLtp = quotes.spot > 0 ? quotes.spot : 0;
+      const futLtp = src.spot > 0 ? src.spot : 0;
       if (futLtp > 0) m.set(dhanFuture.securityId, futLtp);
     }
     return m;
-  }, [quotes, strikeIds, dhanFuture]);
+  }, [quotes, snapshot, strikeIds, dhanFuture]);
 
-  // REST snapshot, only while the live bridge has no chain for this expiry
-  const [snapshot, setSnapshot] = useState<LiveQuotes | null>(null);
-  const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const hasLive = !!quotes;
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -276,14 +278,15 @@ export function useIndexScalperFeed(
 
   const future = useMemo<FutureContractInfo | null>(() => {
     if (!dhanFuture && !kotakFutureSymbol) return null;
-    const futLtp = (dhanFuture?.securityId ? ltpById.get(dhanFuture.securityId) : null) ?? quotes?.spot ?? null;
+    const src = quotes ?? snapshot;
+    const futLtp = (dhanFuture?.securityId ? ltpById.get(dhanFuture.securityId) : null) ?? (src && src.spot > 0 ? src.spot : null);
     return {
       dhanId: dhanFuture?.securityId ?? null,
       kotakSymbol: kotakFutureSymbol ?? null,
       expiry: dhanFuture?.expiry ?? null,
       ltp: futLtp,
     };
-  }, [dhanFuture, kotakFutureSymbol, ltpById, quotes]);
+  }, [dhanFuture, kotakFutureSymbol, ltpById, quotes, snapshot]);
 
   return {
     underlying,

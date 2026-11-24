@@ -40,7 +40,7 @@ function side(s: RestSide | undefined): OptionSide {
  *  was fetched (its `as_of` when it served a stale copy). */
 export function chainSnapshot(resp: RestChain, underlying: string, expiry: string, asOfMs: number): LiveQuotes | null {
   const oc = resp.chain?.oc;
-  const spot = finite(resp.spot);
+  const spot = finite(resp.spot) ?? finite((resp.chain as Record<string, unknown> | undefined)?.last_price);
   if (!oc || !spot || spot <= 0) return null;
   const strikes: Record<string, StrikeData> = {};
   // Dhan keys strikes as "25350.000000": key by the number, as the bridge does.

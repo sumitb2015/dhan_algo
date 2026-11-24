@@ -54,13 +54,34 @@ export default function OptionChainPanel({ feed, onPick, onTrade, oneClick, onCl
   const { chain: quotes, strikeIds } = feed;
   const snapshot = feed.chainSource === 'snapshot';
 
+  const atmStrike = useMemo(() => {
+    if (!quotes) return null;
+    const all = Object.values(quotes.strikes ?? {});
+    if (all.length === 0) return quotes.atm ?? null;
+    const exact = all.find(r => r.strike === quotes.atm);
+    if (exact) return quotes.atm;
+    const target = (quotes.atm && quotes.atm > 0 ? quotes.atm : quotes.spot) || 0;
+    if (target > 0) {
+      return all.reduce((best, r) => (Math.abs(r.strike - target) < Math.abs(best.strike - target) ? r : best), all[0]).strike;
+    }
+    return quotes.atm ?? null;
+  }, [quotes]);
+
   const rows = useMemo(() => {
     if (!quotes) return [];
     const all = Object.values(quotes.strikes ?? {}).sort((a, b) => a.strike - b.strike);
-    const atmIdx = all.findIndex(r => r.strike === quotes.atm);
-    if (atmIdx < 0) return all.slice(0, wings * 2 + 1);
+    if (all.length === 0) return [];
+    let atmIdx = all.findIndex(r => r.strike === (atmStrike ?? quotes.atm));
+    if (atmIdx < 0) {
+      const target = (quotes.atm && quotes.atm > 0 ? quotes.atm : quotes.spot) || 0;
+      if (target > 0) {
+        atmIdx = all.reduce((bestIdx, r, idx) => (Math.abs(r.strike - target) < Math.abs(all[bestIdx].strike - target) ? idx : bestIdx), 0);
+      } else {
+        atmIdx = Math.floor(all.length / 2);
+      }
+    }
     return all.slice(Math.max(0, atmIdx - wings), atmIdx + wings + 1);
-  }, [quotes, wings]);
+  }, [quotes, wings, atmStrike]);
 
   const contract = (strike: number, type: 'CE' | 'PE', ltp: number | undefined): PickedContract => {
     const ids = strikeIds.get(strike);
@@ -76,6 +97,7 @@ export default function OptionChainPanel({ feed, onPick, onTrade, oneClick, onCl
       securityId: feed.future.dhanId,
       ltp: feed.future.ltp,
       expiry: feed.future.expiry ?? feed.expiry,
+      tradingSymbol: feed.future.kotakSymbol ?? undefined,
     };
   }, [feed.future, feed.expiry]);
 
@@ -180,7 +202,7 @@ export default function OptionChainPanel({ feed, onPick, onTrade, oneClick, onCl
               <tr><td colSpan={11} className="px-3 py-8 text-center text-zinc-500">{!feed.expiry ? 'Loading expiries…' : feed.snapshotError ? `No live ticks, and the chain snapshot failed: ${feed.snapshotError}` : 'Waiting for live ticks…'}</td></tr>
             )}
             {rows.map(r => {
-              const atm = r.strike === quotes?.atm;
+              const atm = r.strike === (atmStrike ?? quotes?.atm);
               return (
                 <tr key={r.strike} className={cn('group border-t border-zinc-800/70 hover:bg-zinc-800/60', atm && 'bg-sky-500/10')}>
                   <td className="px-2 py-1"><Buildup code={r.ce?.buildup} /></td>
