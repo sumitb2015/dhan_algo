@@ -18,7 +18,7 @@ function candles() {
   });
 }
 
-type MockState = { calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[]; orders?: Record<string, unknown>[]; noLive?: boolean; chainCalls?: number; liveExpiry?: string; marginCalls?: number };
+type MockState = { calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[]; orders?: Record<string, unknown>[]; noLive?: boolean; chainCalls?: number; liveExpiry?: string; marginCalls?: number; cancels?: string[]; holdings?: Record<string, unknown>[] };
 
 async function mockApi(page: Page, state: MockState) {
   await page.route('**/api/**', async (route: Route) => {
@@ -65,6 +65,11 @@ async function mockApi(page: Page, state: MockState) {
     if (p === '/api/scalper/funds') return json(route, { success: true, data: { availabelBalance: 4684089.17, utilizedAmount: 0 } });
     if (p === '/api/scalper/positions') return json(route, { success: true, data: state.positions });
     if (p === '/api/scalper/orders' && method === 'GET') return json(route, { success: true, data: state.orders ?? [] });
+    if (p === '/api/scalper/orders' && method === 'DELETE') {
+      (state.cancels ??= []).push(String(body?.orderId ?? ''));
+      return json(route, { success: true });
+    }
+    if (p === '/api/index-scalper/holdings') return json(route, { success: true, data: state.holdings ?? [] });
     if (p === '/api/scalper/fast-order') {
       state.calls.push({ path: p, body });
       state.positions = [];
@@ -168,7 +173,7 @@ test.describe('Index Scalper', () => {
     await expect(chip).toBeVisible({ timeout: 15_000 });
     await expect(chip).toContainText('PE 25350');
     await expect(chip).toContainText('@ 200.00');
-    await expect(page.getByTestId('open-pnl')).toContainText('+₹21,414');
+    await expect(page.getByTestId('day-pnl')).toHaveText('21,414.25'); // 715 x (229.95 - 200), live LTP
 
     await page.getByRole('button', { name: 'Exit PE 25350' }).click();
     await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
@@ -358,6 +363,62 @@ test.describe('Index Scalper', () => {
     await w.getByRole('button', { name: /^Buy ATM put/ }).click();
     await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
     expect(state.calls[0].body).toMatchObject({ securityId: '402', quantity: 65, side: 'BUY', orderType: 'MARKET', source: 'isx' });
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('account panel: Dhan-style summary, tabs, orders with status chips, own-order cancel only, paper positions with Exit', async ({ page, context }) => {
+    const order = {
+      orderId: '2152611247467', correlationId: 'Z_CHART', orderStatus: 'CANCELLED', transactionType: 'SELL', exchangeSegment: 'NSE_FNO',
+      productType: 'MARGIN', orderType: 'LIMIT', tradingSymbol: 'NIFTY-Dec2026-25550-CE', securityId: '47812', quantity: 65, price: 180,
+      triggerPrice: 0, createTime: '2026-11-24 09:47:15', updateTime: '2026-11-24 09:47:15', drvExpiryDate: '2026-12-01',
+      drvOptionType: 'CALL', drvStrikePrice: 25550, omsErrorDescription: '', filledQty: 0, averageTradedPrice: 0,
+    };
+    const state: MockState = {
+      calls: [], blocked: [], positions: [],
+      orders: [order, { ...order, orderId: '777', correlationId: 'isxabc', orderStatus: 'PENDING', createTime: '2026-11-24 09:50:00' },
+        { ...order, orderId: '888', correlationId: 'stg01', orderStatus: 'PENDING', createTime: '2026-11-24 09:51:00' }],
+      holdings: [{ tradingSymbol: 'NIFTYBEES', securityId: '1', totalQty: 10, avgCostPrice: 280, lastTradedPrice: 278.774 }],
+    };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    const panel = page.getByTestId('account-panel');
+    await expect(panel).toContainText('Available Margin');
+    await expect(panel).toContainText('46,84,089.17');
+    await expect(panel).toContainText('-12.26'); // Holding P&L
+
+    // Orders tab: Dhan's columns and status chips; Cancel only on THIS page's working order
+    await panel.getByRole('tab', { name: 'Orders' }).click();
+    await expect(panel.getByRole('button', { name: 'All 3' })).toBeVisible();
+    await expect(panel.getByRole('button', { name: 'Open 2' })).toBeVisible();
+    await panel.getByRole('button', { name: 'Cancelled 1' }).click();
+    const row = panel.getByTestId('panel-order-row');
+    await expect(row).toHaveCount(1);
+    await expect(row).toContainText('NIFTY 01 DEC 25550 CALL');
+    await expect(row).toContainText('24 Nov 2026, 09:47:15');
+    for (const t of ['NSE', 'Sell', 'Limit', 'Normal', '65', '180.00', 'CANCELLED', '2152611247467']) await expect(row).toContainText(t);
+    await panel.getByRole('button', { name: 'All 3' }).click();
+    await expect(panel.getByRole('button', { name: 'Cancel order 888' })).toHaveCount(0); // a strategy's order
+    await panel.getByRole('button', { name: 'Cancel order 777' }).click();
+    await expect.poll(() => state.cancels ?? []).toEqual(['777']);
+
+    // Portfolio tab
+    await panel.getByRole('tab', { name: /Portfolio/ }).click();
+    await expect(panel).toContainText('NIFTYBEES');
+
+    // a paper trade shows in Positions with its Exit, and Exit closes it
+    await page.getByRole('button', { name: 'Option chain' }).click();
+    await page.getByRole('button', { name: 'Trade 25350 PE' }).click();
+    await page.getByTestId('order-ticket').getByRole('button', { name: /^Buy / }).click();
+    await panel.getByRole('tab', { name: /^Positions/ }).click();
+    const pos = panel.getByTestId('panel-position-row');
+    await expect(pos).toContainText('NIFTY 01 DEC 25350 PUT', { timeout: 15_000 });
+    await pos.getByRole('button', { name: /^Exit / }).click();
+    await expect(pos).toHaveCount(0);
+    await panel.getByRole('tab', { name: /Closed Positions/ }).click();
+    await expect(panel).toContainText('NIFTY 01 DEC 25350 PUT');
+    expect(state.calls).toEqual([]);
     expect(state.blocked).toEqual([]);
   });
 });

@@ -16,6 +16,10 @@ import ScalperChart, { type DrawTool } from './ScalperChart';
 import OptionChainPanel, { type PickedContract } from './OptionChainPanel';
 import OrderTicket, { type TicketRequest } from './OrderTicket';
 import DhanScalperWidget from './DhanScalperWidget';
+import AccountPanel from './AccountPanel';
+import {
+  fundsView, holdingRows, orderRows, positionRows, symbolLabel, type FundsView, type PositionRowView,
+} from '@/lib/indexScalperAccount';
 import IndicatorPicker from './IndicatorPicker';
 import { useIndexScalperFeed } from './useIndexScalperFeed';
 import {
@@ -23,7 +27,7 @@ import {
 } from '@/lib/indexScalperIndicators';
 import { istDateIso, isRegularSession } from '@/lib/nseHolidays';
 import {
-  MAX_LOTS, applyFill, fmtRupees, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, pnlSummary, type ScalperLeg,
+  MAX_LOTS, applyFill, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, type ScalperLeg,
 } from '@/lib/indexScalperPositions';
 import { closeOrderProduct } from '@/lib/positionProduct';
 import { readPref, savePref } from '@/lib/localPref';
@@ -41,7 +45,7 @@ const IND_KEY_V1 = 'indexScalper.indicators.v1';
 const SIM_KEY = 'indexScalper.sim.v1';
 const SPOT_KEY = 'indexScalper.entrySpots.v1';
 
-interface SimLeg { securityId: string; symbol: string; strike: number; type: 'CE' | 'PE'; netQty: number; avg: number }
+interface SimLeg { securityId: string; symbol: string; strike: number; type: 'CE' | 'PE'; netQty: number; avg: number; /** realized P&L of this leg today */ realized?: number }
 interface SimState { day: string; legs: Record<string, SimLeg>; realized: number }
 
 const istDayKey = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -99,7 +103,13 @@ export default function IndexScalperTerminal() {
   const [entrySpots, setEntrySpots] = useState<Record<string, number>>({});
   const [realRows, setRealRows] = useState<Record<string, unknown>[]>([]);
   const [posErr, setPosErr] = useState<string | null>(null);
-  const [funds, setFunds] = useState<{ available: number | null; used: number | null }>({ available: null, used: null });
+  const [funds, setFunds] = useState<FundsView>(() => fundsView(null));
+  // Dhan account reads for the bottom panel (read-only): order book and demat holdings.
+  const [orderBook, setOrderBook] = useState<Record<string, unknown>[]>([]);
+  const [ordersErr, setOrdersErr] = useState<string | null>(null);
+  const [holdingsRaw, setHoldingsRaw] = useState<Record<string, unknown>[]>([]);
+  const [holdingsErr, setHoldingsErr] = useState<string | null>(null);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [exitingId, setExitingId] = useState<string | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
   // One-click size: the widget's top stepper sets it; Buy CE / Buy PE and the chain's B / S use it too.
@@ -207,9 +217,7 @@ export default function IndexScalperTerminal() {
     let dead = false;
     const load = () => fetch('/api/scalper/funds').then(r => r.json()).then((j: { success: boolean; data?: Record<string, unknown> }) => {
       if (dead || !j.success || !j.data) return;
-      const a = Number(j.data.availabelBalance ?? j.data.availableBalance);
-      const u = Number(j.data.utilizedAmount);
-      setFunds({ available: Number.isFinite(a) ? a : null, used: Number.isFinite(u) ? u : null });
+      setFunds(fundsView(j.data));
     }).catch(() => {});
     load();
     const t = setInterval(load, 20_000);
@@ -225,6 +233,35 @@ export default function IndexScalperTerminal() {
       setRealRows(j.data);
       return j.data;
     } catch (e) { setPosErr(String((e as Error).message ?? e)); return null; }
+  }, []);
+
+  const loadOrders = useCallback(async () => {
+    try {
+      const r = await fetch('/api/scalper/orders');
+      const j = await r.json() as { success: boolean; data?: Record<string, unknown>[]; error?: string };
+      if (!j.success || !Array.isArray(j.data)) { setOrdersErr(j.error ?? 'Could not load orders'); return; }
+      setOrdersErr(null);
+      setOrderBook(j.data);
+    } catch (e) { setOrdersErr(String((e as Error).message ?? e)); }
+  }, []);
+  useEffect(() => {
+    // the order book is read on mount and then every 5 s (state is set after the fetch resolves, not synchronously)
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadOrders();
+    const t = setInterval(() => { void loadOrders(); }, 5000);
+    return () => clearInterval(t);
+  }, [loadOrders]);
+  useEffect(() => {
+    let dead = false;
+    const load = () => fetch('/api/index-scalper/holdings').then(r => r.json()).then((j: { success: boolean; data?: Record<string, unknown>[]; error?: string }) => {
+      if (dead) return;
+      if (!j.success || !Array.isArray(j.data)) { setHoldingsErr(j.error ?? 'Could not load holdings'); return; }
+      setHoldingsErr(null);
+      setHoldingsRaw(j.data);
+    }).catch(e => { if (!dead) setHoldingsErr(String((e as Error)?.message ?? e)); });
+    load();
+    const t = setInterval(load, 60_000);
+    return () => { dead = true; clearInterval(t); };
   }, []);
 
   useEffect(() => {
@@ -243,7 +280,28 @@ export default function IndexScalperTerminal() {
       return { id: l.securityId, securityId: l.securityId, product: '', symbol: l.symbol, strike: l.strike, type: l.type, netQty: l.netQty, avg: l.avg, ltp: live ?? null, sim: true };
     });
   }, [real, realRows, sim.legs, feed.ltpById]);
-  const { pnl: openPnl, unpriced } = pnlSummary(legs);
+  // Bottom panel rows: the REAL Dhan book (open + closed rows), or the SIM paper book in the same shape.
+  const panelPositions: PositionRowView[] = useMemo(() => {
+    if (real) return positionRows(realRows, feed.ltpById);
+    return Object.values(sim.legs).map(l => {
+      const m = /^NIFTY-(\d{4}-\d{2}-\d{2})-/.exec(l.symbol);
+      const live = feed.ltpById.get(l.securityId);
+      const ltp = l.netQty !== 0 && live !== undefined && live > 0 ? live : null;
+      const unrealized = l.netQty === 0 ? 0 : ltp !== null ? (ltp - l.avg) * l.netQty : null;
+      const realized = l.realized ?? 0;
+      return {
+        key: l.securityId, securityId: l.securityId,
+        symbol: symbolLabel({ tradingSymbol: 'NIFTY', drvExpiryDate: m?.[1] ?? '', drvStrikePrice: l.strike, drvOptionType: l.type === 'CE' ? 'CALL' : 'PUT' }),
+        exchange: 'NSE', product: 'Intraday (SIM)', productCode: '', netQty: l.netQty, buyQty: null, sellQty: null, buyAvg: null, sellAvg: null,
+        avg: l.netQty !== 0 ? l.avg : null, ltp, realized, unrealized, pnl: unrealized === null ? realized : realized + unrealized,
+      };
+    });
+  }, [real, realRows, sim.legs, feed.ltpById]);
+  const legForRow = useCallback((row: PositionRowView): ScalperLeg | undefined =>
+    legs.find(l => (real ? l.id === `${row.securityId}|${row.productCode}` : l.id === row.securityId)), [legs, real]);
+  const exitingRowKey = exitingId === null ? null : (panelPositions.find(r => legForRow(r)?.id === exitingId)?.key ?? 'busy');
+  const panelOrders = useMemo(() => orderRows(orderBook), [orderBook]);
+  const panelHoldings = useMemo(() => holdingRows(holdingsRaw), [holdingsRaw]);
 
   // ── order placement ────────────────────────────────────────────────
   interface Outcome { ok: boolean; unknown?: boolean; text: string }
@@ -276,12 +334,15 @@ export default function IndexScalperTerminal() {
       const next = applyFill(cur.netQty, cur.avg, side, units, price);
       // realized P&L on the part that closed
       let realized = prev.realized;
+      let legRealized = cur.realized ?? 0;
       const closing = cur.netQty !== 0 && Math.sign(cur.netQty) !== (side === 'BUY' ? 1 : -1);
       if (closing) {
         const closed = Math.min(Math.abs(cur.netQty), units);
-        realized += (price - cur.avg) * closed * Math.sign(cur.netQty);
+        const r = (price - cur.avg) * closed * Math.sign(cur.netQty);
+        realized += r;
+        legRealized += r;
       }
-      return { ...prev, realized, legs: { ...prev.legs, [id]: { ...cur, netQty: next.netQty, avg: next.avg } } };
+      return { ...prev, realized, legs: { ...prev.legs, [id]: { ...cur, netQty: next.netQty, avg: next.avg, realized: legRealized } } };
     });
     if (opens) rememberSpot(id, feedRef.current.spot);
   }, [rememberSpot]);
@@ -321,8 +382,9 @@ export default function IndexScalperTerminal() {
     });
     if (out.ok && before === 0) rememberSpot(c.securityId, f.spot);
     loadPositions();
+    void loadOrders();
     return out;
-  }, [real, legs, sendReal, simFill, rememberSpot, loadPositions]);
+  }, [real, legs, sendReal, simFill, rememberSpot, loadPositions, loadOrders]);
 
   const submitTicket = useCallback(async (req: TicketRequest) => {
     if (ticketBusy) return;
@@ -438,6 +500,22 @@ export default function IndexScalperTerminal() {
     const ltp = type === 'CE' ? sd?.ce?.ltp : sd?.pe?.ltp;
     return { strike: q.atm, type, securityId: id ?? null, ltp: ltp && ltp > 0 ? ltp : null, expiry: feed.expiry };
   }, [feed.quotes, feed.strikeIds, feed.expiry]);
+
+  /** Cancel one of THIS page's working orders (the panel offers it only for isx-tagged ones). */
+  const cancelOrder = useCallback(async (orderId: string) => {
+    if (cancellingId) return;
+    setCancellingId(orderId);
+    try {
+      const r = await fetch('/api/scalper/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId, broker: 'dhan' }) });
+      const j = await r.json() as { success: boolean; error?: string };
+      flash({ ok: j.success, text: j.success ? `Cancel sent for order ${orderId}` : (j.error ?? 'Cancel failed') });
+    } catch (e) {
+      flash({ ok: false, text: `Cancel: no reply (${String((e as Error).message ?? e)}). Check Orders before retrying` });
+    } finally {
+      setCancellingId(null);
+      void loadOrders();
+    }
+  }, [cancellingId, flash, loadOrders]);
 
   // One click, one order: a ref (not state) so a fast double click cannot send twice before React re-renders.
   const oneClickBusyRef = useRef(false);
@@ -632,17 +710,20 @@ export default function IndexScalperTerminal() {
         </div>
       </div>
 
-      {/* account strip */}
-      <div className="flex items-center justify-between gap-4 px-3 h-9 border-t border-zinc-800 bg-zinc-900 text-[11px] shrink-0">
-        <span className="font-semibold text-zinc-300">Account Manager <span className={cn('ml-2 font-bold', real ? 'text-rose-400' : 'text-amber-300')}>{real ? 'REAL · Dhan' : 'SIM'}</span></span>
-        <div className="flex items-center gap-6 tabular-nums">
-          <span className="text-zinc-400">Open P&amp;L <b data-testid="open-pnl" className={cn(openPnl === null ? 'text-zinc-400' : openPnl >= 0 ? 'text-emerald-400' : 'text-rose-400')}>{fmtRupees(openPnl)}</b>
-            {unpriced > 0 && <span data-testid="open-pnl-partial" className="ml-1 text-amber-300" title="Legs with no live price (e.g. an expiry other than the one in the chain) are not in this total">partial · {unpriced} unpriced</span>}</span>
-          {!real && <span className="text-zinc-400">Realized (SIM) <b className={sim.realized >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{fmtRupees(sim.realized)}</b></span>}
-          <span className="text-zinc-400">Available Margin <b className="text-sky-300">{funds.available === null ? '—' : `₹${funds.available.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`}</b></span>
-          <span className="text-zinc-400">Used Margin <b className="text-zinc-200">{funds.used === null ? '—' : `₹${funds.used.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`}</b></span>
-        </div>
-      </div>
+      {/* account panel (Dhan-style) */}
+      <AccountPanel
+        real={real}
+        positions={panelPositions}
+        canExit={r => r.netQty !== 0 && !!legForRow(r)}
+        onExit={r => { const l = legForRow(r); if (l) void exitLeg(l); }}
+        exitingKey={exitingRowKey}
+        orders={panelOrders}
+        onCancelOrder={id => void cancelOrder(id)}
+        cancellingId={cancellingId}
+        holdings={panelHoldings}
+        funds={funds}
+        errors={{ positions: real ? posErr : null, orders: ordersErr, holdings: holdingsErr }}
+      />
 
       {scalperOn && (
         <DhanScalperWidget
