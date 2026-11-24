@@ -77,6 +77,8 @@ export type SeriesStyle = 'line' | 'histogram' | 'dots';
 export interface OutSeries {
   key: string;
   label: string;
+  /** Short name shown with the last value on the price scale, Dhan / TradingView style ("EMA(20)", "Supertrend"). */
+  axisLabel: string;
   color: string;
   style: SeriesStyle;
   /** One entry per input bar; null = no value (warm-up). */
@@ -141,12 +143,12 @@ export function computeIndicator(bars: Bar[], ind: IndicatorInstance): Indicator
     case 'ema': {
       // TradingView ta.ema (SMA seed, null before `period` bars): the definition Dhan's own charts use.
       const v = emaSmaSeeded(closes, p('period'));
-      return { pane: 'price', series: [{ key: 'v', label, color: ind.color, style: 'line', values: v }] };
+      return { pane: 'price', series: [{ key: 'v', label, axisLabel: `EMA(${p('period')})`, color: ind.color, style: 'line', values: v }] };
     }
     case 'sma':
-      return { pane: 'price', series: [{ key: 'v', label, color: ind.color, style: 'line', values: smaArray(closes, p('period')) }] };
+      return { pane: 'price', series: [{ key: 'v', label, axisLabel: `SMA(${p('period')})`, color: ind.color, style: 'line', values: smaArray(closes, p('period')) }] };
     case 'vwap':
-      return { pane: 'price', series: [{ key: 'v', label, color: ind.color, style: 'line', values: sessionVwap(bars) }] };
+      return { pane: 'price', series: [{ key: 'v', label, axisLabel: 'VWAP', color: ind.color, style: 'line', values: sessionVwap(bars) }] };
     case 'supertrend': {
       // Pine-exact ta.supertrend, as on Dhan's (TradingView) charts. The default path differs where the trailing bands
       // cross in a flat stretch, and NIFTY has one every session: the index is frozen from 15:15 to ~15:28 (closing
@@ -155,7 +157,7 @@ export function computeIndicator(bars: Bar[], ind: IndicatorInstance): Indicator
       return {
         pane: 'price',
         series: [{
-          key: 'v', label, color: ind.color, style: 'line',
+          key: 'v', label, axisLabel: 'Supertrend', color: ind.color, style: 'line',
           values: st.map(s => s.line),
           colors: st.map(s => (s.dir === 1 ? UP : s.dir === -1 ? DOWN : null)),
         }],
@@ -166,14 +168,14 @@ export function computeIndicator(bars: Bar[], ind: IndicatorInstance): Indicator
       return {
         pane: 'price',
         series: [
-          { key: 'up', label: `${label} upper`, color: ind.color, style: 'line', values: bb.up },
-          { key: 'mid', label: `${label} basis`, color: ind.color, style: 'line', values: bb.mid },
-          { key: 'lo', label: `${label} lower`, color: ind.color, style: 'line', values: bb.lo },
+          { key: 'up', label: `${label} upper`, axisLabel: 'BB upper', color: ind.color, style: 'line', values: bb.up },
+          { key: 'mid', label: `${label} basis`, axisLabel: 'BB basis', color: ind.color, style: 'line', values: bb.mid },
+          { key: 'lo', label: `${label} lower`, axisLabel: 'BB lower', color: ind.color, style: 'line', values: bb.lo },
         ],
       };
     }
     case 'rsi':
-      return { pane: 'sub', series: [{ key: 'v', label, color: ind.color, style: 'line', values: rsiArray(closes, p('period')), guides: [30, 70] }] };
+      return { pane: 'sub', series: [{ key: 'v', label, axisLabel: `RSI(${p('period')})`, color: ind.color, style: 'line', values: rsiArray(closes, p('period')), guides: [30, 70] }] };
     case 'macd': {
       const m = macdSeries(closes, p('fast'), p('slow'), p('signal'));
       const warm = p('slow') - 1;
@@ -181,9 +183,9 @@ export function computeIndicator(bars: Bar[], ind: IndicatorInstance): Indicator
       return {
         pane: 'sub',
         series: [
-          { key: 'hist', label: `${label} hist`, color: ind.color, style: 'histogram', values: hist, colors: hist.map(h => (h === null ? null : h >= 0 ? UP : DOWN)) },
-          { key: 'macd', label: `${label} MACD`, color: ind.color, style: 'line', values: m.macdLine.map((x, i) => (i < warm ? null : x)) },
-          { key: 'sig', label: `${label} signal`, color: '#f59e0b', style: 'line', values: m.signalLine.map((x, i) => (i < warm ? null : x)) },
+          { key: 'hist', label: `${label} hist`, axisLabel: 'Hist', color: ind.color, style: 'histogram', values: hist, colors: hist.map(h => (h === null ? null : h >= 0 ? UP : DOWN)) },
+          { key: 'macd', label: `${label} MACD`, axisLabel: 'MACD', color: ind.color, style: 'line', values: m.macdLine.map((x, i) => (i < warm ? null : x)) },
+          { key: 'sig', label: `${label} signal`, axisLabel: 'Signal', color: '#f59e0b', style: 'line', values: m.signalLine.map((x, i) => (i < warm ? null : x)) },
         ],
       };
     }
@@ -192,9 +194,9 @@ export function computeIndicator(bars: Bar[], ind: IndicatorInstance): Indicator
       return {
         pane: 'sub',
         series: [
-          { key: 'adx', label: `${label} ADX`, color: ind.color, style: 'line', values: d.adx },
-          { key: 'pdi', label: '+DI', color: UP, style: 'line', values: d.plusDi },
-          { key: 'mdi', label: '-DI', color: DOWN, style: 'line', values: d.minusDi },
+          { key: 'adx', label: `${label} ADX`, axisLabel: 'ADX', color: ind.color, style: 'line', values: d.adx },
+          { key: 'pdi', label: '+DI', axisLabel: '+DI', color: UP, style: 'line', values: d.plusDi },
+          { key: 'mdi', label: '-DI', axisLabel: '-DI', color: DOWN, style: 'line', values: d.minusDi },
         ],
       };
     }

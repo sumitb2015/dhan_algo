@@ -119,7 +119,8 @@ export default function ScalperChart(props: Props) {
     });
     const candles = chart.addSeries(CandlestickSeries, {
       upColor: UP, downColor: DOWN, borderUpColor: UP, borderDownColor: DOWN, wickUpColor: UP, wickDownColor: DOWN,
-      priceLineVisible: true, lastValueVisible: true,
+      // The axis label carries the symbol name next to the last price, as on Dhan's chart.
+      priceLineVisible: true, lastValueVisible: true, title: symbolLabel.split(' · ')[0],
     });
     chartRef.current = chart;
     candleRef.current = candles;
@@ -283,11 +284,13 @@ export default function ScalperChart(props: Props) {
         for (const s of out.series) {
           let api: ISeriesApi<SeriesType>;
           if (s.style === 'histogram') {
-            api = chart.addSeries(HistogramSeries, { color: s.color, priceLineVisible: false, lastValueVisible: false }, paneIdx);
+            api = chart.addSeries(HistogramSeries, { color: s.color, priceLineVisible: false, lastValueVisible: false, title: '' }, paneIdx);
           } else {
             const thick = s.colors ? 3 : 2;
             api = chart.addSeries(LineSeries, {
-              color: s.color, lineWidth: (paneIdx === 0 ? thick : 1) as 1 | 2 | 3, priceLineVisible: false, lastValueVisible: paneIdx !== 0 || !s.colors,
+              // Every indicator line shows its name + last value on the price scale (Supertrend too: the label takes the
+              // colour of its last point, so it reads green / red with the trend).
+              color: s.color, lineWidth: (paneIdx === 0 ? thick : 1) as 1 | 2 | 3, priceLineVisible: false, lastValueVisible: true, title: s.axisLabel,
               crosshairMarkerVisible: false,
             }, paneIdx);
             for (const g of s.guides ?? []) api.createPriceLine({ price: g, color: chrome.baseline, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' });

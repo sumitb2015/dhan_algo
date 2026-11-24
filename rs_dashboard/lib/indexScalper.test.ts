@@ -199,7 +199,7 @@ test('ticks accumulate: a closed bar keeps its range and the forming bar keeps e
 
 test('Supertrend is one series coloured per point, with a gap at each flip (no line drawn across the other trend)', () => {
   const G = '#22c55e', R = '#ef4444';
-  const s = { key: 'v', label: 'ST', color: G, style: 'line' as const, values: [1, 2, 3, 9, 8, 7, 3], colors: [G, G, G, R, R, R, G] };
+  const s = { key: 'v', label: 'ST', axisLabel: 'Supertrend', color: G, style: 'line' as const, values: [1, 2, 3, 9, 8, 7, 3], colors: [G, G, G, R, R, R, G] };
   // the segment from point i is drawn in point i's colour: the bar before each flip is transparent
   assert.deepEqual(s.values.map((_, i) => pointColor(s, i)), [G, G, 'transparent', R, R, 'transparent', G]);
   assert.equal(flipsAtLast(s), true);
@@ -207,4 +207,13 @@ test('Supertrend is one series coloured per point, with a gap at each flip (no l
   // histograms keep their own per-bar colour; plain lines have none
   assert.equal(pointColor({ ...s, style: 'histogram' }, 2), G);
   assert.equal(pointColor({ ...s, colors: undefined }, 2), undefined);
+});
+
+test('every indicator series names itself on the price scale', () => {
+  const bars = Array.from({ length: 60 }, (_, i) => ({ t: 1_790_000_000 + i * 300, o: 100, h: 101 + i % 3, l: 99 - i % 2, c: 100 + Math.sin(i) }));
+  const names = (k: Parameters<typeof newIndicator>[0]) => computeIndicator(bars, newIndicator(k, k)).series.map(s => s.axisLabel);
+  assert.deepEqual(names('ema'), ['EMA(20)']);
+  assert.deepEqual(names('supertrend'), ['Supertrend']);
+  assert.deepEqual(names('bbands'), ['BB upper', 'BB basis', 'BB lower']);
+  assert.deepEqual(names('macd'), ['Hist', 'MACD', 'Signal']);
 });
