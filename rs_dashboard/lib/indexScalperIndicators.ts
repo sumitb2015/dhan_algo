@@ -8,7 +8,7 @@ import type { Underlying } from './indexScalperInstrument.ts';
 
 export interface Bar { t: number; o: number; h: number; l: number; c: number }
 
-export type IndicatorKind = 'ema' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'rsi' | 'macd' | 'adx';
+export type IndicatorKind = 'ema' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'rsi' | 'macd' | 'adx';
 
 export interface IndicatorInstance {
   id: string;
@@ -42,6 +42,10 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
     kind: 'bbands', label: 'Bollinger Bands', pane: 'price', color: '#a78bfa',
     params: [{ key: 'period', label: 'Length', def: 20, min: 2, max: 200 }, { key: 'mult', label: 'StdDev', def: 2, min: 0.5, max: 10 }],
   },
+  // Daily levels from the previous IST day's high / low / close of the chart's own bars (TradingView "Pivot Points
+  // Standard", Traditional; the CPR is the same pivot with its BC / TC).
+  { kind: 'cpr', label: 'CPR (central pivot range)', pane: 'price', color: '#a855f7', params: [] },
+  { kind: 'pivots', label: 'Pivot S / R (S1-S4, R1-R4)', pane: 'price', color: '#f59e0b', params: [{ key: 'levels', label: 'Levels (1-4)', def: 4, min: 1, max: 4 }] },
   { kind: 'rsi', label: 'RSI', pane: 'sub', color: '#8b5cf6', params: [{ key: 'period', label: 'Length', def: 14, min: 2, max: 100 }] },
   {
     kind: 'macd', label: 'MACD', pane: 'sub', color: '#06b6d4',
@@ -64,7 +68,7 @@ export function newIndicator(kind: IndicatorKind, id: string): IndicatorInstance
 export function indicatorLabel(ind: IndicatorInstance): string {
   const c = catalogEntry(ind.kind);
   const ps = c.params.map(p => ind.params[p.key] ?? p.def).join(', ');
-  const name = ind.kind === 'vwap' ? 'VWAP' : c.label;
+  const name = ind.kind === 'vwap' ? 'VWAP' : ind.kind === 'cpr' ? 'CPR' : ind.kind === 'pivots' ? 'Pivots S/R' : c.label;
   return ps ? `${name} (${ps})` : name;
 }
 
@@ -91,6 +95,11 @@ export interface OutSeries {
   colors?: (string | null)[];
   /** Fixed horizontal guide lines for oscillators (RSI 30/70). */
   guides?: number[];
+  /** breaks[i] = hide the segment from point i to i+1 (a daily level changing at the day boundary). lightweight-charts
+   *  joins a line straight across whitespace, so without this every day change draws a slanted jump. */
+  breaks?: boolean[];
+  /** Line width on the price pane (default 2; daily levels are drawn at 1). */
+  lineWidth?: 1 | 2 | 3;
 }
 
 export interface IndicatorOutput {
@@ -121,6 +130,42 @@ export function sessionVwap(bars: Bar[]): (number | null)[] {
     out.push(sum / n);
   }
   return out;
+}
+
+/** Previous-day pivot inputs per bar: the high, low and close of the latest IST day BEFORE the bar's own day that has
+ *  bars in the list (a holiday or weekend is skipped, as on a daily chart). null on the first day of the history. */
+export function prevDayHlc(bars: Bar[]): ({ h: number; l: number; c: number } | null)[] {
+  const out: ({ h: number; l: number; c: number } | null)[] = [];
+  let day = -1;
+  let cur: { h: number; l: number; c: number } | null = null;
+  let prev: { h: number; l: number; c: number } | null = null;
+  for (const b of bars) {
+    const d = istDay(b.t);
+    if (d !== day) { if (cur) prev = cur; cur = { h: b.h, l: b.l, c: b.c }; day = d; }
+    else if (cur) { cur.h = Math.max(cur.h, b.h); cur.l = Math.min(cur.l, b.l); cur.c = b.c; }
+    out.push(prev ? { ...prev } : null);
+  }
+  return out;
+}
+
+/** Floor pivots from one day's H / L / C, TradingView "Traditional": P, the CPR (BC = (H+L)/2, TC = 2P - BC, shown as
+ *  the upper / lower of the two), R1-R4 and S1-S4. */
+export function pivotLevels(h: number, l: number, c: number) {
+  const p = (h + l + c) / 3;
+  const bc = (h + l) / 2;
+  const tc = 2 * p - bc;
+  return {
+    p, tc: Math.max(tc, bc), bc: Math.min(tc, bc),
+    r1: 2 * p - l, s1: 2 * p - h,
+    r2: p + (h - l), s2: p - (h - l),
+    r3: 2 * p + (h - 2 * l), s3: 2 * p - (2 * h - l),
+    r4: 3 * p + (h - 3 * l), s4: 3 * p - (3 * h - l),
+  };
+}
+
+/** Day-boundary breaks for daily-level lines: true on the last bar of each IST day that has a next bar. */
+export function dayBreaks(bars: Bar[]): boolean[] {
+  return bars.map((b, i) => i + 1 < bars.length && istDay(bars[i + 1].t) !== istDay(b.t));
 }
 
 export function bollinger(closes: number[], period: number, mult: number): { mid: (number | null)[]; up: (number | null)[]; lo: (number | null)[] } {
@@ -177,6 +222,28 @@ export function computeIndicator(bars: Bar[], ind: IndicatorInstance): Indicator
           { key: 'lo', label: `${label} lower`, axisLabel: 'BB lower', color: ind.color, style: 'line', values: bb.lo },
         ],
       };
+    }
+    case 'cpr':
+    case 'pivots': {
+      const hlc = prevDayHlc(bars);
+      const lv = hlc.map(x => (x ? pivotLevels(x.h, x.l, x.c) : null));
+      const breaks = dayBreaks(bars);
+      const level = (key: keyof ReturnType<typeof pivotLevels>, name: string, color: string): OutSeries => ({
+        key, label: `${label} ${name}`, axisLabel: name, color, style: 'line', lineWidth: 1, breaks,
+        values: lv.map(x => (x ? x[key] : null)),
+      });
+      if (ind.kind === 'cpr') {
+        return { pane: 'price', series: [level('tc', 'TC', ind.color), level('p', 'P', ind.color), level('bc', 'BC', ind.color)] };
+      }
+      const n = Math.max(1, Math.min(4, Math.round(p('levels'))));
+      const series: OutSeries[] = [level('p', 'P', ind.color)];
+      const R = ['r1', 'r2', 'r3', 'r4'] as const;
+      const S = ['s1', 's2', 's3', 's4'] as const;
+      for (let k = 0; k < n; k++) {
+        series.push(level(R[k], R[k].toUpperCase(), DOWN));
+        series.push(level(S[k], S[k].toUpperCase(), UP));
+      }
+      return { pane: 'price', series };
     }
     case 'rsi':
       return { pane: 'sub', series: [{ key: 'v', label, axisLabel: `RSI(${p('period')})`, color: ind.color, style: 'line', values: rsiArray(closes, p('period')), guides: [30, 70] }] };
@@ -276,6 +343,7 @@ export function mergeHistory(history: Bar[], live: Bar[], intervalMin: number, n
  *  across bullish stretches. lightweight-charts paints the segment i -> i+1 in point i's colour, so the last bar BEFORE
  *  a flip is transparent: that hides the jump from one band to the other, the gap TradingView leaves at a flip. */
 export function pointColor(s: OutSeries, i: number): string | undefined {
+  if (s.breaks?.[i]) return 'transparent';
   if (!s.colors) return undefined;
   const c = s.colors[i] ?? s.color;
   if (s.style !== 'line') return c;
@@ -287,7 +355,10 @@ export function pointColor(s: OutSeries, i: number): string | undefined {
  *  which an update of the last point alone cannot repaint, so the chart must redraw the series. */
 export function flipsAtLast(s: OutSeries): boolean {
   const n = s.values.length;
-  return s.style === 'line' && !!s.colors && n >= 2 && !!s.colors[n - 1] && !!s.colors[n - 2] && s.colors[n - 1] !== s.colors[n - 2];
+  if (s.style !== 'line' || n < 2) return false;
+  // A daily level whose last bar opened a new day: the point before it turned transparent (the day-change gap).
+  if (s.breaks?.[n - 2]) return true;
+  return !!s.colors && !!s.colors[n - 1] && !!s.colors[n - 2] && s.colors[n - 1] !== s.colors[n - 2];
 }
 
 /** Saved indicator lists from before the Supertrend default became factor 2: a Supertrend still on the old untouched

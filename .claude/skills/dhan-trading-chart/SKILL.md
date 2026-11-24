@@ -29,7 +29,7 @@ Related skills:
 | Feature | File / function |
 |---|---|
 | Chart, candle series, theme, resize | `ScalperChart.tsx`, the `chart lifecycle` and `theme` sections |
-| Indicators (EMA, SMA, VWAP, Supertrend, BB, RSI, MACD, ADX), catalog, params | `lib/indexScalperIndicators.ts`: `INDICATOR_CATALOG`, `computeIndicator`, `clampParam` |
+| Indicators (EMA, SMA, VWAP, Supertrend, BB, CPR, Pivot S1-S4 / R1-R4, RSI, MACD, ADX), catalog, params | `lib/indexScalperIndicators.ts`: `INDICATOR_CATALOG`, `computeIndicator`, `clampParam`; daily levels via `prevDayHlc`, `pivotLevels`, `dayBreaks` |
 | Saved-settings migration | `migrateIndicatorsV1`; localStorage keys `indexScalper.indicators.v1` -> `v2` |
 | Live candles from ticks; REST history as backfill | `applyTick`, `mergeHistory` (same file); the terminal's live-bars effect |
 | Fast tail update vs full redraw | `tailUnchanged`, `flipsAtLast`, `pointColor`; the chart's `data + indicators` effect |
@@ -56,6 +56,20 @@ Related skills:
 - **VWAP:** session-anchored hlc3 (`sessionVwap`). An index has no volume, so on an index chart this is an average.
 - **Proof:** a "matches TradingView" claim needs a fixture with candles and the broker chart's printed values.
   A visual check is not proof.
+
+### Daily levels (CPR, pivots) step at the day change, with no slanted joins
+- **Source:** levels come from the previous IST day that has bars (`prevDayHlc`; a weekend or holiday is skipped),
+  using TradingView "Pivot Points Standard", Traditional (`pivotLevels`).
+  - P = (H+L+C)/3, BC = (H+L)/2, TC = 2P-BC (TC is shown as the upper of the two).
+  - R1/S1 = 2P-L / 2P-H; R2/S2 = P±(H-L); R3/S3 = 2P+(H-2L) / 2P-(2H-L); R4/S4 = 3P+(H-3L) / 3P-(3H-L).
+  - The first day of the history has none (null).
+- **Close basis:** C is the last intraday bar's close. A daily candle's official close (NIFTY's 15:30 closing price)
+  can differ slightly, so check against the broker chart before treating a level as exact.
+- **Day breaks:** lightweight-charts joins across whitespace, so each day's last point is transparent (`breaks`,
+  honoured by `pointColor`). `flipsAtLast` treats "the last bar opened a new day" as a flip, so the tail path re-sends
+  just that series once per day. A new day-based indicator must set `breaks` too.
+- **Line width:** levels are drawn at width 1 (`lineWidth` on the series). They take part in autoscale, as on
+  TradingView, so R4/S4 widen the price range. Fewer `levels` keeps the candles larger.
 
 ### Supertrend is ONE series with a colour per point
 - **Why not two series:** with one series per colour plus whitespace, lightweight-charts joins straight across the

@@ -313,3 +313,42 @@ test('legsKey: unchanged legs give the same key (the page keeps the array and th
   assert.notEqual(legsKey([leg]), legsKey([{ ...leg, ltp: 6121 }])); // a price move is a change (P&L chip)
   assert.notEqual(legsKey([leg]), legsKey([{ ...leg, netQty: 5 }]));
 });
+
+test('CPR and pivots: TradingView Traditional levels from the previous IST day, broken at the day change', async () => {
+  const { pivotLevels, prevDayHlc, dayBreaks } = await import('./indexScalperIndicators.ts');
+  const lv = pivotLevels(25500, 25300, 25450);
+  const near = (a: number, b: number) => assert.ok(Math.abs(a - b) < 1e-6, `${a} != ${b}`);
+  near(lv.p, 25416.666666666668); near(lv.bc, 25400); near(lv.tc, 25433.333333333336);
+  near(lv.r1, 25533.333333333336); near(lv.s1, 25333.333333333336);
+  near(lv.r2, 25616.666666666668); near(lv.s2, 25216.666666666668);
+  near(lv.r3, 25733.333333333336); near(lv.s3, 25133.333333333336);
+  near(lv.r4, 25850); near(lv.s4, 25050);
+  // TC is always the upper of the two (a close below the midpoint puts 2P - BC under BC).
+  const low = pivotLevels(100, 80, 82);
+  assert.ok(low.tc >= low.bc);
+
+  // Two sessions with a weekend between: Monday's levels come from Friday's H / L / C (its last close).
+  const ist = (iso: string) => Date.parse(`${iso}+05:30`) / 1000;
+  const bars = [
+    { t: ist('2026-11-20T09:15:00'), o: 10, h: 12, l: 9, c: 11 },
+    { t: ist('2026-11-20T15:25:00'), o: 11, h: 15, l: 10, c: 14 },
+    { t: ist('2026-11-23T09:15:00'), o: 14, h: 16, l: 13, c: 15 },
+    { t: ist('2026-11-23T09:20:00'), o: 15, h: 17, l: 14, c: 16 },
+  ];
+  const hlc = prevDayHlc(bars);
+  assert.equal(hlc[0], null); assert.equal(hlc[1], null); // first day of the history: no previous day
+  assert.deepEqual(hlc[2], { h: 15, l: 9, c: 14 });
+  assert.deepEqual(hlc[3], { h: 15, l: 9, c: 14 });
+  assert.deepEqual(dayBreaks(bars), [false, true, false, false]);
+
+  const pv = computeIndicator(bars, { ...newIndicator('pivots', 'p'), params: { levels: 2 } });
+  assert.deepEqual(pv.series.map(s => s.axisLabel), ['P', 'R1', 'S1', 'R2', 'S2']);
+  assert.equal(pv.series[0].values[3], (15 + 9 + 14) / 3);
+  // The last point of Friday is transparent (no slanted jump to Monday's level); the new day's first bar needs that
+  // point recoloured, so it counts as a flip at the last bar.
+  assert.equal(pointColor(pv.series[0], 1), 'transparent');
+  assert.equal(flipsAtLast({ ...pv.series[0], values: pv.series[0].values.slice(0, 3), breaks: dayBreaks(bars.slice(0, 3)) }), true);
+  assert.equal(flipsAtLast(pv.series[0]), false);
+  const cpr = computeIndicator(bars, newIndicator('cpr', 'c'));
+  assert.deepEqual(cpr.series.map(s => s.axisLabel), ['TC', 'P', 'BC']);
+});

@@ -333,7 +333,7 @@ function ScalperChart(props: Props) {
           for (const s of out.series) {
             const api = indSeriesRef.current[k++];
             if (!api) continue;
-            if (recolor && s.colors && s.style === 'line') { api.setData(seriesData(s, bars) as never); continue; }
+            if (recolor && (s.colors || s.breaks) && s.style === 'line') { api.setData(seriesData(s, bars) as never); continue; }
             const v = s.values[s.values.length - 1];
             if (v === null) continue;
             const color = pointColor(s, s.values.length - 1);
@@ -359,7 +359,7 @@ function ScalperChart(props: Props) {
           if (s.style === 'histogram') {
             api = chart.addSeries(HistogramSeries, { color: s.color, priceLineVisible: false, lastValueVisible: false, title: '' }, paneIdx);
           } else {
-            const thick = s.colors ? 3 : 2;
+            const thick = s.lineWidth ?? (s.colors ? 3 : 2);
             api = chart.addSeries(LineSeries, {
               // Every indicator line shows its name + last value on the price scale (Supertrend too: the label takes the
               // colour of its last point, so it reads green / red with the trend).
