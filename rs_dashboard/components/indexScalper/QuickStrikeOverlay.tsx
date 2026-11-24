@@ -5,11 +5,11 @@
 // sends a market order through the terminal (placeContract: lot cap, live price, session, broker routing, isx tag).
 //
 // It sits over the chart and reads the chart's geometry from `viewportRef` on its own 150 ms timer, so live premiums
-// re-render this small overlay only, never the memoised chart. Prices are live bridge ticks only (`ltpById`): a strike
-// without one (outside the bridge window, stale feed, closed market) shows "—" and cannot trade.
+// re-render this small overlay only, never the memoised chart. Only a LIVE bridge tick (`ltpById`) can trade. Without one
+// (closed market, stale feed, outside the bridge window) the chip shows the chain snapshot's last price, dimmed and marked
+// "not live" (display only, as the chain panel does), else "—"; its Buy / Sell stay disabled.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
-import { ChevronsDown, ChevronsUp, X } from 'lucide-react';
 import type { ChartViewport } from './ScalperChart';
 import type { PickedContract } from './OptionChainPanel';
 import type { IndexScalperFeed } from './useIndexScalperFeed';
@@ -30,8 +30,9 @@ interface Props {
   onTrade: (c: PickedContract, side: Side, lots: number, product: 'INTRADAY' | 'MARGIN') => Promise<{ ok: boolean; text: string }>;
 }
 
-/** Chips sit this far left of the chart's right edge: clear of the price axis (~65 px), the position / TP / SL chips
- *  (right-[84px], ~260 px wide) and the OI profile's bars + labels (up to 260 px + label). */
+/** Chips sit this far left of the chart's right edge: clear of the price axis (~65 px), a plain position chip
+ *  (right-[84px]) and the OI profile's bars + labels. A row whose strike holds a position (Quick Trade anchors it on the
+ *  strike line) measures that chip, which grows with its TP / SL badges, and sits just left of it. */
 const CHIPS_RIGHT = 430;
 /** Width of one row's label + C + P chips: a narrow pane (two charts on a laptop) pulls the chips right so they never
  *  leave the plot on the left. */
@@ -44,7 +45,8 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
 
   // Rows follow zoom / pan / autoscale, which fire no event: re-read the chart's geometry every 150 ms and set state only
   // when something moved, so an idle chart costs nothing.
-  const [layout, setLayout] = useState<{ rows: StrikeRow[]; step: number; plotW: number }>({ rows: [], step: 1, plotW: 0 });
+  const [layout, setLayout] = useState<{ rows: StrikeRow[]; step: number; plotW: number; rights: Record<number, number> }>({ rows: [], step: 1, plotW: 0, rights: {} });
+  const rootRef = useRef<HTMLDivElement>(null);
   const strikesRef = useRef(strikes);
   const atmRef = useRef(atm);
   useEffect(() => { strikesRef.current = strikes; atmRef.current = atm; });
@@ -54,10 +56,23 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
       if (!vp) return;
       const { rows, step } = visibleStrikeRows(strikesRef.current, vp.priceToY, vp.plotHeight(), atmRef.current);
       const plotW = vp.plotWidth();
+      // Position chips on a strike line (the chart draws them; they grow with TP / SL badges): measure where each starts.
+      const rights: Record<number, number> = {};
+      const host = rootRef.current?.parentElement;
+      if (host) {
+        const box = host.getBoundingClientRect();
+        const chips = Array.from(host.querySelectorAll<HTMLElement>('[data-testid="position-chip"]')).map(el => el.getBoundingClientRect());
+        for (const r of rows) {
+          for (const c of chips) {
+            if (Math.abs(c.top + c.height / 2 - box.top - r.y) < 14) rights[r.strike] = Math.max(rights[r.strike] ?? 0, Math.round(box.right - c.left + 8));
+          }
+        }
+      }
       setLayout(prev => {
         const same = prev.step === step && Math.abs(prev.plotW - plotW) < 0.5 && prev.rows.length === rows.length
-          && prev.rows.every((r, i) => r.strike === rows[i].strike && r.atm === rows[i].atm && Math.abs(r.y - rows[i].y) < 0.5);
-        return same ? prev : { rows, step, plotW };
+          && prev.rows.every((r, i) => r.strike === rows[i].strike && r.atm === rows[i].atm && Math.abs(r.y - rows[i].y) < 0.5)
+          && JSON.stringify(prev.rights) === JSON.stringify(rights);
+        return same ? prev : { rows, step, plotW, rights };
       });
     };
     tick();
@@ -81,14 +96,20 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
     return () => { document.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey); };
   }, [open]);
 
-  const contractFor = useCallback((strike: number, type: Opt): { c: PickedContract | null; ltp: number | null } => {
+  // `ltp`: the live tick (the only price that may trade). `shown`: what the chip displays: the live tick, else the snapshot
+  // chain's last price (display only, `live: false`).
+  const contractFor = useCallback((strike: number, type: Opt): { c: PickedContract | null; ltp: number | null; shown: number | null; live: boolean } => {
+    const snapSide = feed.chainSource === 'snapshot' ? feed.chain?.strikes?.[String(strike)]?.[type === 'CE' ? 'ce' : 'pe'] : undefined;
+    const snap = snapSide && snapSide.ltp > 0 ? snapSide.ltp : null;
     const r = resolveSource({ kind: 'option', type, strike }, underlying, feed.strikeIds, spot, feed.kotak?.strikes ?? null);
-    if (r.strike !== strike) return { c: null, ltp: null }; // not listed for this expiry
+    if (r.strike !== strike) return { c: null, ltp: null, shown: snap, live: false }; // not listed for this expiry
     const ltp = r.dhanId ? feed.ltpById.get(r.dhanId) ?? null : null;
+    const shown = ltp ?? snap;
+    const live = ltp !== null;
     const securityId = r.dhanId ?? r.kotakSymbol;
-    if (!securityId) return { c: null, ltp };
-    return { c: { strike, type, securityId, ltp, expiry: feed.expiry, tradingSymbol: r.kotakSymbol }, ltp };
-  }, [underlying, feed.strikeIds, feed.kotak?.strikes, feed.ltpById, feed.expiry, spot]);
+    if (!securityId) return { c: null, ltp, shown, live };
+    return { c: { strike, type, securityId, ltp, expiry: feed.expiry, tradingSymbol: r.kotakSymbol }, ltp, shown, live };
+  }, [underlying, feed.strikeIds, feed.kotak?.strikes, feed.ltpById, feed.expiry, feed.chain, feed.chainSource, spot]);
 
   // Why a chip cannot trade right now (null = it can). Live price only: never a snapshot or a previous close.
   const blocked = (ltp: number | null): string | null => {
@@ -117,12 +138,12 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
   };
 
   const fmt = (n: number | null) => (n === null ? '—' : n.toFixed(2));
-  const { rows, step, plotW } = layout;
+  const { rows, step, plotW, rights } = layout;
   if (rows.length === 0) return null;
   const right = Math.max(84, Math.min(CHIPS_RIGHT, plotW + 65 - ROW_W - 8));
 
   return (
-    <div className="absolute inset-0 z-[3] pointer-events-none" data-testid="quick-overlay">
+    <div ref={rootRef} className="absolute inset-0 z-[3] pointer-events-none" data-testid="quick-overlay">
       {step > 1 && (
         <div className="absolute left-1/2 -translate-x-1/2 bottom-8 px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-[10px] text-zinc-400">
           Every {step === 2 ? '2nd' : `${step}th`} strike: zoom in for all
@@ -134,11 +155,12 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
           <div key={r.strike} data-testid="quick-strike-row" data-strike={r.strike} data-y={r.y.toFixed(1)}>
             {/* strike line: violet data colour, the ATM line a little stronger */}
             <div className={cn('absolute left-0 h-px', r.atm ? 'bg-violet-400/70' : 'bg-violet-500/30')} style={{ top: r.y, width: Math.max(0, plotW) }} />
-            <div className="absolute flex items-center gap-1.5 -translate-y-1/2 pointer-events-auto" style={{ top: r.y, right }}>
+            <div className="absolute flex items-center gap-1.5 -translate-y-1/2 pointer-events-auto" style={{ top: r.y, right: Math.max(right, rights[r.strike] ?? 0) }}>
               <span className={cn('text-[10px] font-mono pr-0.5 whitespace-nowrap', r.atm ? 'text-violet-300 font-bold' : 'text-violet-400')}>{r.strike}{r.atm ? ' ATM' : ''}</span>
               {(['CE', 'PE'] as const).map(t => {
-                const { ltp } = t === 'CE' ? ce : pe;
+                const { ltp, shown, live } = t === 'CE' ? ce : pe;
                 const why = blocked(ltp);
+                const shownTitle = live ? '' : shown !== null ? ` · ${fmt(shown)} is the last price from Dhan's chain snapshot, not live` : '';
                 const isOpen = open?.strike === r.strike && open.type === t;
                 return (
                   <div key={t} className="relative">
@@ -147,34 +169,26 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
                       data-quick-chip
                       aria-label={`Quick ${r.strike} ${t}`}
                       aria-expanded={isOpen}
-                      title={why ?? `${underlying} ${r.strike} ${t === 'CE' ? 'CALL' : 'PUT'}: click to buy or sell`}
+                      title={why ? `${why}${shownTitle}` : `${underlying} ${r.strike} ${t === 'CE' ? 'CALL' : 'PUT'}: click to buy or sell`}
                       onClick={() => setOpen(isOpen ? null : { strike: r.strike, type: t })}
                       className={cn('flex items-stretch h-[22px] rounded overflow-hidden border text-[11px] font-mono tabular-nums shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
                         t === 'CE' ? 'border-sky-500/70' : 'border-violet-500/70', isOpen && 'ring-2 ring-offset-0 ring-sky-400')}
                     >
                       <span className={cn('px-1.5 flex items-center font-bold text-oncolor', t === 'CE' ? 'bg-sky-600' : 'bg-violet-600')}>{t === 'CE' ? 'C' : 'P'}</span>
-                      <span className={cn('px-1.5 flex items-center bg-zinc-900', why ? 'text-zinc-500' : 'text-zinc-100')}>{fmt(ltp)}</span>
+                      <span data-live={live ? '1' : '0'} className={cn('px-1.5 flex items-center bg-zinc-900', live && !why ? 'text-zinc-100' : shown !== null ? 'text-zinc-400 italic' : 'text-zinc-500')}>{fmt(shown)}</span>
                     </button>
                     {isOpen && (
-                      <div ref={popRef} role="dialog" aria-label={`Trade ${r.strike} ${t}`}
-                        className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 z-10 w-[132px] rounded-2xl border border-violet-500/60 bg-zinc-900 shadow-2xl p-1.5 flex flex-col gap-1">
+                      // Compact: two small B / S buttons beside the chip (the lots and any reason are in the tooltip).
+                      <div ref={popRef} role="group" aria-label={`Trade ${r.strike} ${t}`} data-reason={why ?? ''}
+                        className="absolute left-full top-1/2 -translate-y-1/2 ml-1 z-10 flex items-center gap-0.5 p-0.5 rounded-md border border-zinc-600 bg-zinc-900 shadow-xl">
                         <button type="button" disabled={!!why || sending} onClick={() => void send(r.strike, t, 'BUY')}
                           aria-label={`Quick buy ${r.strike} ${t} ${settings.buyLots} lot${settings.buyLots === 1 ? '' : 's'}`}
-                          className="h-8 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-oncolor text-xs font-bold flex items-center justify-center gap-1 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300">
-                          <ChevronsUp className="w-4 h-4" />Buy {settings.buyLots}L
-                        </button>
-                        <div className="flex items-center justify-between px-1 text-[10px] font-mono">
-                          <span className={cn('font-bold', t === 'CE' ? 'text-sky-400' : 'text-violet-400')}>{r.strike} {t}</span>
-                          <span className="text-zinc-200">{fmt(ltp)}</span>
-                          <button type="button" aria-label="Close" onClick={() => setOpen(null)} className="text-zinc-500 hover:text-white"><X className="w-3 h-3" /></button>
-                        </div>
+                          title={why ? `${why}${shownTitle}` : `Buy ${settings.buyLots} lot${settings.buyLots === 1 ? '' : 's'} ${r.strike} ${t} at market${real ? ' (REAL)' : ' (SIM)'}`}
+                          className={cn('w-6 h-[18px] rounded text-[11px] font-bold text-oncolor bg-emerald-600 hover:bg-emerald-500 disabled:opacity-35 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300', real && 'ring-1 ring-rose-400')}>B</button>
                         <button type="button" disabled={!!why || sending} onClick={() => void send(r.strike, t, 'SELL')}
                           aria-label={`Quick sell ${r.strike} ${t} ${settings.sellLots} lot${settings.sellLots === 1 ? '' : 's'}`}
-                          className="h-8 rounded-xl bg-rose-600 hover:bg-rose-500 text-oncolor text-xs font-bold flex items-center justify-center gap-1 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300">
-                          <ChevronsDown className="w-4 h-4" />Sell {settings.sellLots}L
-                        </button>
-                        {why && <div className="text-[9px] leading-tight text-amber-400 px-0.5">{why}</div>}
-                        {real && !why && <div className="text-[9px] font-bold text-rose-400 text-center">REAL · market order</div>}
+                          title={why ? `${why}${shownTitle}` : `Sell ${settings.sellLots} lot${settings.sellLots === 1 ? '' : 's'} ${r.strike} ${t} at market${real ? ' (REAL)' : ' (SIM)'}`}
+                          className={cn('w-6 h-[18px] rounded text-[11px] font-bold text-oncolor bg-rose-600 hover:bg-rose-500 disabled:opacity-35 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300', real && 'ring-1 ring-rose-400')}>S</button>
                       </div>
                     )}
                   </div>

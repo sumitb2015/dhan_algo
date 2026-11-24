@@ -15,10 +15,12 @@ import { useChartChrome } from '@/lib/chartTheme';
 import { computeIndicator, indicatorLabel, tailUnchanged, type Bar, type IndicatorInstance, pointColor, flipsAtLast, type OutSeries } from '@/lib/indexScalperIndicators';
 import { bracketKind, fmtRupees, legAnchor, legPnl, type ScalperLeg } from '@/lib/indexScalperPositions';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
-import { displayLotUnits, qtyUnits, type Underlying } from '@/lib/indexScalperInstrument';
+import { INSTRUMENTS, displayLotUnits, qtyUnits, type Underlying } from '@/lib/indexScalperInstrument';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
 import { fmtOI, fmtOIChange, oiBars, type OiMode, type OiProfile } from '@/lib/indexScalperOiProfile';
+import { legPremiumPnl, premiumBracketsFor } from '@/lib/indexScalperPremiumBrackets';
+import PremiumBracketControls from './PremiumBracketControls';
 
 export type DrawTool = 'cursor' | 'hline' | 'trend' | 'ruler';
 
@@ -107,6 +109,8 @@ interface Props {
   viewportRef?: MutableRefObject<ChartViewport | null>;
   /** Quick Trade: option legs are drawn on their strike line (else at the spot they were opened at). */
   strikeAnchor?: boolean;
+  /** Quick Trade: working orders of the OPTION legs on this chart (by security id), for their premium TP / SL badges. */
+  premiumOrders?: OrderRowView[];
 }
 
 interface Hover { o: number; h: number; l: number; c: number; t: number }
@@ -140,7 +144,7 @@ function ScalperChart(props: Props) {
     onExitLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
-    premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false,
+    premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false, premiumOrders,
   } = props;
   const drawKeyRef = useRef(drawKeyProp);
   const tickSize = tickProp ?? (underlying === 'CRUDEOILM' ? 1.0 : 0.05);
@@ -1403,11 +1407,21 @@ function ScalperChart(props: Props) {
         const totalUnits = qtyUnits(p.leg.netQty, p.leg.mult ?? 1);
         const lots = Math.max(1, Math.round(totalUnits / lotSize));
 
-        const curSpot = (last?.c && last.c > 0) ? last.c : p.anchor.level;
-        const curPtDiff = isLong ? (curSpot - p.anchor.level) : (p.anchor.level - curSpot);
-        const curPct = p.anchor.level > 0 ? (curPtDiff / p.anchor.level) * 100 : 0;
-        const curPnl = p.pnl !== null ? p.pnl : (curPtDiff * totalUnits);
-        const pnlCls = curPnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
+        // An option on the underlying chart is priced by its PREMIUM: the chart's points are index points, so neither its
+        // % nor a fallback from them means anything (it showed index points x units when the live premium was missing).
+        // FUT legs and an option on its own premium chart: the chart's last price is the instrument's own.
+        const optOnIndex = p.leg.type !== 'FUT' && !premium;
+        let curPnl: number | null, curPct: number | null;
+        if (optOnIndex) {
+          const pp = legPremiumPnl(p.leg);
+          curPnl = pp?.pnl ?? null; curPct = pp?.pct ?? null;
+        } else {
+          const curSpot = (last?.c && last.c > 0) ? last.c : p.anchor.level;
+          const curPtDiff = isLong ? (curSpot - p.anchor.level) : (p.anchor.level - curSpot);
+          curPct = p.anchor.level > 0 ? (curPtDiff / p.anchor.level) * 100 : 0;
+          curPnl = p.pnl !== null ? p.pnl : (curPtDiff * totalUnits);
+        }
+        const pnlCls = curPnl === null ? 'text-zinc-400' : curPnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
 
         const b = activeBrackets[p.leg.id];
 
@@ -1447,7 +1461,12 @@ function ScalperChart(props: Props) {
             >
               SL
             </button>
-            </>) : (
+            </>) : strikeAnchor && optOnIndex ? (
+              <PremiumBracketControls leg={p.leg} units={totalUnits} tick={INSTRUMENTS[underlying].optTick}
+                brackets={premiumBracketsFor(p.leg, premiumOrders ?? [], simBrackets?.[p.leg.id])}
+                onSet={(kind, price) => onSetBracket?.({ leg: p.leg, kind, price })}
+                onCancel={(kind, orderId) => onCancelBracket?.({ legId: p.leg.id, kind, orderId })} />
+            ) : (
               <span title="Set TP / SL on this option's own chart: its levels are premiums" className="text-[10px] text-zinc-500">{p.leg.type} {p.leg.strike}</span>
             )}
 
@@ -1471,7 +1490,9 @@ function ScalperChart(props: Props) {
 
             {/* Live P&L INR (+0.00%) */}
             <span className={cn('h-[18px] px-1 flex items-center text-[10px] font-semibold', pnlCls)}>
-              {curPnl >= 0 ? '+' : ''}{inrWhole(curPnl)} INR ({curPct >= 0 ? '+' : ''}{curPct.toFixed(2)}%)
+              {curPnl === null
+                ? <span title="No live premium for this option">— INR</span>
+                : <>{curPnl >= 0 ? '+' : ''}{inrWhole(curPnl)} INR ({(curPct ?? 0) >= 0 ? '+' : ''}{(curPct ?? 0).toFixed(2)}%)</>}
             </span>
 
             {p.leg.sim && (

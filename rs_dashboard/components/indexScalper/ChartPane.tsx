@@ -28,6 +28,7 @@ import { cn } from '@/lib/utils';
 export interface PaneCfg { source: ChartSource; interval: Interval }
 
 export const INTERVALS: Interval[] = ['1', '3', '5', '15'];
+const EMPTY_ORDERS: OrderRowView[] = [];
 
 type ChartOrderReq = { side: 'BUY' | 'SELL'; price: number; lots: number; orderType?: 'LIMIT' | 'STOP_LOSS' };
 
@@ -140,6 +141,13 @@ function ChartPane(p: Props) {
   const oiKey = oiProfileKey(oiRaw);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const oiProfile = useMemo(() => oiRaw, [oiKey]);
+  // Quick Trade: the working orders of the option legs drawn here (their premium TP / SL badges), by security id. They
+  // are not drawn as lines: their prices are premiums, not index levels.
+  const premiumOrders = useMemo(() => {
+    if (!quickOn) return EMPTY_ORDERS;
+    const ids = new Set(paneLegs.filter(l => l.type !== 'FUT').map(l => l.securityId));
+    return ids.size ? p.openOrders.filter(o => o.securityId && ids.has(o.securityId)) : EMPTY_ORDERS;
+  }, [quickOn, paneLegs, p.openOrders]);
   const paneOrders = useMemo(() => p.openOrders.filter(o => orderOnChart(o, resolved)), [p.openOrders, resolved]);
 
   // Strike picker: every strike the expiry lists. Strikes far from ATM get history only (the bridge ticks 35 around ATM).
@@ -237,6 +245,7 @@ function ChartPane(p: Props) {
           oiMode={p.oiMode}
           viewportRef={viewportRef}
           strikeAnchor={quickOn}
+          premiumOrders={premiumOrders}
         />
         {quickOn && p.quick && (
           <QuickStrikeOverlay viewportRef={viewportRef} underlying={underlying} feed={feed} settings={p.quick} real={p.real} onTrade={p.onQuickTrade} />

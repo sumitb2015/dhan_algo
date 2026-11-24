@@ -20,7 +20,7 @@ function bars(level: number, swing: number) {
   });
 }
 
-interface State { calls: Call[]; blocked: Call[]; candleReqs: string[]; positions: Record<string, unknown>[]; orders: Record<string, unknown>[]; noSpot?: boolean; noPrevOi?: boolean; noLtpStrike?: number }
+interface State { calls: Call[]; blocked: Call[]; candleReqs: string[]; positions: Record<string, unknown>[]; orders: Record<string, unknown>[]; noSpot?: boolean; noPrevOi?: boolean; noLtpStrike?: number; snapChain?: boolean; ce25350?: number }
 
 async function mockApi(page: Page, state: State) {
   await page.route('**/api/**', async (route: Route) => {
@@ -56,13 +56,21 @@ async function mockApi(page: Page, state: State) {
         const peOi = Math.round(3_500_000 * Math.exp(-(((k - 25100) / 180) ** 2))) + 200_000;
         return [String(k), {
           strike: k,
-          ce: { ltp: state.noLtpStrike === k ? 0 : IDS[String(k)] ? 210.5 : 100, change_pct: -3, buildup: 'SB', ...side(ceOi, k >= SPOT) },
+          ce: { ltp: state.noLtpStrike === k ? 0 : k === 25350 && state.ce25350 ? state.ce25350 : IDS[String(k)] ? 210.5 : 100, change_pct: -3, buildup: 'SB', ...side(ceOi, k >= SPOT) },
           pe: { ltp: IDS[String(k)] ? 229.95 : 100, change_pct: 5, buildup: 'LB', ...side(peOi, k < SPOT) },
         }];
       }));
       return json(route, { success: true, status: { status: 'RUNNING' }, quotes: { underlying: 'NIFTY', expiry: '2026-12-01', spot: SPOT, atm: SPOT, updated_at: sessionIso(), strikes } });
     }
-    if (p === '/api/options/chain') return json(route, { success: false, error: 'e2e: no chain' }, 502);
+    if (p === '/api/options/chain') {
+      if (!state.snapChain) return json(route, { success: false, error: 'e2e: no chain' }, 502);
+      // Dhan REST shape (strike keys "25350.000000"): the last traded prices of a closed market
+      const oc = Object.fromEntries(ALL_STRIKES.filter(k => Math.abs(k - SPOT) <= 300).map(k => [`${k}.000000`, {
+        ce: { last_price: 195, oi: 2_761_590, previous_close_price: 180, previous_oi: 2_000_000, volume: 1 },
+        pe: { last_price: 54.5, oi: 6_129_890, previous_close_price: 60, previous_oi: 6_000_000, volume: 1 },
+      }]));
+      return json(route, { success: true, data: { chain: { oc }, spot: SPOT } });
+    }
     if (p === '/api/options/margin') return json(route, { success: true, data: { total_margin: 100000 } });
     if (p === '/api/scalper/funds') return json(route, { success: true, data: { availabelBalance: 4684089.17, utilizedAmount: 0 } });
     if (p === '/api/scalper/positions') return json(route, { success: true, data: state.positions });
@@ -247,22 +255,133 @@ test.describe('Index Scalper layout + option charts', () => {
     await expect(overlay.getByRole('button', { name: 'Quick 25400 CE' })).toContainText('—');
     await overlay.getByRole('button', { name: 'Quick 25400 CE' }).click();
     await expect(overlay.getByRole('button', { name: /^Quick buy 25400 CE/ })).toBeDisabled();
-    await expect(overlay.getByRole('dialog', { name: 'Trade 25400 CE' })).toContainText('No live price for this strike');
+    await expect(overlay.getByRole('group', { name: 'Trade 25400 CE' })).toHaveAttribute('data-reason', /No live price for this strike/);
+    await expect(overlay.getByRole('button', { name: /^Quick buy 25400 CE/ })).toHaveAttribute('title', /No live price for this strike/);
     await page.keyboard.press('Escape');
-    await expect(overlay.getByRole('dialog')).toHaveCount(0);
+    await expect(overlay.getByRole('group', { name: /^Trade / })).toHaveCount(0);
 
     // C -> Buy: one paper leg of the Buy lots, drawn on the strike line
     await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
     await overlay.getByRole('button', { name: 'Quick buy 25350 CE 1 lot' }).click();
-    await expect(overlay.getByRole('dialog')).toHaveCount(0); // closes after sending
+    await expect(overlay.getByRole('group', { name: /^Trade / })).toHaveCount(0); // closes after sending
     const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
     await expect(chip).toBeVisible({ timeout: 15_000 });
-    await expect(chip).toContainText('CE 25350');
+    await expect(chip.getByRole('button', { name: 'Exit CE 25350' })).toBeVisible();
     await expect(chip.getByTestId('position-lots')).toHaveAttribute('title', 'Long 1 lot (65 units)');
     const rowY = Number(await overlay.locator('[data-strike="25350"]').getAttribute('data-y'));
     const chipBox = (await chip.boundingBox())!, paneBox = (await page.getByTestId('chart-pane-0').locator('canvas').first().boundingBox())!;
     expect(Math.abs(chipBox.y + chipBox.height / 2 - (paneBox.y + rowY))).toBeLessThan(6); // on its strike line
     expect(state.calls).toEqual([]); // SIM: no order route touched
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('Quick Trade with no live ticks: chips show the snapshot last price (dimmed, not live) and cannot trade', async ({ page, context }) => {
+    const state = newState();
+    state.noSpot = true; // bridge has no quotes (closed market / bridge down)
+    state.snapChain = true; // Dhan's chain snapshot has the last prices
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    const overlay = page.getByTestId('chart-pane-0').getByTestId('quick-overlay');
+    const ce = overlay.getByRole('button', { name: 'Quick 25350 CE' });
+    await expect(ce).toContainText('195.00', { timeout: 20_000 });
+    await expect(overlay.getByRole('button', { name: 'Quick 25350 PE' })).toContainText('54.50');
+    await expect(ce.locator('[data-live]')).toHaveAttribute('data-live', '0');
+    await expect(ce).toHaveAttribute('title', /not live/);
+    await ce.click();
+    await expect(overlay.getByRole('button', { name: /^Quick buy 25350 CE/ })).toBeDisabled();
+    await expect(overlay.getByRole('button', { name: /^Quick sell 25350 CE/ })).toBeDisabled();
+    await expect(overlay.getByRole('button', { name: /^Quick buy 25350 CE/ })).toHaveAttribute('title', /not live/);
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('Quick Trade SIM position: premium P&L on the strike chip, premium target validated, set, and hit', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    const pane = page.getByTestId('chart-pane-0');
+    const overlay = pane.getByTestId('quick-overlay');
+    await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
+    await overlay.getByRole('button', { name: 'Quick buy 25350 CE 1 lot' }).click();
+    const chip = pane.getByTestId('position-chip');
+    await expect(chip).toContainText('+0 INR (+0.00%)', { timeout: 15_000 });
+
+    // P&L follows the option's own premium, not the index: 210.50 -> 220.00 on 65 units = +617.5, +4.51 %
+    state.ce25350 = 220;
+    await expect(chip).toContainText('+618 INR (+4.51%)', { timeout: 15_000 });
+
+    // a target on the wrong side of the live premium is refused before anything is set
+    await chip.getByRole('button', { name: 'Target for CE 25350' }).click();
+    const tp = page.getByRole('dialog', { name: 'Target premium for CE 25350' });
+    await expect(tp.getByLabel('TP premium')).toHaveValue('264.00'); // 20 % above the live premium
+    await tp.getByLabel('TP premium').fill('215');
+    await expect(tp).toContainText("A long's target must be above the live premium 220.00");
+    await expect(tp.getByRole('button', { name: 'Set' })).toBeDisabled();
+    await tp.getByLabel('TP premium').fill('225');
+    await expect(tp).toContainText('Books about +943 at 225.00 (SIM)');
+    await tp.getByRole('button', { name: 'Set' }).click();
+    await expect(chip.getByTestId('premium-tp')).toContainText('TP 225.00');
+    await expect(chip.getByTestId('premium-tp')).toContainText('+943');
+    // the wider chip never covers its own strike's C / P chips (the row measures it and moves left)
+    await expect.poll(async () => {
+      const pe = (await overlay.getByRole('button', { name: 'Quick 25350 PE' }).boundingBox())!;
+      const cb = (await chip.boundingBox())!;
+      return pe.x + pe.width <= cb.x;
+    }, { timeout: 5_000 }).toBe(true);
+
+    // the live premium crosses the target: the paper leg closes
+    state.ce25350 = 226;
+    await expect(page.getByRole('status').filter({ hasText: 'Target hit' })).toBeVisible({ timeout: 15_000 });
+    await expect(pane.getByTestId('position-chip')).toHaveCount(0);
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('Quick Trade REAL position: SL as a premium sends an SL-M on that option (isx); its badge cancels the order', async ({ page, context }) => {
+    const state = newState();
+    state.positions = [{
+      tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY',
+      netQty: 65, buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG',
+    }];
+    state.orders = [{ correlationId: 'isxk1', securityId: '302', productType: 'INTRADAY', transactionType: 'BUY', filledQty: 65, orderStatus: 'TRADED' }];
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
+    await expect(chip).toContainText('+683 INR (+5.25%)', { timeout: 15_000 }); // (210.50 - 200) x 65
+
+    await chip.getByRole('button', { name: 'Stop loss for CE 25350' }).click();
+    const sl = page.getByRole('dialog', { name: 'Stop loss premium for CE 25350' });
+    await sl.getByLabel('SL premium').fill('190');
+    await expect(sl).toContainText('Books about -650 at 190.00');
+    await sl.getByLabel('SL premium').press('Enter');
+    await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/fast-order').length, { timeout: 15_000 }).toBe(1);
+    expect(state.calls.find(c => c.path === '/api/scalper/fast-order')!.body).toMatchObject({
+      securityId: '302', side: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 190, quantity: 65, productType: 'INTRADAY', source: 'isx',
+    });
+
+    // the order book now shows it: the chip's badge reads it, and its x cancels that order
+    state.orders = [...state.orders, {
+      orderId: 'SL1', correlationId: 'isxsl', securityId: '302', tradingSymbol: 'NIFTY-Dec2026-25350-CE', productType: 'INTRADAY',
+      transactionType: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 190, price: 0, quantity: 65, filledQty: 0, orderStatus: 'PENDING',
+      drvOptionType: 'CALL', drvStrikePrice: 25350, drvExpiryDate: '2026-12-01',
+    }];
+    await expect(chip.getByTestId('premium-sl')).toContainText('SL 190.00', { timeout: 15_000 });
+    await expect(chip.getByTestId('premium-sl')).toContainText('-650');
+    // not drawn on the index axis as an order line / chip
+    await expect(page.getByTestId('chart-pane-0').getByTestId('order-chip')).toHaveCount(0);
+    await chip.getByRole('button', { name: 'Cancel SL CE 25350' }).click();
+    await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/orders').map(c => c.body?.orderId)).toEqual(['SL1']);
     expect(state.blocked).toEqual([]);
   });
 
@@ -281,7 +400,7 @@ test.describe('Index Scalper layout + option charts', () => {
 
     const overlay = page.getByTestId('chart-pane-0').getByTestId('quick-overlay');
     await overlay.getByRole('button', { name: 'Quick 25300 PE' }).click();
-    await expect(overlay.getByRole('dialog', { name: 'Trade 25300 PE' })).toContainText('REAL · market order');
+    await expect(overlay.getByRole('button', { name: 'Quick sell 25300 PE 2 lots' })).toHaveAttribute('title', 'Sell 2 lots 25300 PE at market (REAL)');
     await overlay.getByRole('button', { name: 'Quick sell 25300 PE 2 lots' }).dblclick(); // a double click is ONE order
     await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/fast-order').length, { timeout: 15_000 }).toBe(1);
     await page.waitForTimeout(600);

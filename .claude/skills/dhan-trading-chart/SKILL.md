@@ -178,8 +178,19 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
 - **Orders** go through the terminal's `onTradeContract` -> `placeContract` (lot cap, session, live price, broker routing,
   `isx`), market, at once; one order per click (overlay latch + `oneClickBusyRef`). Lots per click come from a select
   (Buy and Sell separately), never a typed box (`dhan-commit-on-blur`).
-- **Placement**: chips sit `CHIPS_RIGHT` (430 px) from the right, clear of the OI bars and the position chip, pulled
-  right on a narrow pane so they never leave the plot.
+- **Placement**: chips sit `CHIPS_RIGHT` (430 px) from the right, clear of the OI bars and a plain position chip, pulled
+  right on a narrow pane so they never leave the plot. A row holding a position measures that chip (it grows with TP /
+  SL badges) and sits just left of it.
+- **Trade control**: a click on a chip shows two small B / S buttons beside it (lots and any refusal reason in the
+  tooltip), not a panel.
+- **Target / stop on a strike position** (`PremiumBracketControls.tsx`, rules `lib/indexScalperPremiumBrackets.ts`):
+  typed as a PREMIUM on the position chip, never dragged on the index axis. Validated against the LIVE premium (a long's
+  target above it, stop below; a short's the other way; none without a live premium) and the option tick
+  (`INSTRUMENTS[u].optTick`, not the chart's), then sent through `onSetBracket` (REAL: LIMIT / SL-M on that contract,
+  isx; SIM: the paper watcher on `leg.ltp`). Badges read SIM levels or this contract's working orders by security id;
+  × cancels. Those orders are not drawn as lines on the index axis.
+- **Option P&L on the index chart** comes from premiums (`legPremiumPnl`), "—" without a live premium. It used to fall
+  back to index points x units, and its % was an index-point ratio.
 
 ### Price-scale "+" menu and hotkeys
 - **Hover:** within the price axis band, show a "+" at the snapped price (use the instrument's tick, never a
