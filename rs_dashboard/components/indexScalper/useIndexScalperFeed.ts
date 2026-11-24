@@ -84,7 +84,7 @@ export function useIndexScalperFeed(): IndexScalperFeed {
     }).catch(() => {});
   }, [viewerId]);
 
-  const { liveQuotes: raw } = useLiveOptionsWS(expiry, 'dhan', ['dhan'], UNDERLYING);
+  const { liveQuotes: raw, feedAt } = useLiveOptionsWS(expiry, 'dhan', ['dhan'], UNDERLYING);
   const quotes = useMemo(() => {
     if (!raw) return null;
     if (raw.underlying && raw.underlying.toUpperCase() !== UNDERLYING) return null;
@@ -165,7 +165,12 @@ export function useIndexScalperFeed(): IndexScalperFeed {
   }, [expiry, hasLive]);
   const chain = quotes ?? (snapshot && snapshot.expiry === expiry ? snapshot : null);
 
-  const lastTick = quotes?.updated_at ? Date.parse(quotes.updated_at) : 0;
+  // Liveness: when the broker feed last sent ANY packet (bridge heartbeat / feed_at), so a quiet minute with no price
+  // change is not "stale" while a frozen Dhan socket still is. A bridge too old to send feed_at falls back to the last
+  // price change.
+  const feedMs = feedAt ? Date.parse(feedAt) : NaN;
+  const changeMs = quotes?.updated_at ? Date.parse(quotes.updated_at) : 0;
+  const lastTick = !quotes ? 0 : Number.isFinite(feedMs) && feedMs > 0 ? feedMs : changeMs;
   const feedAgeSec = lastTick > 0 && nowMs > 0 ? Math.max(0, (nowMs - lastTick) / 1000) : null;
   const spot = quotes && quotes.spot > 0 ? quotes.spot : null;
 

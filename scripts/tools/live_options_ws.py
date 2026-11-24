@@ -601,7 +601,16 @@ def main():
     # merges the packet into live_data BEFORE invoking this callback, so the
     # data is already readable when the main loop wakes.
     dirty = threading.Event()
-    helper.start_websocket(instruments, on_message=lambda inst, msg: dirty.set())
+    # Time of the last packet of ANY kind from Dhan (also an unchanged price). Pages judge the feed alive from this
+    # (`feed_at`), not from the last price CHANGE: a quiet minute is not a dead feed, and a dead Dhan socket inside a
+    # running bridge must still read as stale.
+    last_packet = [0.0]
+
+    def _on_packet(_inst, _msg):
+        last_packet[0] = time.time()
+        dirty.set()
+
+    helper.start_websocket(instruments, on_message=_on_packet)
     time.sleep(3)  # wait for connection + first tick batch
 
     # Diagnostic: check if index canary received a tick
@@ -619,6 +628,8 @@ def main():
     last_print = 0.0
     last_quotes = None
     last_pushed = None
+    last_push_ts = 0.0
+    HEARTBEAT_S = 2.0   # with no data change, tell WS clients the feed is alive (or not) every 2 s
     last_file_write = 0.0
     last_history_write = 0.0
     last_extra_check = 0.0
@@ -904,19 +915,31 @@ def main():
             # WS push (hot path): push immediately whenever the snapshot changed.
             # Compare the core payload BEFORE stamping volatile fields
             # (updated_at/pushed_at) so identical market data never re-pushes.
+            feed_at_iso = (datetime.fromtimestamp(last_packet[0], timezone.utc).isoformat().replace('+00:00', 'Z')
+                           if last_packet[0] > 0 else None)
             if current_quotes != last_pushed:
                 payload = dict(current_quotes)
                 payload['type']       = 'quotes'
                 payload['updated_at'] = now_iso
                 payload['pushed_at']  = now_ts
+                payload['feed_at']    = feed_at_iso
                 push_server.broadcast(json.dumps(payload))
                 last_pushed = current_quotes
+                last_push_ts = now_ts
+            elif now_ts - last_push_ts >= HEARTBEAT_S:
+                # Heartbeat: no data change, but say when Dhan last sent anything (a frozen feed shows an old feed_at).
+                push_server.broadcast(json.dumps({
+                    'type': 'heartbeat', 'underlying': args.underlying, 'expiry': args.expiry,
+                    'feed_at': feed_at_iso, 'pushed_at': now_ts,
+                }))
+                last_push_ts = now_ts
 
             # Quotes file (fallback + other consumers): relaxed 500ms cadence —
             # the scalper hot path no longer reads this file.
             if current_quotes != last_quotes and now_ts - last_file_write >= 0.5:
                 file_payload = dict(current_quotes)
                 file_payload['updated_at'] = now_iso
+                file_payload['feed_at'] = feed_at_iso
                 if atomic_write(QUOTES_FILE, file_payload):
                     last_quotes = current_quotes
                     last_file_write = now_ts

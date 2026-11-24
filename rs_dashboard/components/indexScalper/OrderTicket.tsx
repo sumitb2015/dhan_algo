@@ -7,7 +7,7 @@ import { useState } from 'react';
 import { X } from 'lucide-react';
 import type { PickedContract } from './OptionChainPanel';
 import { useDraggable } from './useDraggable';
-import { MAX_LOTS, orderUnits } from '@/lib/indexScalperPositions';
+import { MAX_LOTS, orderUnits, tickError } from '@/lib/indexScalperPositions';
 import { cn } from '@/lib/utils';
 
 export type TicketOrderType = 'MARKET' | 'LIMIT' | 'STOP_LOSS_MARKET' | 'STOP_LOSS';
@@ -66,6 +66,8 @@ export default function OrderTicket({ contract, liveLtp, expiry, lotSize, real, 
     const trigger = needsTrigger ? Number(trigDraft) : null;
     if (needsPrice && !(price && price > 0)) return setErr('Enter a limit price');
     if (needsTrigger && !(trigger && trigger > 0)) return setErr('Enter a trigger price');
+    const offTick = (needsPrice && price ? tickError('Price', price) : null) ?? (needsTrigger && trigger ? tickError('Trigger', trigger) : null);
+    if (offTick) return setErr(offTick);
     if (orderType === 'MARKET' && !(ltp && ltp > 0)) return setErr('No live price for this contract yet');
     onSubmit({ contract, side, orderType, price, trigger, product, lots });
   };

@@ -158,3 +158,19 @@ export function fmtRupees(n: number | null): string {
   const sign = n > 0 ? '+' : n < 0 ? '-' : '';
   return `${sign}₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 }
+
+/** NSE index options trade in steps of Rs 0.05. */
+export const OPTION_TICK = 0.05;
+
+/** Why a limit / trigger price is off the exchange tick, with the two nearest valid prices; null when it is on a tick.
+ *  The ticket refuses instead of rounding: a real-money price is never changed behind the user's back, and Dhan would
+ *  reject the off-tick price anyway. */
+export function tickError(label: string, price: number, tick = OPTION_TICK): string | null {
+  if (!Number.isFinite(price) || price <= 0) return null;
+  const paise = price * 100;
+  const step = Math.round(tick * 100);
+  const whole = Math.round(paise);
+  if (Math.abs(paise - whole) < 1e-6 && whole % step === 0) return null;
+  const lo = Math.floor(paise / step + 1e-9) * step;
+  return `${label} ${price} is not a multiple of ₹${tick.toFixed(2)}: use ${(lo / 100).toFixed(2)} or ${((lo + step) / 100).toFixed(2)}`;
+}

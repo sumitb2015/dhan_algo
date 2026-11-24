@@ -64,6 +64,45 @@ test.describe('Index Scalper feed + order route', () => {
   test.afterEach(async () => { await new Promise<void>(r => server.close(() => r())); });
 
   const push = (s: string) => { for (const c of server.clients) if (c.readyState === 1) c.send(s); };
+  const heartbeat = (feedAtMs: number) => push(JSON.stringify({ type: 'heartbeat', underlying: 'NIFTY', expiry: '2026-12-01', feed_at: new Date(feedAtMs).toISOString(), pushed_at: Date.now() / 1000 }));
+
+  test('a quiet market is not stale while the bridge heartbeat says Dhan is still sending; a frozen feed is', async ({ page, context }) => {
+    test.setTimeout(90_000);
+    const http = { liveGets: 0 };
+    await signIn(context);
+    await mockPage(page, port, http);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await expect.poll(() => connections, { timeout: 15_000 }).toBeGreaterThan(0);
+    push(frame(25351, 210.5)); // one price, then no price change at all
+
+    // 14 s of heartbeats with a fresh feed_at (Dhan still sending, prices unchanged): never stale
+    for (let i = 0; i < 7; i++) { heartbeat(Date.now()); await page.waitForTimeout(2_000); }
+    await expect(page.getByText(/Live ticks are stale/)).toHaveCount(0);
+
+    // heartbeats keep coming but feed_at stops moving (Dhan's socket froze inside a running bridge): stale after 10 s
+    const frozen = Date.now();
+    for (let i = 0; i < 7; i++) { heartbeat(frozen); await page.waitForTimeout(2_000); }
+    await expect(page.getByText(/Live ticks are stale/)).toBeVisible();
+  });
+
+  test('the ticket refuses a limit price off the 0.05 tick and names the nearest valid prices', async ({ page, context }) => {
+    const http = { liveGets: 0 };
+    await signIn(context);
+    await mockPage(page, port, http);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await expect.poll(() => connections, { timeout: 15_000 }).toBeGreaterThan(0);
+    push(frame(25351, 210.5));
+    await page.getByRole('button', { name: 'Option chain' }).click();
+    await page.getByRole('button', { name: 'Trade 25350 CE' }).click();
+    const ticket = page.getByTestId('order-ticket');
+    await ticket.getByRole('button', { name: 'Limit', exact: true }).click();
+    await ticket.getByLabel('Price').fill('180.03');
+    await ticket.getByRole('button', { name: /^Buy / }).click();
+    await expect(ticket).toContainText('Price 180.03 is not a multiple of ₹0.05: use 180.00 or 180.05');
+    await expect(page.getByTestId('position-chip')).toHaveCount(0);
+  });
 
   test('chain, ticket and spot update from WebSocket pushes in real time', async ({ page, context }) => {
     const http = { liveGets: 0 };

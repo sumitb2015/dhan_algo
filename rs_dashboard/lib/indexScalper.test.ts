@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyFill, legAnchor, legPnl, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, parseNiftyOption, pnlSummary, totalPnl,
+  applyFill, tickError, legAnchor, legPnl, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, parseNiftyOption, pnlSummary, totalPnl,
   type ScalperLeg,
 } from './indexScalperPositions.ts';
 import { applyTick, computeIndicator, flipsAtLast, mergeHistory, migrateIndicatorsV1, pointColor, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
@@ -266,4 +266,14 @@ test('Dhan Scalper: ATM strikes with offsets, no strike without a price, expiry 
   assert.equal(calcOptionBuyReq(229.95, 1, 65)?.toFixed(2), '14946.75');
   assert.equal(calcOptionBuyReq(null, 1, 65), null);
   assert.equal(calcOptionBuyReq(244.95, 1, null), null);
+});
+
+test('limit / trigger prices must sit on the Rs 0.05 tick; the error names the two nearest valid prices', () => {
+  assert.equal(tickError('Price', 180), null);
+  assert.equal(tickError('Price', 180.05), null);
+  assert.equal(tickError('Price', 0.05), null);
+  assert.equal(tickError('Price', 229.95), null); // float noise: 229.95 * 100 = 22994.999...
+  assert.equal(tickError('Price', 180.03), 'Price 180.03 is not a multiple of ₹0.05: use 180.00 or 180.05');
+  assert.equal(tickError('Trigger', 99.99), 'Trigger 99.99 is not a multiple of ₹0.05: use 99.95 or 100.00');
+  assert.equal(tickError('Price', 12.345), 'Price 12.345 is not a multiple of ₹0.05: use 12.30 or 12.35');
 });

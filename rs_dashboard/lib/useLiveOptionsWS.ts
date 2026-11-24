@@ -61,6 +61,10 @@ export interface LiveOptionsWSResult {
   bridgeStatus: BridgeStatus;
   lastUpdated: string;
   transport: 'ws' | 'poll';
+  /** When the bridge last received ANY packet from the broker feed (ISO), from quote frames and the bridge's 2 s
+   *  heartbeat; null from a bridge too old to send it. Unlike `liveQuotes.updated_at` (last price CHANGE), this tells a
+   *  quiet market from a dead feed. */
+  feedAt: string | null;
 }
 
 type ChannelState = LiveOptionsWSResult;
@@ -70,6 +74,7 @@ const EMPTY_STATE: ChannelState = {
   bridgeStatus: { status: 'STOPPED' },
   lastUpdated: '',
   transport: 'poll',
+  feedAt: null,
 };
 
 /**
@@ -117,7 +122,9 @@ function runChannel(
     rafId = requestAnimationFrame(() => {
       rafId = null;
       if (disposed || !latestRef.quotes) return;
+      const fa = (latestRef.quotes as LiveQuotes & { feed_at?: string | null }).feed_at;
       onUpdate({
+        ...(typeof fa === 'string' ? { feedAt: fa } : {}),
         liveQuotes: latestRef.quotes,
         lastUpdated: new Date().toLocaleTimeString('en-IN', {
           hour: '2-digit', minute: '2-digit', second: '2-digit',
@@ -177,7 +184,14 @@ function runChannel(
       if (disposed) return;
       lastWsMsgAt = Date.now();
       try {
-        const q = JSON.parse(ev.data as string) as LiveQuotes;
+        const q = JSON.parse(ev.data as string) as LiveQuotes & { type?: string; feed_at?: string | null };
+        if (q.type === 'heartbeat') {
+          // No data change, but the bridge says when the broker feed last spoke (an old time = a dead feed).
+          if ((!q.expiry || q.expiry === expiry) && (!q.underlying || q.underlying === underlying) && typeof q.feed_at === 'string') {
+            onUpdate({ feedAt: q.feed_at });
+          }
+          return;
+        }
         if (acceptQuotes(q, true)) {
           latestRef.quotes = q;
           scheduleFlush();
