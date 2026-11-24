@@ -18,7 +18,7 @@ function candles() {
   });
 }
 
-type MockState = { calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[]; orders?: Record<string, unknown>[]; noLive?: boolean; chainCalls?: number };
+type MockState = { calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[]; orders?: Record<string, unknown>[]; noLive?: boolean; chainCalls?: number; liveExpiry?: string; marginCalls?: number };
 
 async function mockApi(page: Page, state: MockState) {
   await page.route('**/api/**', async (route: Route) => {
@@ -43,15 +43,23 @@ async function mockApi(page: Page, state: MockState) {
       }]));
       return json(route, { success: true, data: { chain: { oc }, spot: 25349.65 } });
     }
+    if (p === '/api/options/margin') {
+      state.marginCalls = (state.marginCalls ?? 0) + 1;
+      return json(route, { success: true, data: { total_margin: 215121.01 } });
+    }
     if (p === '/api/options/live') {
-      if (method === 'POST') return json(route, { success: true });
+      if (method === 'POST') {
+        // the bridge follows the expiry the page last started it for
+        if (body?.action === 'start' && typeof body.expiry === 'string') state.liveExpiry = body.expiry;
+        return json(route, { success: true });
+      }
       if (state.noLive) return json(route, { success: true, status: { status: 'STOPPED' }, quotes: null });
       const strikes = Object.fromEntries(Object.keys(IDS).map(k => [k, {
         strike: Number(k),
         ce: { ltp: 210.5, oi: 1_200_000, oi_chg_pct: 12.5, change_pct: -3.2, buildup: 'SB' },
         pe: { ltp: 229.95, oi: 2_300_000, oi_chg_pct: -4.1, change_pct: 5.5, buildup: 'LB' },
       }]));
-      const expiry = u.searchParams.get('expiry') || '2026-12-01';
+      const expiry = state.liveExpiry ?? '2026-12-01';
       return json(route, { success: true, status: { status: 'RUNNING' }, quotes: { underlying: 'NIFTY', expiry, spot: SPOT, atm: SPOT, updated_at: new Date().toISOString(), strikes } });
     }
     if (p === '/api/scalper/funds') return json(route, { success: true, data: { availabelBalance: 4684089.17, utilizedAmount: 0 } });
@@ -296,5 +304,60 @@ test.describe('Index Scalper', () => {
     await expect(page.getByRole('button', { name: 'Buy 25350 CE' })).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Sell 25350 PE' })).toBeDisabled();
     expect(state.calls).toEqual([]);
+  });
+
+  test('Scalper widget: +/- sizes the ATM CALL, closing it disarms one-click, sells show Dhan\'s margin (SIM)', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], positions: [] };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'Scalper' }).click();
+    const w = page.getByTestId('dhan-scalper-widget');
+    await expect(w).toBeVisible();
+    // Dhan's margin calculator, not a formula
+    await expect(w).toContainText('Margin: ₹2,15,121.01', { timeout: 15_000 });
+
+    // +/- must register even while live ticks re-render the widget
+    await w.getByRole('button', { name: 'More lots (ATM)' }).click();
+    await expect(w).toContainText('Lot: 2');
+    await w.getByRole('button', { name: /^Buy ATM call/ }).click();
+    const chip = page.getByTestId('position-chip');
+    await expect(chip).toBeVisible({ timeout: 15_000 });
+    await expect(chip).toContainText('CE 25350');
+    await expect(chip).toContainText('130'); // 2 lots x 65
+
+    // X closes the widget AND disarms one-click: the chain's B opens the ticket again instead of trading
+    await w.getByRole('button', { name: 'Close scalper' }).click();
+    await expect(w).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Scalper' })).toHaveAttribute('aria-pressed', 'false');
+    await page.getByRole('button', { name: 'Option chain' }).click();
+    const row = page.getByTestId('option-chain-panel').getByRole('row').filter({ hasText: '25300' });
+    await row.hover();
+    await row.getByRole('button', { name: 'Buy 25300 CE' }).click();
+    await expect(page.getByTestId('order-ticket')).toContainText('25300 CALL');
+    await expect(page.getByTestId('position-chip')).toHaveCount(1);
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('Scalper widget follows an expiry change made in the chain: its REAL order is not refused', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], positions: [] };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    await page.getByRole('button', { name: 'Option chain' }).click();
+    await page.getByTestId('option-chain-panel').getByRole('combobox').selectOption('2026-12-08');
+    await page.getByRole('button', { name: 'Scalper' }).click();
+    const w = page.getByTestId('dhan-scalper-widget');
+    await expect(w).toContainText('08 DEC');
+    await expect(w.getByRole('button', { name: /^Buy ATM put/ })).toBeEnabled({ timeout: 15_000 });
+    await w.getByRole('button', { name: /^Buy ATM put/ }).click();
+    await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
+    expect(state.calls[0].body).toMatchObject({ securityId: '402', quantity: 65, side: 'BUY', orderType: 'MARKET', source: 'isx' });
+    expect(state.blocked).toEqual([]);
   });
 });

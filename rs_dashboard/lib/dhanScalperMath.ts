@@ -50,12 +50,14 @@ export function formatManageScripExpiry(expiryStr: string): string {
   return expiryStr;
 }
 
-/** Compute ATM Put and Call strikes matching Dhan's scalper convention */
-export function computeAtmStrikes(spot: number, step = 50): { peStrike: number; ceStrike: number } {
-  if (!spot || spot <= 0) return { peStrike: 25000, ceStrike: 25000 };
-  const peStrike = spot % step === 0 ? spot : Math.floor(spot / step) * step;
-  const ceStrike = spot % step === 0 ? spot : Math.ceil(spot / step) * step;
-  return { peStrike, ceStrike };
+/** The widget's PE and CE strikes: the strike at or below spot for the PUT, at or above for the CALL (both = spot on a
+ *  round strike), each moved by its Manage Scrips offset in strike steps. null when there is no price: strikes are never
+ *  picked from a guessed spot. */
+export function computeAtmStrikes(spot: number | null, step = 50, peOffset = 0, ceOffset = 0): { peStrike: number; ceStrike: number } | null {
+  if (spot === null || !Number.isFinite(spot) || spot <= 0) return null;
+  const pe = spot % step === 0 ? spot : Math.floor(spot / step) * step;
+  const ce = spot % step === 0 ? spot : Math.ceil(spot / step) * step;
+  return { peStrike: pe + peOffset * step, ceStrike: ce + ceOffset * step };
 }
 
 /** Offset label relative to ATM strike (e.g. ATM, ATM+1, ATM-1) */
@@ -65,32 +67,9 @@ export function getStrikeOffsetLabel(strike: number, atm: number, step = 50): st
   return diff > 0 ? `ATM+${diff}` : `ATM-${Math.abs(diff)}`;
 }
 
-/** Buy requirement = quantity * ltp */
-export function calcOptionBuyReq(ltp: number | null, lots: number, lotSize: number): number {
-  if (!ltp || ltp <= 0 || lots <= 0 || lotSize <= 0) return 0;
+/** Premium to buy: units x LTP; null when the price or lot size is unknown (never a made-up 0). Sell margin is not
+ *  estimated here: the widget asks Dhan's margin calculator (/api/options/margin). */
+export function calcOptionBuyReq(ltp: number | null, lots: number, lotSize: number | null): number | null {
+  if (!ltp || ltp <= 0 || lots <= 0 || !lotSize || lotSize <= 0) return null;
   return ltp * (lots * lotSize);
-}
-
-/** Sell requirement = SPAN base (~7.5%) + Exposure (~2%) + premium - OTM buffer */
-export function calcOptionSellReq(
-  strike: number,
-  spot: number,
-  ltp: number | null,
-  lots: number,
-  lotSize: number,
-  type: 'CE' | 'PE'
-): number {
-  if (lots <= 0 || lotSize <= 0) return 0;
-  const s = spot > 0 ? spot : strike;
-  const units = lots * lotSize;
-  const spanBase = s * units * 0.075;
-  const expBase = s * units * 0.02;
-  const prem = (ltp ?? 0) * units;
-  let otmDiscount = 0;
-  if (type === 'CE' && strike > s) {
-    otmDiscount = Math.min((strike - s) * units * 0.3, spanBase * 0.25);
-  } else if (type === 'PE' && strike < s) {
-    otmDiscount = Math.min((s - strike) * units * 0.3, spanBase * 0.25);
-  }
-  return Math.max(spanBase + expBase + prem - otmDiscount, 120000 * lots);
 }

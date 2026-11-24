@@ -240,43 +240,30 @@ test('saved Supertrend still on the old (10, 3) default moves to (10, 2); a user
   assert.deepEqual(migrateIndicatorsV1([ema])[0], ema);
 });
 
-test('Dhan Scalper: ATM strikes, expiry formatting, and buy/sell requirements match screenshot specifications', async () => {
-  const {
-    computeAtmStrikes,
-    formatDhanExpiry,
-    formatManageScripExpiry,
-    getStrikeOffsetLabel,
-    calcOptionBuyReq,
-    calcOptionSellReq,
-  } = await import('./dhanScalperMath.ts');
+test('Dhan Scalper: ATM strikes with offsets, no strike without a price, expiry labels, buy premium', async () => {
+  const { computeAtmStrikes, formatDhanExpiry, formatManageScripExpiry, getStrikeOffsetLabel, calcOptionBuyReq } = await import('./dhanScalperMath.ts');
 
-  // When spot is 25380 (between 25350 and 25400)
+  // spot 25380: PUT at the strike below, CALL at the strike above; on a round strike both are the spot
   assert.deepEqual(computeAtmStrikes(25380, 50), { peStrike: 25350, ceStrike: 25400 });
-  // Exact strike
   assert.deepEqual(computeAtmStrikes(25400, 50), { peStrike: 25400, ceStrike: 25400 });
+  // Manage Scrips offsets are in strike steps and follow the spot
+  assert.deepEqual(computeAtmStrikes(25380, 50, -1, 2), { peStrike: 25300, ceStrike: 25500 });
+  // no price, no strike (never a guessed 25000)
+  assert.equal(computeAtmStrikes(null), null);
+  assert.equal(computeAtmStrikes(0), null);
 
-  // Expiry date format "01 DEC" and "1 DEC 2026"
   assert.equal(formatDhanExpiry('2026-12-01'), '01 DEC');
   assert.equal(formatDhanExpiry('2026-11-28'), '28 NOV');
   assert.equal(formatManageScripExpiry('2026-12-01'), '1 DEC 2026');
 
-  // Strike offset labels matching Manage Scrips screenshot
   assert.equal(getStrikeOffsetLabel(25350, 25350), 'ATM');
   assert.equal(getStrikeOffsetLabel(25400, 25350), 'ATM+1');
   assert.equal(getStrikeOffsetLabel(25450, 25350), 'ATM+2');
   assert.equal(getStrikeOffsetLabel(25300, 25350), 'ATM-1');
 
-  // Buy Req: 65 units @ 244.95 LTP = 15,921.75
-  const buyCeReq = calcOptionBuyReq(244.95, 1, 65);
-  assert.equal(buyCeReq.toFixed(2), '15921.75');
-
-  // Buy Req: 65 units @ 229.95 LTP = 14,946.75
-  const buyPeReq = calcOptionBuyReq(229.95, 1, 65);
-  assert.equal(buyPeReq.toFixed(2), '14946.75');
-
-  // Sell Req: positive margin requirements > 120,000 / lot
-  const sellCeReq = calcOptionSellReq(25400, 25380, 244.95, 1, 65, 'CE');
-  assert.equal(sellCeReq > 120000, true);
-  const sellPeReq = calcOptionSellReq(25350, 25380, 229.95, 1, 65, 'PE');
-  assert.equal(sellPeReq > 120000, true);
+  // 65 units @ 244.95 = 15,921.75; unknown price or lot size is null, not 0
+  assert.equal(calcOptionBuyReq(244.95, 1, 65)?.toFixed(2), '15921.75');
+  assert.equal(calcOptionBuyReq(229.95, 1, 65)?.toFixed(2), '14946.75');
+  assert.equal(calcOptionBuyReq(null, 1, 65), null);
+  assert.equal(calcOptionBuyReq(244.95, 1, null), null);
 });

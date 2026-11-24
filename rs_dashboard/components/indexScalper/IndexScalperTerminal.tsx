@@ -85,7 +85,8 @@ export default function IndexScalperTerminal() {
 
   // The chain and scalper widget are floating windows opened from toolbar buttons, not shown on load.
   const [chainOpen, setChainOpen] = useState(false);
-  const [scalperOpen, setScalperOpen] = useState(false);
+  // One switch: the Scalper widget is open <=> one-click is armed (Buy CE / Buy PE and the chain's B / S trade at once).
+  // Two flags drifted apart: closing the widget with its X left one-click armed with nothing on screen saying so.
   const [scalperOn, setScalperOn] = useState(false);
   const [ticket, setTicket] = useState<PickedContract | null>(null);
   const [ticketBusy, setTicketBusy] = useState(false);
@@ -101,7 +102,8 @@ export default function IndexScalperTerminal() {
   const [funds, setFunds] = useState<{ available: number | null; used: number | null }>({ available: null, used: null });
   const [exitingId, setExitingId] = useState<string | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
-  const [scalpLots, setScalpLots] = useState('1');
+  // One-click size: the widget's top stepper sets it; Buy CE / Buy PE and the chain's B / S use it too.
+  const [scalpLots, setScalpLots] = useState(1);
   const [clock, setClock] = useState('');
 
   const rootRef = useRef<HTMLDivElement>(null);
@@ -447,7 +449,7 @@ export default function IndexScalperTerminal() {
     oneClickBusyRef.current = true;
     setTicketBusy(true);
     try {
-      const out = await placeContract({ contract: c, side, orderType: 'MARKET', price: null, trigger: null, product: 'INTRADAY', lots: Number(scalpLots) });
+      const out = await placeContract({ contract: c, side, orderType: 'MARKET', price: null, trigger: null, product: 'INTRADAY', lots: scalpLots });
       flash({ ok: out.ok, text: out.text });
     } finally {
       oneClickBusyRef.current = false;
@@ -545,15 +547,10 @@ export default function IndexScalperTerminal() {
           {sep}
           <button type="button" onClick={() => quickBuy('PE')} className="h-7 px-3 rounded bg-rose-600 hover:bg-rose-500 text-oncolor text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300">Buy PE</button>
           <button type="button" onClick={() => quickBuy('CE')} className="h-7 px-3 rounded bg-sky-600 hover:bg-sky-500 text-oncolor text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300">Buy CE</button>
-          <button type="button" aria-pressed={scalperOpen || scalperOn} onClick={() => {
-            setScalperOpen(v => {
-              const next = !v;
-              setScalperOn(next);
-              return next;
-            });
-          }} title="Scalper: Open instant order widget (exact Dhan replica) & enable one-click trading"
+          <button type="button" aria-pressed={scalperOn} onClick={() => setScalperOn(v => !v)}
+            title="Scalper: opens the instant-order window and arms one-click (Buy CE / Buy PE and the chain's B / S trade at once). Close it to disarm."
             className={cn('h-7 px-2 rounded border text-xs font-bold flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
-              scalperOpen || scalperOn ? 'border-amber-400 text-amber-300 bg-amber-500/10' : 'border-sky-500/60 text-sky-300 hover:bg-sky-500/10')}>
+              scalperOn ? 'border-amber-400 text-amber-300 bg-amber-500/10' : 'border-sky-500/60 text-sky-300 hover:bg-sky-500/10')}>
             <Zap className="w-3.5 h-3.5" />Scalper
           </button>
           {sep}
@@ -647,14 +644,15 @@ export default function IndexScalperTerminal() {
         </div>
       </div>
 
-      {scalperOpen && (
+      {scalperOn && (
         <DhanScalperWidget
           feed={feed}
           real={real}
           busy={ticketBusy}
+          topLots={scalpLots}
+          onTopLotsChange={setScalpLots}
           onTradeContract={onTradeContract}
-          onClose={() => setScalperOpen(false)}
-          onFlash={flash}
+          onClose={() => setScalperOn(false)}
         />
       )}
       {chainOpen && (
