@@ -1,6 +1,7 @@
 import type { AddressInfo } from 'node:net';
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { json, sessionCookieValue, signIn } from './support';
+import { installSessionClock, sessionIso, sessionNow } from './isxClock';
 
 // /index-scalper's two real-money plumbing paths, checked without a market and without placing anything:
 //  1. LIVE PRICES: a real local WebSocket server stands in for the Python options bridge's push server. The page finds
@@ -13,7 +14,7 @@ import { json, sessionCookieValue, signIn } from './support';
 // @ts-expect-error no types for next's compiled ws
 import * as wsLib from 'next/dist/compiled/ws';
 const { Server } = wsLib as unknown as { Server: new (o: { port: number; host: string }) => WsServer };
-interface WsClient { send: (s: string) => void; readyState: number }
+interface WsClient { send: (s: string) => void; readyState: number; terminate: () => void }
 interface WsServer { clients: Set<WsClient>; address: () => AddressInfo; on: (e: string, f: (c?: WsClient) => void) => void; close: (cb?: () => void) => void }
 
 const IDS: Record<string, [string, string]> = { '25300': ['301', '401'], '25350': ['302', '402'], '25400': ['303', '403'] };
@@ -24,7 +25,7 @@ function frame(spot: number, ce350: number) {
     ce: { ltp: k === '25350' ? ce350 : 200, oi: 1_000_000, oi_chg_pct: 1, change_pct: 1, buildup: '' },
     pe: { ltp: 180, oi: 1_000_000, oi_chg_pct: 1, change_pct: 1, buildup: '' },
   }]));
-  return JSON.stringify({ type: 'quotes', underlying: 'NIFTY', expiry: '2026-12-01', spot, atm: 25350, straddle_premium: 0, strikes, updated_at: new Date().toISOString() });
+  return JSON.stringify({ type: 'quotes', underlying: 'NIFTY', expiry: '2026-12-01', spot, atm: 25350, straddle_premium: 0, strikes, updated_at: sessionIso() });
 }
 
 async function mockPage(page: Page, wsPort: number, http: { liveGets: number }) {
@@ -54,14 +55,16 @@ test.describe('Index Scalper feed + order route', () => {
   let port = 0;
   let connections = 0;
 
-  test.beforeEach(async () => {
+  test.beforeEach(async ({ page }) => {
+    await installSessionClock(page);
     server = new Server({ port: 0, host: '127.0.0.1' });
     await new Promise<void>(r => server.on('listening', () => r()));
     port = server.address().port;
     connections = 0;
     server.on('connection', () => { connections++; });
   });
-  test.afterEach(async () => { await new Promise<void>(r => server.close(() => r())); });
+  // close() waits for every client to go away; the browser's socket lives until the page closes after this hook
+  test.afterEach(async () => { for (const c of server.clients) c.terminate(); await new Promise<void>(r => server.close(() => r())); });
 
   const push = (s: string) => { for (const c of server.clients) if (c.readyState === 1) c.send(s); };
   const heartbeat = (feedAtMs: number) => push(JSON.stringify({ type: 'heartbeat', underlying: 'NIFTY', expiry: '2026-12-01', feed_at: new Date(feedAtMs).toISOString(), pushed_at: Date.now() / 1000 }));
@@ -77,11 +80,11 @@ test.describe('Index Scalper feed + order route', () => {
     push(frame(25351, 210.5)); // one price, then no price change at all
 
     // 14 s of heartbeats with a fresh feed_at (Dhan still sending, prices unchanged): never stale
-    for (let i = 0; i < 7; i++) { heartbeat(Date.now()); await page.waitForTimeout(2_000); }
+    for (let i = 0; i < 7; i++) { heartbeat(sessionNow()); await page.waitForTimeout(2_000); }
     await expect(page.getByText(/Live ticks are stale/)).toHaveCount(0);
 
     // heartbeats keep coming but feed_at stops moving (Dhan's socket froze inside a running bridge): stale after 10 s
-    const frozen = Date.now();
+    const frozen = sessionNow();
     for (let i = 0; i < 7; i++) { heartbeat(frozen); await page.waitForTimeout(2_000); }
     await expect(page.getByText(/Live ticks are stale/)).toBeVisible();
   });

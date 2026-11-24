@@ -36,13 +36,20 @@ export default function IndicatorPicker({ open, indicators, editId, onAdd, onCha
   onClose: () => void;
 }) {
   const [q, setQ] = useState('');
+  // Escape closes it (the backdrop otherwise blocks every click on the page until the X is used).
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
   if (!open) return null;
   const editing = editId ? indicators.find(i => i.id === editId) ?? null : null;
   const list = INDICATOR_CATALOG.filter(c => c.label.toLowerCase().includes(q.trim().toLowerCase()));
 
   return (
     <div className="fixed inset-0 z-[60] flex items-start justify-center pt-24 bg-oncolor-dark/60" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div role="dialog" aria-label="Indicators" className="w-[420px] max-w-[calc(100vw-24px)] rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl">
+      <div role="dialog" aria-modal="true" aria-label="Indicators" className="w-[420px] max-w-[calc(100vw-24px)] rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl">
         <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
           <h2 className="text-sm font-bold text-white">{editing ? `Settings: ${indicatorLabel(editing)}` : 'Indicators'}</h2>
           <button type="button" aria-label="Close" onClick={onClose} className="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60"><X className="w-4 h-4" /></button>

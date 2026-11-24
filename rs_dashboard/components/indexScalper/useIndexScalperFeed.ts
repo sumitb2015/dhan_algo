@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import type { LiveQuotes } from '@/components/Scalper';
 import { chainSnapshot, type RestChain } from '@/lib/indexScalperChain';
+import { inNseSession } from '@/lib/indexScalperSession';
 
 export interface StrikeIds { ceId?: string; peId?: string }
 
@@ -34,6 +35,9 @@ export interface IndexScalperFeed {
   /** Seconds since the last tick; null when no tick has arrived. */
   feedAgeSec: number | null;
   stale: boolean;
+  /** NSE session open now (regular day, 09:15-15:30 IST). Outside it nothing fills or sends at market, whatever the
+   *  feed says: a feed that keeps sending packets after the close must not make the page look tradable. */
+  marketOpen: boolean;
   lotSize: number | null;
   strikeIds: Map<number, StrikeIds>;
   /** security id -> last premium, for every strike the bridge tracks. */
@@ -178,6 +182,7 @@ export function useIndexScalperFeed(): IndexScalperFeed {
     expiries, expiry, setExpiry, quotes, chain, chainSource: quotes ? 'live' : chain ? 'snapshot' : null, snapshotError,
     spot, feedAgeSec,
     stale: feedAgeSec !== null && feedAgeSec > STALE_FEED_MS / 1000,
+    marketOpen: nowMs > 0 && inNseSession(nowMs),
     // The lookup that produced this lot size must be for the expiry on screen; until then an order is refused.
     lotSize: lookupFor === expiry ? lotSize : null,
     strikeIds, ltpById,

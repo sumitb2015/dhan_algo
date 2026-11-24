@@ -94,6 +94,11 @@ function runChannel(
   let wsRetryMs = WS_RETRY_BASE_MS;
   let wsPort: number | null = null;
   let lastWsMsgAt = 0;
+  // feed_at last handed to React. A heartbeat only updates state when feed_at moved by >= FEED_AT_STEP_MS: every page on
+  // this hook re-renders on a state change, and only /index-scalper reads feedAt (its stale limit is 10 s, so a value at
+  // most ~7 s old is enough). A repeated, frozen feed_at never re-renders anything.
+  let lastFeedAtMs = 0;
+  const FEED_AT_STEP_MS = 5000;
   let wsConnectingAt = 0;
 
   let rafId: number | null = null;
@@ -123,6 +128,7 @@ function runChannel(
       rafId = null;
       if (disposed || !latestRef.quotes) return;
       const fa = (latestRef.quotes as LiveQuotes & { feed_at?: string | null }).feed_at;
+      if (typeof fa === 'string') { const ms = Date.parse(fa); if (Number.isFinite(ms)) lastFeedAtMs = ms; }
       onUpdate({
         ...(typeof fa === 'string' ? { feedAt: fa } : {}),
         liveQuotes: latestRef.quotes,
@@ -188,7 +194,11 @@ function runChannel(
         if (q.type === 'heartbeat') {
           // No data change, but the bridge says when the broker feed last spoke (an old time = a dead feed).
           if ((!q.expiry || q.expiry === expiry) && (!q.underlying || q.underlying === underlying) && typeof q.feed_at === 'string') {
-            onUpdate({ feedAt: q.feed_at });
+            const ms = Date.parse(q.feed_at);
+            if (Number.isFinite(ms) && Math.abs(ms - lastFeedAtMs) >= FEED_AT_STEP_MS) {
+              lastFeedAtMs = ms;
+              onUpdate({ feedAt: q.feed_at });
+            }
           }
           return;
         }

@@ -1,5 +1,6 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { json, signIn } from './support';
+import { installSessionClock, sessionIso } from './isxClock';
 
 // /index-scalper with every /api/* call mocked in the browser: no Dhan session needed and no order can reach a broker.
 // Any non-GET the mock does not handle is refused with 599 and fails the test.
@@ -18,7 +19,7 @@ function candles() {
   });
 }
 
-type MockState = { calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[]; orders?: Record<string, unknown>[]; noLive?: boolean; chainCalls?: number; liveExpiry?: string; marginCalls?: number; cancels?: string[]; holdings?: Record<string, unknown>[]; positionsFail?: boolean };
+type MockState = { calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[]; orders?: Record<string, unknown>[]; noLive?: boolean; chainCalls?: number; liveExpiry?: string; marginCalls?: number; cancels?: string[]; holdings?: Record<string, unknown>[]; positionsFail?: boolean; tick?: number };
 
 async function mockApi(page: Page, state: MockState) {
   await page.route('**/api/**', async (route: Route) => {
@@ -62,7 +63,7 @@ async function mockApi(page: Page, state: MockState) {
         pe: { ltp: 229.95, oi: 2_300_000, oi_chg_pct: -4.1, change_pct: 5.5, buildup: 'LB' },
       }]));
       const expiry = state.liveExpiry ?? '2026-12-01';
-      return json(route, { success: true, status: { status: 'RUNNING' }, quotes: { underlying: 'NIFTY', expiry, spot: SPOT, atm: SPOT, updated_at: new Date().toISOString(), strikes } });
+      return json(route, { success: true, status: { status: 'RUNNING' }, quotes: { underlying: 'NIFTY', expiry, spot: SPOT, atm: SPOT, updated_at: sessionIso(), strikes } });
     }
     if (p === '/api/scalper/funds') return json(route, { success: true, data: { availabelBalance: 4684089.17, utilizedAmount: 0 } });
     if (p === '/api/scalper/positions') {
@@ -74,6 +75,7 @@ async function mockApi(page: Page, state: MockState) {
       (state.cancels ??= []).push(String(body?.orderId ?? ''));
       return json(route, { success: true });
     }
+    if (p === '/api/index-scalper/tick') return json(route, { success: true, tick: state.tick ?? 0.05 });
     if (p === '/api/index-scalper/holdings') return json(route, { success: true, data: state.holdings ?? [] });
     if (p === '/api/scalper/fast-order') {
       state.calls.push({ path: p, body });
@@ -90,6 +92,7 @@ async function mockApi(page: Page, state: MockState) {
 }
 
 test.describe('Index Scalper', () => {
+  test.beforeEach(async ({ page }) => { await installSessionClock(page); });
   test('SIM: chart + chain render, a paper buy shows a position chip, Exit clears it, no order route is touched', async ({ page, context }) => {
     const state = { calls: [] as Call[], blocked: [] as Call[], positions: [] as Record<string, unknown>[] };
     await signIn(context);
@@ -453,5 +456,51 @@ test.describe('Index Scalper', () => {
     await page.getByTestId('option-chain-panel').getByRole('combobox').selectOption('2026-12-08');
     await expect(page.getByTestId('day-pnl-partial')).toHaveText('partial · 1 unpriced', { timeout: 15_000 });
     expect(state.calls).toEqual([]);
+  });
+
+  test('after the close nothing fills: paper orders are refused and the page says NSE is closed', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], positions: [] };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.clock.setSystemTime(Date.parse('2026-11-25T10:45:00Z')); // 16:15 IST, same day
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId('market-closed')).toBeVisible({ timeout: 10_000 });
+    await page.getByRole('button', { name: 'Option chain' }).click();
+    await page.getByRole('button', { name: 'Trade 25350 PE' }).click();
+    await page.getByTestId('order-ticket').getByRole('button', { name: /^Buy / }).click();
+    await expect(page.getByTestId('order-ticket')).toContainText(/NSE is closed|stale|No live price/); // refused, whichever guard trips first
+    await expect(page.getByTestId('position-chip')).toHaveCount(0);
+    expect(state.calls).toEqual([]);
+  });
+
+  test('Escape closes the Indicators window; an empty demat reads Holding P&L 0.00', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], positions: [], holdings: [] };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: /Indicators/ }).click();
+    await expect(page.getByRole('dialog', { name: 'Indicators' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog', { name: 'Indicators' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Option chain' }).click(); // the page is clickable again
+    await expect(page.getByTestId('option-chain-panel')).toBeVisible();
+    await expect(page.getByTestId('account-panel').getByText('Holding P&L').locator('..')).toContainText('0.00');
+  });
+
+  test('the ticket checks prices against the contract\'s own tick from the master list', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], positions: [], tick: 0.1 };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'Option chain' }).click();
+    await page.getByRole('button', { name: 'Trade 25350 CE' }).click();
+    const ticket = page.getByTestId('order-ticket');
+    await ticket.getByRole('button', { name: 'Limit', exact: true }).click();
+    await ticket.getByLabel('Price').fill('180.05');
+    await ticket.getByRole('button', { name: /^Buy / }).click();
+    await expect(ticket).toContainText('Price 180.05 is not a multiple of ₹0.10: use 180.00 or 180.10');
   });
 });

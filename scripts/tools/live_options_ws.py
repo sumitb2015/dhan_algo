@@ -605,9 +605,14 @@ def main():
     # (`feed_at`), not from the last price CHANGE: a quiet minute is not a dead feed, and a dead Dhan socket inside a
     # running bridge must still read as stale.
     last_packet = [0.0]
+    # Only OPTION packets prove the option feed alive: the index canary, VIX and the tracked future can keep ticking
+    # while the option subscriptions are dead, and the option prices are what orders are checked against.
+    non_option_sids = {str(underlying_sid), str(VIX_SID), str(fut_sid_tracked or '')}
 
-    def _on_packet(_inst, _msg):
-        last_packet[0] = time.time()
+    def _on_packet(_inst, msg):
+        sid = str(msg.get('security_id') or msg.get('SecurityId') or '') if isinstance(msg, dict) else ''
+        if sid and sid not in non_option_sids:
+            last_packet[0] = time.time()
         dirty.set()
 
     helper.start_websocket(instruments, on_message=_on_packet)
@@ -631,6 +636,7 @@ def main():
     last_push_ts = 0.0
     HEARTBEAT_S = 2.0   # with no data change, tell WS clients the feed is alive (or not) every 2 s
     last_file_write = 0.0
+    last_file_payload = None   # the last quotes-file body written, re-written with a fresh feed_at as a heartbeat
     last_history_write = 0.0
     last_extra_check = 0.0
     # (expiry, strike, side) tuples already attempted, successful or not — a
@@ -943,6 +949,15 @@ def main():
                 if atomic_write(QUOTES_FILE, file_payload):
                     last_quotes = current_quotes
                     last_file_write = now_ts
+                    last_file_payload = file_payload
+            elif current_quotes == last_quotes and now_ts - last_file_write >= HEARTBEAT_S and feed_at_iso:
+                # File heartbeat for pages on the HTTP fallback: same data and same updated_at (the last CHANGE, which
+                # other readers rely on), only feed_at moves, so a quiet market does not read as a dead feed there.
+                hb = dict(last_file_payload) if last_file_payload else None   # top-level copy: only feed_at changes
+                if hb is not None:
+                    hb['feed_at'] = feed_at_iso
+                    if atomic_write(QUOTES_FILE, hb):
+                        last_file_write = now_ts
                 # else: write was dropped (e.g. lock contention) — leave last_quotes
                 # unchanged so this same state is retried on the next loop tick
                 # instead of going stale until the next real market data change.

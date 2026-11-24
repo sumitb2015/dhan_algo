@@ -3,11 +3,11 @@
 // Floating order ticket for /index-scalper. Collects an order and hands it to the terminal, which decides SIM vs REAL;
 // this component never calls an order route. Free-typed fields are only read when Sell/Buy is clicked.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import type { PickedContract } from './OptionChainPanel';
 import { useDraggable } from './useDraggable';
-import { MAX_LOTS, orderUnits, tickError } from '@/lib/indexScalperPositions';
+import { MAX_LOTS, OPTION_TICK, orderUnits, tickError } from '@/lib/indexScalperPositions';
 import { cn } from '@/lib/utils';
 
 export type TicketOrderType = 'MARKET' | 'LIMIT' | 'STOP_LOSS_MARKET' | 'STOP_LOSS';
@@ -49,6 +49,17 @@ export default function OrderTicket({ contract, liveLtp, expiry, lotSize, real, 
   const [priceDraft, setPriceDraft] = useState('');
   const [trigDraft, setTrigDraft] = useState('');
   const [err, setErr] = useState<string | null>(null);
+  // This contract's tick from the master list; Rs 0.05 (NSE index options) until it answers or when it is unknown.
+  const [tick, setTick] = useState(OPTION_TICK);
+  useEffect(() => {
+    if (!contract.securityId) return;
+    let dead = false;
+    fetch(`/api/index-scalper/tick?securityId=${encodeURIComponent(contract.securityId)}`)
+      .then(r => r.json())
+      .then((j: { success: boolean; tick?: number | null }) => { if (!dead && j.success && typeof j.tick === 'number' && j.tick > 0) setTick(j.tick); })
+      .catch(() => {});
+    return () => { dead = true; };
+  }, [contract.securityId]);
 
   const ltp = liveLtp ?? contract.ltp;
   const lots = Number(lotsDraft);
@@ -66,7 +77,7 @@ export default function OrderTicket({ contract, liveLtp, expiry, lotSize, real, 
     const trigger = needsTrigger ? Number(trigDraft) : null;
     if (needsPrice && !(price && price > 0)) return setErr('Enter a limit price');
     if (needsTrigger && !(trigger && trigger > 0)) return setErr('Enter a trigger price');
-    const offTick = (needsPrice && price ? tickError('Price', price) : null) ?? (needsTrigger && trigger ? tickError('Trigger', trigger) : null);
+    const offTick = (needsPrice && price ? tickError('Price', price, tick) : null) ?? (needsTrigger && trigger ? tickError('Trigger', trigger, tick) : null);
     if (offTick) return setErr(offTick);
     if (orderType === 'MARKET' && !(ltp && ltp > 0)) return setErr('No live price for this contract yet');
     onSubmit({ contract, side, orderType, price, trigger, product, lots });

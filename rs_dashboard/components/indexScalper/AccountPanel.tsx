@@ -40,6 +40,8 @@ export interface AccountPanelProps {
   onCancelOrder: (orderId: string) => void;
   cancellingId: string | null;
   holdings: HoldingRowView[];
+  /** Holdings were read successfully (Holding P&L is unknown before, 0.00 for an empty demat after). */
+  holdingsLoaded: boolean;
   funds: FundsView;
   errors: { positions?: string | null; orders?: string | null; holdings?: string | null };
 }
@@ -68,7 +70,7 @@ export default function AccountPanel(p: AccountPanelProps) {
   const counts = useMemo(() => orderCounts(p.orders), [p.orders]);
   const shownOrders = orderFilter === 'all' ? p.orders : p.orders.filter(o => o.bucket === orderFilter);
   const today = dayPnl(p.positions, p.positionsLoaded);
-  const holdPnl = holdingPnl(p.holdings);
+  const holdPnl = holdingPnl(p.holdings, p.holdingsLoaded);
 
   const toggle = () => setOpen(v => { const n = !v; try { savePref(OPEN_KEY, n ? '1' : '0'); } catch { /* per-viewer only */ } return n; });
 

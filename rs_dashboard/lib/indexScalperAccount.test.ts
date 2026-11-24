@@ -89,6 +89,8 @@ test('holdings P&L from Dhan\'s lastTradedPrice; unknown price is no P&L, not a 
   assert.equal(rows[0].pnl?.toFixed(2), '-12.26');
   assert.equal(rows[1].pnl, null);
   assert.equal(holdingPnl(rows)?.toFixed(2), '-12.26');
+  assert.equal(holdingPnl([]), 0); // an empty demat that was read
+  assert.equal(holdingPnl([], false), null); // never read
 });
 
 test('funds read Dhan\'s misspelt availabelBalance', () => {

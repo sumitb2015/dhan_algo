@@ -109,6 +109,7 @@ export default function IndexScalperTerminal() {
   const [ordersErr, setOrdersErr] = useState<string | null>(null);
   const [holdingsRaw, setHoldingsRaw] = useState<Record<string, unknown>[]>([]);
   const [holdingsErr, setHoldingsErr] = useState<string | null>(null);
+  const [holdingsLoaded, setHoldingsLoaded] = useState(false);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   // REAL positions have been read successfully at least once since REAL was armed (the day P&L is unknown before).
   const [realLoaded, setRealLoaded] = useState(false);
@@ -276,6 +277,7 @@ export default function IndexScalperTerminal() {
       if (!j.success || !Array.isArray(j.data)) { setHoldingsErr(j.error ?? 'Could not load holdings'); return; }
       setHoldingsErr(null);
       setHoldingsRaw(j.data);
+      setHoldingsLoaded(true);
     }).catch(e => { if (!dead) setHoldingsErr(String((e as Error)?.message ?? e)); });
     load();
     const t = setInterval(load, 60_000);
@@ -380,6 +382,7 @@ export default function IndexScalperTerminal() {
       if (req.orderType !== 'MARKET' && req.orderType !== 'LIMIT') return { ok: false, text: 'SIM fills market and marketable limit orders only' };
       if (!(live && live > 0)) return { ok: false, text: 'No live price to fill the paper order' };
       if (f.stale) return { ok: false, text: 'Live prices are stale: not filling a paper order on an old price' };
+      if (!f.marketOpen) return { ok: false, text: 'NSE is closed: paper orders fill only during the session (09:15-15:30)' };
       let fillPx = live;
       if (req.orderType === 'LIMIT') {
         const lim = req.price ?? 0;
@@ -392,6 +395,7 @@ export default function IndexScalperTerminal() {
     }
 
     // A market order needs a live feed: stale ticks, or none at all (the chain may be a REST snapshot then), refuse it.
+    if (req.orderType === 'MARKET' && !f.marketOpen) return { ok: false, text: 'NSE is closed: refusing a market order' };
     if (req.orderType === 'MARKET' && (f.stale || f.feedAgeSec === null)) return { ok: false, text: f.stale ? 'Live prices are stale: refusing a market order' : 'No live prices (tick feed not running): refusing a market order' };
     const before = legs.find(l => l.securityId === c.securityId)?.netQty ?? 0;
     const out = await sendReal({
@@ -417,6 +421,7 @@ export default function IndexScalperTerminal() {
     if (leg.ltp === null) return { ok: false, text: 'No live price to close the paper position' };
     // Same rule as a paper entry: never book P&L on a price the feed stopped updating.
     if (feedRef.current.stale) return { ok: false, text: 'Live prices are stale: not closing a paper position on an old price' };
+    if (!feedRef.current.marketOpen) return { ok: false, text: 'NSE is closed: paper positions close only during the session' };
     const sl = sim.legs[leg.id];
     if (!sl || sl.netQty === 0) return { ok: true, text: 'Already flat' };
     simFill({ strike: sl.strike, type: sl.type, securityId: sl.securityId, ltp: leg.ltp, expiry: '' }, sl.netQty > 0 ? 'SELL' : 'BUY', Math.abs(sl.netQty), leg.ltp, sl.symbol);
@@ -672,10 +677,11 @@ export default function IndexScalperTerminal() {
         </div>
       </div>
 
-      {(candleErr || posErr || feed.stale || notLive) && (
+      {(candleErr || posErr || feed.stale || notLive || !feed.marketOpen) && (
         <div role="alert" className="px-3 py-1 text-[11px] text-amber-300 bg-amber-500/10 border-b border-amber-500/30">
           {candleErr && <span className="mr-3">Candles: {candleErr}</span>}
           {posErr && <span className="mr-3">Positions: {posErr}</span>}
+          {!feed.marketOpen && <span data-testid="market-closed" className="mr-3">NSE is closed (session 09:15-15:30 IST): paper fills and market orders are off.</span>}
           {notLive && <span className="mr-3">No live ticks (market closed or the tick bridge is not running): the option chain is Dhan&apos;s last snapshot, and market orders are refused.</span>}
           {feed.stale && <span>Live ticks are stale ({Math.round(feed.feedAgeSec ?? 0)}s): market closed or bridge down. Market orders are refused.</span>}
         </div>
@@ -740,6 +746,7 @@ export default function IndexScalperTerminal() {
         onCancelOrder={id => void cancelOrder(id)}
         cancellingId={cancellingId}
         holdings={panelHoldings}
+        holdingsLoaded={holdingsLoaded && !holdingsErr}
         funds={funds}
         errors={{ positions: real ? posErr : null, orders: ordersErr, holdings: holdingsErr }}
       />

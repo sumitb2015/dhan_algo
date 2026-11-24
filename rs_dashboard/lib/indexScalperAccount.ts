@@ -172,7 +172,10 @@ export function holdingRows(rows: Row[]): HoldingRowView[] {
   });
 }
 
-export function holdingPnl(rows: HoldingRowView[]): number | null {
+/** Holding P&L; an empty demat that was read is a real 0 (as Dhan shows it), one never read is null. */
+export function holdingPnl(rows: HoldingRowView[], loaded = true): number | null {
+  if (!loaded) return null;
+  if (rows.length === 0) return 0;
   let any = false, sum = 0;
   for (const r of rows) if (r.pnl !== null) { any = true; sum += r.pnl; }
   return any ? sum : null;
