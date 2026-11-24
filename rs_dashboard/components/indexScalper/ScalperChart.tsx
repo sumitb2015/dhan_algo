@@ -730,7 +730,9 @@ export default function ScalperChart(props: Props) {
         if (!candles) return;
         const rawPrice = candles.coordinateToPrice(y);
         if (rawPrice !== null && rawPrice > 0) {
-          const tick = 0.05;
+          // The instrument's own tick (CRUDEOILM future Rs 1, NSE index options Rs 0.05): an off-tick price would be
+          // rejected by the exchange (the screenshot that found this offered 7,505.17 on crude).
+          const tick = underlying === 'CRUDEOILM' ? 1 : 0.05;
           const snapped = Math.round(rawPrice / tick) * tick;
           setHoverScale({ y, price: Number(snapped.toFixed(2)) });
           return;
@@ -747,7 +749,7 @@ export default function ScalperChart(props: Props) {
       box.removeEventListener('mousemove', onMove);
       box.removeEventListener('mouseleave', onLeave);
     };
-  }, [menu]);
+  }, [menu, underlying]);
 
   // ── context menu events & keyboard shortcuts ────────────────────────
   useEffect(() => {

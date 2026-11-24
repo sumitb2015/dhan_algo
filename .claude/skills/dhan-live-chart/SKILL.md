@@ -22,6 +22,9 @@ guard; copy it rather than writing a new heuristic.
   `StranglePanel`, `StrategyPanel`) that touches selection state.
 - Adding a new polled chart anywhere in the dashboard.
 - Not for recharts/SVG charts — component mechanics (theming, animation, tooltips) are `dhan-recharts-charting`; page layout is `dhan-quant-terminal-page`.
+- A trading chart with orders / positions drawn on it (position, TP / SL and order lines, drag-to-move brackets, the
+  price-scale "+" menu, tick-built candles, TradingView-matched indicators) is `dhan-trading-chart`; this skill still
+  covers its series-update mechanics.
 
 ## The Invariants
 
