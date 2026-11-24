@@ -117,8 +117,8 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
   // Manage Scrips: strike offsets in steps from the ATM pair, so the strikes follow the spot.
   const [ceOffset, setCeOffset] = useState(0);
   const [peOffset, setPeOffset] = useState(0);
-  const [ceCardOpen, setCeCardOpen] = useState(true);
-  const [peCardOpen, setPeCardOpen] = useState(true);
+  const [ceCardOpen, setCeCardOpen] = useState(false);
+  const [peCardOpen, setPeCardOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
   const clickBusyRef = useRef(false);
@@ -139,9 +139,10 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
     return {
       strike: 0,
       type: 'FUT',
-      securityId: feed.future.dhanId,
+      securityId: feed.future.dhanId ?? feed.future.kotakSymbol ?? 'FUT',
       ltp: feed.future.ltp,
       expiry: feed.future.expiry ?? feed.expiry,
+      tradingSymbol: feed.future.kotakSymbol ?? undefined,
     };
   }, [feed.future, feed.expiry]);
 
@@ -164,7 +165,16 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
   const contract = (type: 'CE' | 'PE'): PickedContract | null => {
     const strike = type === 'CE' ? ceStrike : peStrike;
     if (strike === null) return null;
-    return { strike, type, securityId: type === 'CE' ? ceId : peId, ltp: (type === 'CE' ? ceLtp : peLtp) || null, expiry };
+    const id = type === 'CE' ? ceId : peId;
+    const kotakSym = type === 'CE' ? feed.kotak?.strikes?.get(strike)?.ceSymbol : feed.kotak?.strikes?.get(strike)?.peSymbol;
+    return {
+      strike,
+      type,
+      securityId: id ?? kotakSym ?? null,
+      ltp: (type === 'CE' ? ceLtp : peLtp) || null,
+      expiry,
+      tradingSymbol: kotakSym,
+    };
   };
 
   // Dhan's margin calculator is asked only for a Dhan account: on Kotak it would be another broker's figure.
@@ -199,7 +209,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
           className={cn('w-full flex items-center justify-between py-0.5 rounded', FOCUS)}>
           <span className="flex items-center gap-2">
             <span className={cn('text-[10px] font-bold px-1.5 py-0.5 rounded border', ce ? 'text-sky-400 bg-sky-500/10 border-sky-500/30' : 'text-rose-400 bg-rose-500/10 border-rose-500/30')}>{type}</span>
-            <span className="text-xs font-bold text-zinc-100">NIFTY {expiryLabel} {strike ?? '—'}</span>
+            <span className="text-xs font-bold text-zinc-100">{feed.underlying === 'CRUDEOILM' ? 'CRUDEOILM' : 'NIFTY'} {expiryLabel} {strike ?? '—'}</span>
           </span>
           <span className="text-zinc-400">{open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}</span>
         </button>
@@ -256,7 +266,8 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
             </div>
             <div className="grid grid-cols-[1fr_100px_1fr] gap-2 items-start">
               <div className="flex flex-col items-center">
-                <button type="button" disabled={busy || !ready} aria-label={`Buy ATM put ${base?.peStrike ?? ''}`}
+                <button type="button" disabled={busy || !ready} aria-label={`Sell ATM put ${base?.peStrike ?? ''}`}
+                  title={`Sell ATM Put ${base?.peStrike ?? ''}`}
                   onClick={() => { if (base) void tradeAtm('PE'); }}
                   className={cn(tradeBtn, 'h-10 text-sm bg-rose-600 hover:bg-rose-500 flex items-center justify-center gap-1')}>
                   <span>↓</span><span>PUT</span>
@@ -265,7 +276,8 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
               </div>
               <div className="flex justify-center"><Stepper lots={topLots} lotSize={lotSize} onChange={onTopLotsChange} label="ATM" /></div>
               <div className="flex flex-col items-center">
-                <button type="button" disabled={busy || !ready} aria-label={`Buy ATM call ${base?.ceStrike ?? ''}`}
+                <button type="button" disabled={busy || !ready} aria-label={`Sell ATM call ${base?.ceStrike ?? ''}`}
+                  title={`Sell ATM Call ${base?.ceStrike ?? ''}`}
                   onClick={() => { if (base) void tradeAtm('CE'); }}
                   className={cn(tradeBtn, 'h-10 text-sm bg-sky-600 hover:bg-sky-500 flex items-center justify-center gap-1')}>
                   <span>↑</span><span>CALL</span>
@@ -367,7 +379,19 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
     if (!base || clickBusyRef.current || busy || !ready) return;
     const strike = type === 'CE' ? base.ceStrike : base.peStrike;
     const id = (type === 'CE' ? feed.strikeIds.get(strike)?.ceId : feed.strikeIds.get(strike)?.peId) ?? null;
+    const kotakSym = type === 'CE' ? feed.kotak?.strikes?.get(strike)?.ceSymbol : feed.kotak?.strikes?.get(strike)?.peSymbol;
     clickBusyRef.current = true;
-    try { await onTradeContract({ strike, type, securityId: id, ltp: atmLtp(type), expiry }, 'BUY', topLots, productType); } finally { clickBusyRef.current = false; }
+    try {
+      await onTradeContract({
+        strike,
+        type,
+        securityId: id ?? kotakSym ?? null,
+        ltp: atmLtp(type),
+        expiry,
+        tradingSymbol: kotakSym,
+      }, 'SELL', topLots, productType);
+    } finally {
+      clickBusyRef.current = false;
+    }
   }
 }
