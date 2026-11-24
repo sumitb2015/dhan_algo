@@ -233,4 +233,68 @@ test.describe('Index Scalper', () => {
     expect(state.calls).toEqual([]);
     expect(state.blocked).toEqual([]);
   });
+
+  test('chain B / S: open the ticket by default; in one-click Scalper mode they trade at once (SIM)', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], positions: [] };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'Option chain' }).click();
+    const panel = page.getByTestId('option-chain-panel');
+    const row = panel.getByRole('row').filter({ hasText: '25350' });
+    await expect(row.getByRole('button', { name: 'Buy 25350 CE' })).toBeVisible({ timeout: 30_000 });
+
+    // one-click off: B opens the ticket, nothing is filled
+    await row.hover();
+    await row.getByRole('button', { name: 'Buy 25350 CE' }).click();
+    await expect(page.getByTestId('order-ticket')).toContainText('25350 CALL');
+    await expect(page.getByTestId('position-chip')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Close order ticket' }).click();
+
+    // one-click on: S sells the PE at once (paper), sized by the Scalper lots
+    await page.getByRole('button', { name: 'Scalper' }).click();
+    await row.hover();
+    await row.getByRole('button', { name: 'Sell 25350 PE' }).click();
+    const chip = page.getByTestId('position-chip');
+    await expect(chip).toBeVisible({ timeout: 15_000 });
+    await expect(chip).toHaveText(/^S\s*PE 25350\s*65\b/); // short ("S"), 1 lot of 65
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('chain B / S in REAL one-click mode send one tagged market order for that exact contract', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], positions: [] };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    await page.getByRole('button', { name: 'Scalper' }).click();
+    await page.getByRole('button', { name: 'Option chain' }).click();
+    const row = page.getByTestId('option-chain-panel').getByRole('row').filter({ hasText: '25300' });
+    await row.hover();
+    await row.getByRole('button', { name: 'Buy 25300 CE' }).dblclick(); // a double click must still send ONE order
+    await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
+    await page.waitForTimeout(500);
+    expect(state.calls.length).toBe(1);
+    expect(state.calls[0].body).toMatchObject({
+      securityId: '301', quantity: 65, side: 'BUY', orderType: 'MARKET', productType: 'INTRADAY', source: 'isx', exchangeSegment: 'NSE_FNO',
+    });
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('a snapshot chain (no live ticks) shows B / S disabled', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], positions: [], noLive: true };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'Option chain' }).click();
+    await expect(page.getByTestId('chain-snapshot')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByRole('button', { name: 'Buy 25350 CE' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Sell 25350 PE' })).toBeDisabled();
+    expect(state.calls).toEqual([]);
+  });
 });

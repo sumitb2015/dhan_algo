@@ -38,9 +38,13 @@ function Buildup({ code }: { code?: string }) {
   return <span className={cn('px-1 py-px rounded border text-[9px] font-bold whitespace-nowrap', b.cls)}>{b.label}</span>;
 }
 
-export default function OptionChainPanel({ feed, onPick, onClose, wings = 8 }: {
+export default function OptionChainPanel({ feed, onPick, onTrade, oneClick, onClose, wings = 8 }: {
   feed: IndexScalperFeed;
   onPick: (c: PickedContract) => void;
+  /** Row B / S (Dhan-style, on hover). The terminal decides: a market order at once in one-click mode, else the ticket. */
+  onTrade: (c: PickedContract, side: 'BUY' | 'SELL') => void;
+  /** One-click (Scalper) mode is on: B / S send a market order immediately. */
+  oneClick: boolean;
   onClose: () => void;
   wings?: number;
 }) {
@@ -57,9 +61,25 @@ export default function OptionChainPanel({ feed, onPick, onClose, wings = 8 }: {
     return all.slice(Math.max(0, atmIdx - wings), atmIdx + wings + 1);
   }, [quotes, wings]);
 
-  const pick = (strike: number, type: 'CE' | 'PE', ltp: number | undefined) => {
+  const contract = (strike: number, type: 'CE' | 'PE', ltp: number | undefined): PickedContract => {
     const ids = strikeIds.get(strike);
-    onPick({ strike, type, securityId: (type === 'CE' ? ids?.ceId : ids?.peId) ?? null, ltp: ltp && ltp > 0 ? ltp : null, expiry: feed.expiry });
+    return { strike, type, securityId: (type === 'CE' ? ids?.ceId : ids?.peId) ?? null, ltp: ltp && ltp > 0 ? ltp : null, expiry: feed.expiry };
+  };
+  const pick = (strike: number, type: 'CE' | 'PE', ltp: number | undefined) => onPick(contract(strike, type, ltp));
+
+  // B / S on a row, shown on hover (and to the keyboard on focus). A snapshot chain is not live: nothing trades on it.
+  const tradeButtons = (strike: number, type: 'CE' | 'PE', ltp: number | undefined) => {
+    const what = `${strike} ${type}`;
+    const how = snapshot ? 'No live prices: the chain is a snapshot' : oneClick ? 'market order NOW (one-click Scalper mode is on)' : 'opens the order ticket';
+    const cls = 'w-5 h-5 rounded text-[10px] font-bold text-oncolor disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300';
+    return (
+      <span className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+        <button type="button" disabled={snapshot} onClick={() => onTrade(contract(strike, type, ltp), 'BUY')} aria-label={`Buy ${what}`} title={`Buy ${what}: ${how}`}
+          className={cn(cls, 'bg-sky-600 hover:bg-sky-500')}>B</button>
+        <button type="button" disabled={snapshot} onClick={() => onTrade(contract(strike, type, ltp), 'SELL')} aria-label={`Sell ${what}`} title={`Sell ${what}: ${how}`}
+          className={cn(cls, 'bg-rose-600 hover:bg-rose-500')}>S</button>
+      </span>
+    );
   };
 
   return (
@@ -95,7 +115,7 @@ export default function OptionChainPanel({ feed, onPick, onClose, wings = 8 }: {
               <th className="px-2 py-1.5 text-left">Buildup</th><th className="px-2 text-right">OI</th><th className="px-2 text-right">OI Chg%</th>
               <th className="px-2 text-right">LTP Chg</th><th className="px-2 text-right">LTP <span className="text-sky-300">CE</span></th>
               <th className="px-2 text-center">Strike</th>
-              <th className="px-2 text-right"><span className="text-rose-300">PE</span> LTP</th><th className="px-2 text-right">LTP Chg</th>
+              <th className="px-2 text-left"><span className="text-rose-300">PE</span> LTP</th><th className="px-2 text-right">LTP Chg</th>
               <th className="px-2 text-right">OI Chg%</th><th className="px-2 text-right">OI</th><th className="px-2 text-right">Buildup</th>
             </tr>
           </thead>
@@ -106,23 +126,29 @@ export default function OptionChainPanel({ feed, onPick, onClose, wings = 8 }: {
             {rows.map(r => {
               const atm = r.strike === quotes?.atm;
               return (
-                <tr key={r.strike} className={cn('border-t border-zinc-800/70', atm && 'bg-sky-500/10')}>
+                <tr key={r.strike} className={cn('group border-t border-zinc-800/70 hover:bg-zinc-800/60', atm && 'bg-sky-500/10')}>
                   <td className="px-2 py-1"><Buildup code={r.ce?.buildup} /></td>
                   <td className="px-2 text-right text-zinc-200">{fmtOI(r.ce?.oi)}</td>
                   <td className={cn('px-2 text-right', pctCls(r.ce?.oi_chg_pct))}>{pct(r.ce?.oi_chg_pct)}</td>
                   <td className={cn('px-2 text-right', pctCls(r.ce?.change_pct))}>{pct(r.ce?.change_pct)}</td>
                   <td className="px-1 text-right">
-                    <button type="button" onClick={() => pick(r.strike, 'CE', r.ce?.ltp)} aria-label={`Trade ${r.strike} CE`}
-                      className="px-1.5 py-0.5 rounded font-bold text-zinc-100 hover:bg-sky-600 hover:text-oncolor focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60">
-                      {r.ce?.ltp ? r.ce.ltp.toFixed(2) : '—'}
-                    </button>
+                    <span className="flex items-center justify-end gap-1">
+                      {tradeButtons(r.strike, 'CE', r.ce?.ltp)}
+                      <button type="button" onClick={() => pick(r.strike, 'CE', r.ce?.ltp)} aria-label={`Trade ${r.strike} CE`}
+                        className="px-1.5 py-0.5 rounded font-bold text-zinc-100 hover:bg-sky-600 hover:text-oncolor focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60">
+                        {r.ce?.ltp ? r.ce.ltp.toFixed(2) : '—'}
+                      </button>
+                    </span>
                   </td>
                   <td className={cn('px-2 text-center font-bold', atm ? 'text-sky-300' : 'text-zinc-100')}>{r.strike}</td>
-                  <td className="px-1 text-right">
-                    <button type="button" onClick={() => pick(r.strike, 'PE', r.pe?.ltp)} aria-label={`Trade ${r.strike} PE`}
-                      className="px-1.5 py-0.5 rounded font-bold text-zinc-100 hover:bg-rose-600 hover:text-oncolor focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60">
-                      {r.pe?.ltp ? r.pe.ltp.toFixed(2) : '—'}
-                    </button>
+                  <td className="px-1 text-left">
+                    <span className="flex items-center justify-start gap-1">
+                      <button type="button" onClick={() => pick(r.strike, 'PE', r.pe?.ltp)} aria-label={`Trade ${r.strike} PE`}
+                        className="px-1.5 py-0.5 rounded font-bold text-zinc-100 hover:bg-rose-600 hover:text-oncolor focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60">
+                        {r.pe?.ltp ? r.pe.ltp.toFixed(2) : '—'}
+                      </button>
+                      {tradeButtons(r.strike, 'PE', r.pe?.ltp)}
+                    </span>
                   </td>
                   <td className={cn('px-2 text-right', pctCls(r.pe?.change_pct))}>{pct(r.pe?.change_pct)}</td>
                   <td className={cn('px-2 text-right', pctCls(r.pe?.oi_chg_pct))}>{pct(r.pe?.oi_chg_pct)}</td>

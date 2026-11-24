@@ -15,6 +15,7 @@ import DataChip, { toIsoDate } from '@/components/DataChip';
 import ScalperChart, { type DrawTool } from './ScalperChart';
 import OptionChainPanel, { type PickedContract } from './OptionChainPanel';
 import OrderTicket, { type TicketRequest } from './OrderTicket';
+import DhanScalperWidget from './DhanScalperWidget';
 import IndicatorPicker from './IndicatorPicker';
 import { useIndexScalperFeed } from './useIndexScalperFeed';
 import {
@@ -82,8 +83,9 @@ export default function IndexScalperTerminal() {
   const [pctScale, setPctScale] = useState(false);
   const [autoScale, setAutoScale] = useState(true);
 
-  // The chain is a floating window opened from its toolbar button, not shown on load.
+  // The chain and scalper widget are floating windows opened from toolbar buttons, not shown on load.
   const [chainOpen, setChainOpen] = useState(false);
+  const [scalperOpen, setScalperOpen] = useState(false);
   const [scalperOn, setScalperOn] = useState(false);
   const [ticket, setTicket] = useState<PickedContract | null>(null);
   const [ticketBusy, setTicketBusy] = useState(false);
@@ -435,16 +437,56 @@ export default function IndexScalperTerminal() {
     return { strike: q.atm, type, securityId: id ?? null, ltp: ltp && ltp > 0 ? ltp : null, expiry: feed.expiry };
   }, [feed.quotes, feed.strikeIds, feed.expiry]);
 
-  const quickBuy = useCallback(async (type: 'CE' | 'PE') => {
+  // One click, one order: a ref (not state) so a fast double click cannot send twice before React re-renders.
+  const oneClickBusyRef = useRef(false);
+  /** Buy CE / Buy PE and the chain's B / S. In one-click (Scalper) mode: a MARKET order now, sized by the Scalper lots,
+   *  through placeContract's guards (live price, stale feed, lot cap, expiry match, SIM vs REAL). Otherwise: the ticket. */
+  const tradeNow = useCallback(async (c: PickedContract, side: 'BUY' | 'SELL') => {
+    if (!scalperOn) { setTicket(c); setTicketMsg(null); return; }
+    if (oneClickBusyRef.current || ticketBusy) return;
+    oneClickBusyRef.current = true;
+    setTicketBusy(true);
+    try {
+      const out = await placeContract({ contract: c, side, orderType: 'MARKET', price: null, trigger: null, product: 'INTRADAY', lots: Number(scalpLots) });
+      flash({ ok: out.ok, text: out.text });
+    } finally {
+      oneClickBusyRef.current = false;
+      setTicketBusy(false);
+    }
+  }, [scalperOn, ticketBusy, placeContract, scalpLots, flash]);
+
+  const quickBuy = useCallback((type: 'CE' | 'PE') => {
     const c = atmContract(type);
     if (!c) { flash({ ok: false, text: 'ATM contract not ready yet' }); return; }
-    if (!scalperOn) { setTicket(c); setTicketMsg(null); return; }
-    if (ticketBusy) return;
+    void tradeNow(c, 'BUY');
+  }, [atmContract, tradeNow, flash]);
+
+  const onTradeContract = useCallback(async (
+    c: PickedContract,
+    side: 'BUY' | 'SELL',
+    lots: number,
+    product: 'INTRADAY' | 'MARGIN' = 'INTRADAY'
+  ): Promise<{ ok: boolean; text: string }> => {
+    if (oneClickBusyRef.current || ticketBusy) return { ok: false, text: 'Order in progress' };
+    oneClickBusyRef.current = true;
     setTicketBusy(true);
-    const out = await placeContract({ contract: c, side: 'BUY', orderType: 'MARKET', price: null, trigger: null, product: 'INTRADAY', lots: Number(scalpLots) });
-    setTicketBusy(false);
-    flash({ ok: out.ok, text: out.text });
-  }, [atmContract, scalperOn, ticketBusy, placeContract, scalpLots, flash]);
+    try {
+      const out = await placeContract({
+        contract: c,
+        side,
+        orderType: 'MARKET',
+        price: null,
+        trigger: null,
+        product,
+        lots,
+      });
+      flash({ ok: out.ok, text: out.text });
+      return out;
+    } finally {
+      oneClickBusyRef.current = false;
+      setTicketBusy(false);
+    }
+  }, [ticketBusy, placeContract, flash]);
 
   // ── REAL arming ────────────────────────────────────────────────────
   const goSim = () => { setReal(false); };
@@ -503,9 +545,15 @@ export default function IndexScalperTerminal() {
           {sep}
           <button type="button" onClick={() => quickBuy('PE')} className="h-7 px-3 rounded bg-rose-600 hover:bg-rose-500 text-oncolor text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300">Buy PE</button>
           <button type="button" onClick={() => quickBuy('CE')} className="h-7 px-3 rounded bg-sky-600 hover:bg-sky-500 text-oncolor text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300">Buy CE</button>
-          <button type="button" aria-pressed={scalperOn} onClick={() => setScalperOn(v => !v)} title="One-click: Buy CE / Buy PE place a market order for the ATM strike at once"
+          <button type="button" aria-pressed={scalperOpen || scalperOn} onClick={() => {
+            setScalperOpen(v => {
+              const next = !v;
+              setScalperOn(next);
+              return next;
+            });
+          }} title="Scalper: Open instant order widget (exact Dhan replica) & enable one-click trading"
             className={cn('h-7 px-2 rounded border text-xs font-bold flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
-              scalperOn ? 'border-amber-400 text-amber-300 bg-amber-500/10' : 'border-sky-500/60 text-sky-300 hover:bg-sky-500/10')}>
+              scalperOpen || scalperOn ? 'border-amber-400 text-amber-300 bg-amber-500/10' : 'border-sky-500/60 text-sky-300 hover:bg-sky-500/10')}>
             <Zap className="w-3.5 h-3.5" />Scalper
           </button>
           {sep}
@@ -569,16 +617,6 @@ export default function IndexScalperTerminal() {
             <div role="status" className={cn('absolute left-1/2 -translate-x-1/2 bottom-4 z-30 max-w-[70%] px-3 py-2 rounded border text-xs font-semibold',
               toast.ok ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40' : 'bg-rose-500/15 text-rose-300 border-rose-500/40')}>{toast.text}</div>
           )}
-          {scalperOn && (
-            <div className="absolute left-1/2 -translate-x-1/2 top-3 z-30 flex items-center gap-2 px-3 py-1.5 rounded-lg border border-amber-500/50 bg-zinc-900 shadow-lg">
-              <Zap className="w-4 h-4 text-amber-300" />
-              <label className="text-[11px] text-zinc-400 flex items-center gap-1">Lots
-                <input inputMode="numeric" value={scalpLots} onChange={e => setScalpLots(e.target.value)} aria-label="Scalper lots"
-                  className="w-12 h-6 px-1 rounded bg-zinc-800 border border-zinc-700 text-center text-xs tabular-nums text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60" />
-              </label>
-              <span className="text-[10px] text-zinc-500">max {MAX_LOTS} · ATM {feed.quotes?.atm ?? '—'}</span>
-            </div>
-          )}
         </div>
       </div>
 
@@ -609,8 +647,19 @@ export default function IndexScalperTerminal() {
         </div>
       </div>
 
+      {scalperOpen && (
+        <DhanScalperWidget
+          feed={feed}
+          real={real}
+          busy={ticketBusy}
+          onTradeContract={onTradeContract}
+          onClose={() => setScalperOpen(false)}
+          onFlash={flash}
+        />
+      )}
       {chainOpen && (
-        <OptionChainPanel feed={feed} onClose={() => setChainOpen(false)} onPick={c => { setTicket(c); setTicketMsg(null); }} />
+        <OptionChainPanel feed={feed} onClose={() => setChainOpen(false)} onPick={c => { setTicket(c); setTicketMsg(null); }}
+          onTrade={(c, side) => void tradeNow(c, side)} oneClick={scalperOn} />
       )}
       {ticket && (
         <OrderTicket key={`${ticket.expiry}:${ticket.strike}${ticket.type}`} contract={ticket} liveLtp={ticketLtp} expiry={ticket.expiry} lotSize={feed.lotSize}
