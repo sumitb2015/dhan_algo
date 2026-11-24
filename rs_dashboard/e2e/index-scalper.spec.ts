@@ -73,7 +73,7 @@ test.describe('Index Scalper', () => {
     await expect(page.getByTestId('option-chain-panel')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Trade 25350 PE' })).toBeVisible({ timeout: 30_000 });
     // default indicators from the reference screenshot: Supertrend + EMA
-    await expect(page.getByText('Supertrend (10, 3)')).toBeVisible();
+    await expect(page.getByText('Supertrend (10, 2)')).toBeVisible();
     await expect(page.getByText('EMA (20)')).toBeVisible();
 
     await page.getByRole('button', { name: 'Trade 25350 PE' }).click();

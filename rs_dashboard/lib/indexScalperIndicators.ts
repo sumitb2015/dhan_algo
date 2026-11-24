@@ -32,7 +32,9 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
   { kind: 'vwap', label: 'VWAP (session, hlc3)', pane: 'price', color: '#ec4899', params: [] },
   {
     kind: 'supertrend', label: 'Supertrend', pane: 'price', color: '#22c55e',
-    params: [{ key: 'period', label: 'ATR length', def: 10, min: 1, max: 100 }, { key: 'mult', label: 'Factor', def: 3, min: 0.5, max: 20 }],
+    // Factor 2, not 3: Dhan's Supertrend on the same 5-min NIFTY bars reads 25,405.52 on 23 Nov 15:25, which
+    // is ATR 10 / factor 2 to 0.002 (factor 3 gives 25,425.08).
+    params: [{ key: 'period', label: 'ATR length', def: 10, min: 1, max: 100 }, { key: 'mult', label: 'Factor', def: 2, min: 0.5, max: 20 }],
   },
   {
     kind: 'bbands', label: 'Bollinger Bands', pane: 'price', color: '#a78bfa',
@@ -282,4 +284,11 @@ export function pointColor(s: OutSeries, i: number): string | undefined {
 export function flipsAtLast(s: OutSeries): boolean {
   const n = s.values.length;
   return s.style === 'line' && !!s.colors && n >= 2 && !!s.colors[n - 1] && !!s.colors[n - 2] && s.colors[n - 1] !== s.colors[n - 2];
+}
+
+/** Saved indicator lists from before the Supertrend default became factor 2: a Supertrend still on the old untouched
+ *  default (10, 3) moves to (10, 2), so the chart matches Dhan's; any other setting the user chose is kept. */
+export function migrateIndicatorsV1(saved: IndicatorInstance[]): IndicatorInstance[] {
+  return saved.map(i => (i.kind === 'supertrend' && i.params.period === 10 && i.params.mult === 3
+    ? { ...i, params: { ...i.params, mult: 2 } } : i));
 }

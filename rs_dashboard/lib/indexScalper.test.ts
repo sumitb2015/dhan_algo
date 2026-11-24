@@ -4,8 +4,9 @@ import {
   applyFill, legAnchor, legPnl, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, parseNiftyOption, pnlSummary, totalPnl,
   type ScalperLeg,
 } from './indexScalperPositions.ts';
-import { applyTick, computeIndicator, flipsAtLast, mergeHistory, pointColor, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
+import { applyTick, computeIndicator, flipsAtLast, mergeHistory, migrateIndicatorsV1, pointColor, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
 import { emaSmaSeeded, supertrendSeries } from './indicators.ts';
+import { readFileSync } from 'node:fs';
 
 const leg = (o: Partial<ScalperLeg> = {}): ScalperLeg => ({
   id: '1', securityId: '1', product: '', symbol: 'NIFTY-Dec2026-25350-PE', strike: 25350, type: 'PE', netQty: 65, avg: 100, ltp: 110, sim: true, ...o,
@@ -166,7 +167,7 @@ test('EMA and Supertrend are the TradingView definitions (SMA-seeded EMA, Pine s
   for (let i = 0; i < 15; i++) bars.push({ t: bars[bars.length - 1].t + 300, o: last, h: last, l: last, c: last });
   const closes = bars.map(b => b.c);
   assert.deepEqual(computeIndicator(bars, newIndicator('ema', 'e')).series[0].values, emaSmaSeeded(closes, 20));
-  const pine = supertrendSeries(bars.map(b => ({ high: b.h, low: b.l, close: b.c })), 10, 3, { pine: true });
+  const pine = supertrendSeries(bars.map(b => ({ high: b.h, low: b.l, close: b.c })), 10, 2, { pine: true });
   assert.deepEqual(computeIndicator(bars, newIndicator('supertrend', 's')).series[0].values, pine.map(x => x.line));
 });
 
@@ -216,4 +217,25 @@ test('every indicator series names itself on the price scale', () => {
   assert.deepEqual(names('supertrend'), ['Supertrend']);
   assert.deepEqual(names('bbands'), ['BB upper', 'BB basis', 'BB lower']);
   assert.deepEqual(names('macd'), ['Hist', 'MACD', 'Signal']);
+});
+
+test('default EMA(20) and Supertrend reproduce Dhan\'s own chart on the same Dhan candles', () => {
+  // Values read off Dhan's chart for NIFTY 5-min, last bar 23 Nov 2026 15:25.
+  const fx = JSON.parse(readFileSync(new URL('./indexScalper.dhanParity.json', import.meta.url), 'utf8')) as
+    { dhan_chart_2026_11_23_1525: { supertrend: number; ema20: number }; candles: Bar[] };
+  const last = (k: Parameters<typeof newIndicator>[0]) => {
+    const v = computeIndicator(fx.candles, newIndicator(k, k)).series[0].values;
+    return v[v.length - 1] as number;
+  };
+  assert.equal(last('ema').toFixed(2), fx.dhan_chart_2026_11_23_1525.ema20.toFixed(2));
+  assert.equal(last('supertrend').toFixed(2), fx.dhan_chart_2026_11_23_1525.supertrend.toFixed(2));
+});
+
+test('saved Supertrend still on the old (10, 3) default moves to (10, 2); a user\'s own setting is kept', () => {
+  const st = (period: number, mult: number) => ({ ...newIndicator('supertrend', 's'), params: { period, mult } });
+  assert.deepEqual(migrateIndicatorsV1([st(10, 3)])[0].params, { period: 10, mult: 2 });
+  assert.deepEqual(migrateIndicatorsV1([st(7, 3)])[0].params, { period: 7, mult: 3 });
+  assert.deepEqual(migrateIndicatorsV1([st(10, 2.5)])[0].params, { period: 10, mult: 2.5 });
+  const ema = newIndicator('ema', 'e');
+  assert.deepEqual(migrateIndicatorsV1([ema])[0], ema);
 });

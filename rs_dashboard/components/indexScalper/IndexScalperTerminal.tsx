@@ -18,7 +18,7 @@ import OrderTicket, { type TicketRequest } from './OrderTicket';
 import IndicatorPicker from './IndicatorPicker';
 import { useIndexScalperFeed } from './useIndexScalperFeed';
 import {
-  applyTick, mergeHistory, newIndicator, type Bar, type IndicatorInstance, type IndicatorKind,
+  applyTick, mergeHistory, migrateIndicatorsV1, newIndicator, type Bar, type IndicatorInstance, type IndicatorKind,
 } from '@/lib/indexScalperIndicators';
 import { istDateIso, isRegularSession } from '@/lib/nseHolidays';
 import {
@@ -35,7 +35,8 @@ const RANGES: { label: string; days: number; focus: number }[] = [
   { label: '1W', days: 10, focus: 7 * 86400 }, { label: '3D', days: 10, focus: 3 * 86400 }, { label: '1D', days: 10, focus: 86400 },
 ];
 
-const IND_KEY = 'indexScalper.indicators.v1';
+const IND_KEY = 'indexScalper.indicators.v2';
+const IND_KEY_V1 = 'indexScalper.indicators.v1';
 const SIM_KEY = 'indexScalper.sim.v1';
 const SPOT_KEY = 'indexScalper.entrySpots.v1';
 
@@ -112,7 +113,9 @@ export default function IndexScalperTerminal() {
 
   // ── persisted per-viewer state ─────────────────────────────────────
   useEffect(() => {
-    const saved = loadJson<IndicatorInstance[] | null>(IND_KEY, null);
+    const v2 = loadJson<IndicatorInstance[] | null>(IND_KEY, null);
+    const v1 = v2 ? null : loadJson<IndicatorInstance[] | null>(IND_KEY_V1, null);
+    const saved = v2 ?? (Array.isArray(v1) ? migrateIndicatorsV1(v1) : null);
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setIndicators(Array.isArray(saved) ? saved : defaultIndicators());
     setIndReady(true);
