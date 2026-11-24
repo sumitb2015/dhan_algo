@@ -897,22 +897,27 @@ export default function IndexScalperTerminal() {
     const targetType: TicketOrderType = req.kind === 'TP' ? 'LIMIT' : 'STOP_LOSS_MARKET';
 
     // Cancel any existing bracket order of this kind for this instrument
-    const existing = chartOpenOrders.find(o =>
-      o.side === oppSide &&
-      (req.kind === 'TP' ? o.orderType === 'LIMIT' : (o.orderType === 'STOP_LOSS_MARKET' || o.orderType === 'STOP_LOSS'))
-    );
+    const existing = chartOpenOrders.find(o => {
+      if (o.side !== oppSide) return false;
+      const ot = (o.orderType || '').toUpperCase();
+      const isLimit = ot.includes('LIMIT');
+      const isStop = ot.includes('SL') || ot.includes('STOP');
+      return req.kind === 'TP' ? isLimit : isStop;
+    });
     if (existing) {
       await cancelOrder(existing.id);
     }
 
-    const c: PickedContract = {
-      strike: req.leg.strike,
-      type: req.leg.type,
-      expiry: feed.expiry ?? '',
-      securityId: req.leg.securityId,
-      tradingSymbol: req.leg.symbol,
-      ltp: req.leg.ltp ?? req.price,
-    };
+    const c: PickedContract = (req.leg.type === 'FUT' && chartContract)
+      ? chartContract
+      : {
+          strike: req.leg.strike,
+          type: req.leg.type,
+          expiry: feed.expiry ?? '',
+          securityId: req.leg.securityId,
+          tradingSymbol: req.leg.symbol,
+          ltp: req.leg.ltp ?? req.price,
+        };
 
     const lotSize = displayLotUnits(underlying, feed.lotSize);
     const lots = underlying === 'CRUDEOILM'

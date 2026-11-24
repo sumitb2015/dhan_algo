@@ -958,14 +958,16 @@ export default function ScalperChart(props: Props) {
         if (top === undefined) return null;
         const isBuy = ord.side === 'BUY';
 
-        const matchedPos = placed.find(pos => {
-          const sName = (pos.leg.symbol || '').toUpperCase();
-          const oName = (ord.symbol || '').toUpperCase();
-          return (underlying === 'CRUDEOILM' && (oName.includes('CRUDE') || sName.includes('CRUDE'))) ||
-            (underlying === 'NIFTY' && (oName.includes('NIFTY') || sName.includes('NIFTY')));
-        });
+        const matchedPos = placed.find(pos => pos.anchor.level > 0 && ord.side === (pos.leg.netQty > 0 ? 'SELL' : 'BUY'))
+          ?? placed.find(pos => {
+            const sName = (pos.leg.symbol || '').toUpperCase();
+            const oName = (ord.symbol || '').toUpperCase();
+            return (underlying === 'CRUDEOILM' && (oName.includes('CRUDE') || sName.includes('CRUDE') || pos.leg.type === 'FUT')) ||
+              (underlying === 'NIFTY' && (oName.includes('NIFTY') || sName.includes('NIFTY') || pos.leg.type === 'FUT'));
+          })
+          ?? placed[0];
 
-        if (matchedPos && matchedPos.anchor.level > 0 && ord.side === (matchedPos.leg.netQty > 0 ? 'SELL' : 'BUY')) {
+        if (matchedPos && matchedPos.anchor.level > 0) {
           const isLong = matchedPos.leg.netQty > 0;
           const lotSize = displayLotUnits(underlying, feedLotSize);
           const lots = ord.qty ? (underlying === 'CRUDEOILM' ? ord.qty : Math.max(1, Math.round(ord.qty / lotSize))) : 1;
@@ -974,20 +976,49 @@ export default function ScalperChart(props: Props) {
           const pct = (ptDiff / matchedPos.anchor.level) * 100;
           const pnl = ptDiff * totalUnits;
           const isTp = ptDiff >= 0;
+          const kind: 'TP' | 'SL' = isTp ? 'TP' : 'SL';
 
           return (
-            <div key={ord.id} data-testid="order-chip" style={{ top: top - 11 }}
-              className="absolute right-[84px] z-[55] flex items-center shadow-lg font-mono text-[11px]">
-              <div className={cn('h-[22px] px-2 rounded-l flex items-center font-bold select-none border',
-                isTp ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-400' : 'bg-rose-950/90 border-rose-500/80 text-rose-400')}>
+            <div
+              key={ord.id}
+              data-testid="order-chip"
+              style={{ top: top - 11 }}
+              className="absolute right-[84px] z-[55] flex items-center shadow-lg font-mono text-[11px]"
+            >
+              <div
+                title={`Click and drag to move ${kind} to a new price`}
+                onMouseDown={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  startDrag(kind, matchedPos.leg, matchedPos.anchor.level, isLong, lots, totalUnits, p);
+                }}
+                className={cn('h-[22px] px-2 rounded-l flex items-center font-bold select-none border cursor-grab active:cursor-grabbing hover:brightness-110 transition-colors',
+                  isTp ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-400' : 'bg-rose-950/90 border-rose-500/80 text-rose-400')}
+              >
                 {isTp ? 'TP' : 'SL'} {pnl >= 0 ? '+' : ''}{fmt(Math.round(pnl))} ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)
               </div>
-              <div className={cn('h-[22px] px-2 rounded-r flex items-center gap-1.5 bg-zinc-900 border border-l-0 text-zinc-200',
-                isTp ? 'border-emerald-500/60' : 'border-rose-500/60')}>
-                <span>{ord.qty} {ord.side} {ord.orderType}</span>
+              <div
+                title={`Click and drag to move ${kind} to a new price`}
+                onMouseDown={(e) => {
+                  if ((e.target as HTMLElement).tagName.toLowerCase() === 'button') return;
+                  e.stopPropagation();
+                  e.preventDefault();
+                  startDrag(kind, matchedPos.leg, matchedPos.anchor.level, isLong, lots, totalUnits, p);
+                }}
+                className={cn('h-[22px] px-2 rounded-r flex items-center gap-1.5 bg-zinc-900 border border-l-0 text-zinc-200 cursor-grab active:cursor-grabbing select-none hover:brightness-110 transition-colors',
+                  isTp ? 'border-emerald-500/60' : 'border-rose-500/60')}
+              >
+                <span>{lots} {isLong ? 'Sell' : 'Buy'} {isTp ? 'Limit' : 'Stop Market'}</span>
                 {ord.cancellable && (
-                  <button type="button" aria-label={`Cancel order ${ord.id}`} onClick={() => onCancelOrder?.(ord.id)}
-                    className="h-[16px] w-[16px] rounded flex items-center justify-center text-zinc-400 hover:text-white hover:bg-rose-600 transition-colors">
+                  <button
+                    type="button"
+                    aria-label={`Cancel order ${ord.id}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCancelOrder?.(ord.id);
+                    }}
+                    className="h-[16px] w-[16px] rounded flex items-center justify-center text-zinc-400 hover:text-white hover:bg-rose-600 transition-colors cursor-pointer"
+                  >
                     <X className="w-3 h-3" />
                   </button>
                 )}
@@ -1056,7 +1087,16 @@ export default function ScalperChart(props: Props) {
                 >
                   TP {tpPnl >= 0 ? '+' : ''}{fmt(Math.round(tpPnl))} ({tpPct >= 0 ? '+' : ''}{tpPct.toFixed(2)}%)
                 </div>
-                <div className="h-[22px] px-2 rounded-r flex items-center gap-1.5 bg-zinc-900 border border-emerald-500/60 border-l-0 text-zinc-200">
+                <div
+                  title="Click and drag to move Target Profit to a new price"
+                  onMouseDown={(e) => {
+                    if ((e.target as HTMLElement).tagName.toLowerCase() === 'button') return;
+                    e.stopPropagation();
+                    e.preventDefault();
+                    startDrag('TP', p.leg, p.anchor.level, isLong, lots, totalUnits, b.tp!.price);
+                  }}
+                  className="h-[22px] px-2 rounded-r flex items-center gap-1.5 bg-zinc-900 border border-emerald-500/60 border-l-0 text-zinc-200 cursor-grab active:cursor-grabbing select-none hover:brightness-110 transition-colors"
+                >
                   <span>{lots} {isLong ? 'Sell' : 'Buy'} Limit</span>
                   <button
                     type="button"
@@ -1097,7 +1137,16 @@ export default function ScalperChart(props: Props) {
                 >
                   SL {slPnl >= 0 ? '' : ''}{fmt(Math.round(slPnl))} ({slPct >= 0 ? '+' : ''}{slPct.toFixed(2)}%)
                 </div>
-                <div className="h-[22px] px-2 rounded-r flex items-center gap-1.5 bg-zinc-900 border border-rose-500/60 border-l-0 text-zinc-200">
+                <div
+                  title="Click and drag to move Stop Loss to a new price"
+                  onMouseDown={(e) => {
+                    if ((e.target as HTMLElement).tagName.toLowerCase() === 'button') return;
+                    e.stopPropagation();
+                    e.preventDefault();
+                    startDrag('SL', p.leg, p.anchor.level, isLong, lots, totalUnits, b.sl!.price);
+                  }}
+                  className="h-[22px] px-2 rounded-r flex items-center gap-1.5 bg-zinc-900 border border-rose-500/60 border-l-0 text-zinc-200 cursor-grab active:cursor-grabbing select-none hover:brightness-110 transition-colors"
+                >
                   <span>{lots} {isLong ? 'Sell' : 'Buy'} Stop Market</span>
                   <button
                     type="button"
