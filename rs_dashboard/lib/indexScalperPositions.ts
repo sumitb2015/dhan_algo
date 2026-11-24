@@ -34,9 +34,11 @@ export interface ScalperLeg {
  *  premium chart (`premium`), its average premium. */
 export interface LegAnchor { level: number; kind: 'entry' | 'strike' | 'avg' }
 
-export function legAnchor(leg: ScalperLeg, spotAtEntry: number | undefined, opts?: { premium?: boolean }): LegAnchor {
+export function legAnchor(leg: ScalperLeg, spotAtEntry: number | undefined, opts?: { premium?: boolean; atStrike?: boolean }): LegAnchor {
   // On an option's own premium chart (opts.premium) the leg is drawn at its average premium, like a future.
   if ((leg.type === 'FUT' || opts?.premium) && Number.isFinite(leg.avg) && leg.avg > 0) return { level: leg.avg, kind: 'avg' };
+  // Quick Trade (opts.atStrike): an option sits on its own strike line, next to that strike's C / P chips.
+  if (opts?.atStrike && leg.type !== 'FUT' && leg.strike > 0) return { level: leg.strike, kind: 'strike' };
   if (spotAtEntry !== undefined && Number.isFinite(spotAtEntry) && spotAtEntry > 0) return { level: spotAtEntry, kind: 'entry' };
   return { level: leg.strike, kind: 'strike' };
 }

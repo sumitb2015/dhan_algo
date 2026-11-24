@@ -20,7 +20,7 @@ function bars(level: number, swing: number) {
   });
 }
 
-interface State { calls: Call[]; blocked: Call[]; candleReqs: string[]; positions: Record<string, unknown>[]; orders: Record<string, unknown>[]; noSpot?: boolean; noPrevOi?: boolean }
+interface State { calls: Call[]; blocked: Call[]; candleReqs: string[]; positions: Record<string, unknown>[]; orders: Record<string, unknown>[]; noSpot?: boolean; noPrevOi?: boolean; noLtpStrike?: number }
 
 async function mockApi(page: Page, state: State) {
   await page.route('**/api/**', async (route: Route) => {
@@ -56,7 +56,7 @@ async function mockApi(page: Page, state: State) {
         const peOi = Math.round(3_500_000 * Math.exp(-(((k - 25100) / 180) ** 2))) + 200_000;
         return [String(k), {
           strike: k,
-          ce: { ltp: IDS[String(k)] ? 210.5 : 100, change_pct: -3, buildup: 'SB', ...side(ceOi, k >= SPOT) },
+          ce: { ltp: state.noLtpStrike === k ? 0 : IDS[String(k)] ? 210.5 : 100, change_pct: -3, buildup: 'SB', ...side(ceOi, k >= SPOT) },
           pe: { ltp: IDS[String(k)] ? 229.95 : 100, change_pct: 5, buildup: 'LB', ...side(peOi, k < SPOT) },
         }];
       }));
@@ -213,6 +213,89 @@ test.describe('Index Scalper layout + option charts', () => {
     // ...while total OI still draws
     await page.getByRole('button', { name: 'Total OI' }).click();
     await expect(page.getByTestId('chart-pane-0').getByTestId('oi-change-unavailable')).toHaveCount(0);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('Quick Trade is off by default: no strike chips, nothing changes', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByRole('switch', { name: 'Quick Trade' })).not.toBeChecked();
+    await expect(page.getByRole('button', { name: 'Quick Trade settings' })).toBeDisabled();
+    await page.waitForTimeout(800);
+    await expect(page.getByTestId('quick-overlay')).toHaveCount(0);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('Quick Trade SIM: live C / P chips on the strikes in view; Buy fills a paper leg drawn on its strike line', async ({ page, context }) => {
+    const state = newState();
+    state.noLtpStrike = 25400; // its Call has no live price: that chip cannot trade
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    const overlay = page.getByTestId('chart-pane-0').getByTestId('quick-overlay');
+    await expect(overlay).toBeVisible({ timeout: 15_000 });
+    await expect(overlay.getByRole('button', { name: 'Quick 25350 CE' })).toContainText('210.50');
+    await expect(overlay.getByRole('button', { name: 'Quick 25350 PE' })).toContainText('229.95');
+    await expect(overlay.locator('[data-strike="25350"]')).toContainText('ATM');
+
+    // no live price: shows a dash, and its Buy / Sell are disabled with the reason
+    await expect(overlay.getByRole('button', { name: 'Quick 25400 CE' })).toContainText('—');
+    await overlay.getByRole('button', { name: 'Quick 25400 CE' }).click();
+    await expect(overlay.getByRole('button', { name: /^Quick buy 25400 CE/ })).toBeDisabled();
+    await expect(overlay.getByRole('dialog', { name: 'Trade 25400 CE' })).toContainText('No live price for this strike');
+    await page.keyboard.press('Escape');
+    await expect(overlay.getByRole('dialog')).toHaveCount(0);
+
+    // C -> Buy: one paper leg of the Buy lots, drawn on the strike line
+    await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
+    await overlay.getByRole('button', { name: 'Quick buy 25350 CE 1 lot' }).click();
+    await expect(overlay.getByRole('dialog')).toHaveCount(0); // closes after sending
+    const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
+    await expect(chip).toBeVisible({ timeout: 15_000 });
+    await expect(chip).toContainText('CE 25350');
+    await expect(chip.getByTestId('position-lots')).toHaveAttribute('title', 'Long 1 lot (65 units)');
+    const rowY = Number(await overlay.locator('[data-strike="25350"]').getAttribute('data-y'));
+    const chipBox = (await chip.boundingBox())!, paneBox = (await page.getByTestId('chart-pane-0').locator('canvas').first().boundingBox())!;
+    expect(Math.abs(chipBox.y + chipBox.height / 2 - (paneBox.y + rowY))).toBeLessThan(6); // on its strike line
+    expect(state.calls).toEqual([]); // SIM: no order route touched
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('Quick Trade REAL: settings Sell 2 lots, P -> Sell sends ONE tagged market order for that strike; settings persist', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    await page.getByRole('button', { name: 'Quick Trade settings' }).click();
+    await page.getByLabel('Sell lots per click').selectOption('2');
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+
+    const overlay = page.getByTestId('chart-pane-0').getByTestId('quick-overlay');
+    await overlay.getByRole('button', { name: 'Quick 25300 PE' }).click();
+    await expect(overlay.getByRole('dialog', { name: 'Trade 25300 PE' })).toContainText('REAL · market order');
+    await overlay.getByRole('button', { name: 'Quick sell 25300 PE 2 lots' }).dblclick(); // a double click is ONE order
+    await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/fast-order').length, { timeout: 15_000 }).toBe(1);
+    await page.waitForTimeout(600);
+    const orders = state.calls.filter(c => c.path === '/api/scalper/fast-order');
+    expect(orders.length).toBe(1);
+    expect(orders[0].body).toMatchObject({
+      securityId: '401', side: 'SELL', orderType: 'MARKET', quantity: 130, productType: 'INTRADAY', source: 'isx', exchangeSegment: 'NSE_FNO',
+    });
+
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('switch', { name: 'Quick Trade' })).toBeChecked({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'Quick Trade settings' }).click();
+    await expect(page.getByLabel('Sell lots per click')).toHaveValue('2');
+    await expect(page.getByLabel('Buy lots per click')).toHaveValue('1');
     expect(state.blocked).toEqual([]);
   });
 

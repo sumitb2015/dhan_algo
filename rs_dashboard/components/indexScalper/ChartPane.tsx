@@ -6,9 +6,11 @@
 // the terminal's placeContract (caps, live price, session, lot size). Memoised: every prop the terminal passes is
 // stable, so a feed push re-renders a pane only through `feed` (cheap) and the chart only when its own props change.
 
-import { memo, useCallback, useEffect, useMemo } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Loader2 } from 'lucide-react';
-import ScalperChart, { DRAW_KEY, type DrawTool } from './ScalperChart';
+import ScalperChart, { DRAW_KEY, type ChartViewport, type DrawTool } from './ScalperChart';
+import QuickStrikeOverlay from './QuickStrikeOverlay';
+import type { QuickSettings } from '@/lib/indexScalperQuickTrade';
 import type { PickedContract } from './OptionChainPanel';
 import type { IndexScalperFeed } from './useIndexScalperFeed';
 import { useChartBars, type Interval } from './useChartBars';
@@ -73,6 +75,10 @@ interface Props {
   /** Draw the Call / Put OI profile (underlying panes only: strikes are underlying levels, not premiums). */
   showOi: boolean;
   oiMode: OiMode;
+  /** Quick Trade settings when it is on (strike lines with live C / P chips on underlying panes); null = off. */
+  quick: QuickSettings | null;
+  real: boolean;
+  onQuickTrade: (c: PickedContract, side: 'BUY' | 'SELL', lots: number, product: 'INTRADAY' | 'MARGIN') => Promise<{ ok: boolean; text: string }>;
 }
 
 function ChartPane(p: Props) {
@@ -105,6 +111,8 @@ function ChartPane(p: Props) {
   useEffect(() => { onStatus(index, { date, loading, error }); }, [index, date, loading, error, onStatus]);
 
   const isOption = resolved.kind === 'option';
+  const viewportRef = useRef<ChartViewport | null>(null);
+  const quickOn = !!p.quick && !isOption;
   const label = sourceLabel(underlying, resolved);
 
   // The contract this pane's "+" menu and ticket trade: the option on screen, or the underlying's future.
@@ -227,7 +235,12 @@ function ChartPane(p: Props) {
           viewKey={viewKey}
           oiProfile={oiProfile}
           oiMode={p.oiMode}
+          viewportRef={viewportRef}
+          strikeAnchor={quickOn}
         />
+        {quickOn && p.quick && (
+          <QuickStrikeOverlay viewportRef={viewportRef} underlying={underlying} feed={feed} settings={p.quick} real={p.real} onTrade={p.onQuickTrade} />
+        )}
         {bars.length === 0 && !loading && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500 pointer-events-none">
             {isOption && resolved.strike === null && pickList.length > 0

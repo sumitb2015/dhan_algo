@@ -26,6 +26,11 @@ test('anchor uses entry spot when known, else the strike', () => {
   assert.deepEqual(legAnchor(leg(), 0), { level: 25350, kind: 'strike' });
 });
 
+test('Quick Trade: an option leg sits on its strike line even with an entry spot; a future keeps its average', () => {
+  assert.deepEqual(legAnchor(leg(), 25360.5, { atStrike: true }), { level: 25350, kind: 'strike' });
+  assert.deepEqual(legAnchor(leg({ type: 'FUT', strike: 0, avg: 6110 }), undefined, { atStrike: true }), { level: 6110, kind: 'avg' });
+});
+
 test('on its own premium chart an option leg is anchored at its average premium', () => {
   assert.deepEqual(legAnchor(leg(), 25360.5, { premium: true }), { level: 100, kind: 'avg' });
   // No average yet: falls back as on the underlying chart (the chip is then hidden by the level>0 / axis rules).

@@ -4,7 +4,7 @@
 // and open option positions drawn at the index level they belong to, each with qty / avg / live P&L and an Exit button.
 // Market data only; every order goes through the parent's callbacks.
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import {
   createChart, CandlestickSeries, LineSeries, HistogramSeries, ColorType, CrosshairMode, LineStyle, PriceScaleMode,
   type IChartApi, type ISeriesApi, type IPriceLine, type UTCTimestamp, type SeriesType, type MouseEventParams, type Time,
@@ -27,6 +27,15 @@ const UP = '#10b981';
 const DOWN = '#ef4444';
 /** Drawings of the underlying chart; an option chart stores its own under `${DRAW_KEY}:<securityId>` (drawKey prop). */
 export const DRAW_KEY = 'indexScalper.drawings.v1';
+
+/** The chart's geometry for overlays drawn outside it (Quick Trade strike chips): read on their own timer, so live
+ *  prices on those overlays never re-render the chart. Coordinates are relative to the chart's box. */
+export interface ChartViewport {
+  priceToY: (price: number) => number | null;
+  /** Width of the plot (left of the price axis) and height of the main pane (above any oscillator pane). */
+  plotWidth: () => number;
+  plotHeight: () => number;
+}
 
 interface TrendRec { t1: number; p1: number; t2: number; p2: number }
 interface Drawings { h: number[]; t: TrendRec[] }
@@ -94,6 +103,10 @@ interface Props {
   oiProfile?: OiProfile | null;
   /** Bars show the total OI, or today's change in OI (added = filled, shed = outlined). */
   oiMode?: OiMode;
+  /** Filled with this chart's geometry once it exists (null after it is removed). */
+  viewportRef?: MutableRefObject<ChartViewport | null>;
+  /** Quick Trade: option legs are drawn on their strike line (else at the spot they were opened at). */
+  strikeAnchor?: boolean;
 }
 
 interface Hover { o: number; h: number; l: number; c: number; t: number }
@@ -127,7 +140,7 @@ function ScalperChart(props: Props) {
     onExitLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
-    premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, oiProfile = null, oiMode = 'total',
+    premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false,
   } = props;
   const drawKeyRef = useRef(drawKeyProp);
   const tickSize = tickProp ?? (underlying === 'CRUDEOILM' ? 1.0 : 0.05);
@@ -249,7 +262,16 @@ function ScalperChart(props: Props) {
     drawingsRef.current = loadDrawings(drawKeyRef.current);
     paintDrawings();
 
+    if (viewportRef) {
+      viewportRef.current = {
+        priceToY: (price: number) => { const y = candles.priceToCoordinate(price); return y === null ? null : Number(y); },
+        plotWidth: () => (boxRef.current?.clientWidth ?? 0) - (chart.priceScale('right').width() || 65),
+        plotHeight: () => chart.panes()[0]?.getHeight() ?? boxRef.current?.clientHeight ?? 0,
+      };
+    }
+
     return () => {
+      if (viewportRef) viewportRef.current = null;
       chart.remove();
       chartRef.current = null; candleRef.current = null;
       indSeriesRef.current = []; legLines.clear();
@@ -448,7 +470,7 @@ function ScalperChart(props: Props) {
   }, [viewKey, hasBars, focus]);
 
   // ── position lines ────────────────────────────────────────────────
-  const placed = useMemo(() => legs.map(leg => ({ leg, anchor: legAnchor(leg, entrySpots[leg.securityId], { premium }), pnl: legPnl(leg) })), [legs, entrySpots, premium]);
+  const placed = useMemo(() => legs.map(leg => ({ leg, anchor: legAnchor(leg, entrySpots[leg.securityId], { premium, atStrike: strikeAnchor }), pnl: legPnl(leg) })), [legs, entrySpots, premium, strikeAnchor]);
 
   useEffect(() => {
     const candles = candleRef.current;

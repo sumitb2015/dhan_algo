@@ -44,6 +44,7 @@ Related skills:
 | Price-scale "+" button and context menu; hotkeys | the `price scale hover` and `context menu events & keyboard shortcuts` sections |
 | 1 / 2 chart layout, per-pane instrument + timeframe | `ChartPane.tsx` (pane header, filters, contract binding); layout + panes in `indexScalper.layout.v1` |
 | What a pane plots; which legs / orders / TP-SL belong on it | `lib/indexScalperChartSource.ts`: `resolveSource` (strike pinned once resolved, ATM fallback), `legOnChart`, `bracketsOnChart`, `orderOnChart` (by `OrderRowView.securityId`, `isOption`) |
+| Quick Trade (live C / P chips on every strike in view, Buy / Sell in one click) | `QuickStrikeOverlay.tsx` over underlying panes; pure rules `lib/indexScalperQuickTrade.ts` (`visibleStrikeRows`, `clampQuickSettings`); header switch, off by default |
 | Per-pane candles (underlying or one option's premium) | `useChartBars.ts`; route `candles?kind=option&securityId=` (NSE_FNO/OPTIDX, MCX_COMM/OPTFUT) |
 | Placing / moving brackets (SIM and REAL) | `IndexScalperTerminal.tsx`: `onSetBracket`, `onCancelBracket`, `onReversePosition`, `onPlaceChartOrder` |
 
@@ -163,6 +164,22 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
   - On SIM it stores the level, and an effect exits the paper leg when the live price crosses it.
 - **Reverse:** close, then open the other side. SIM opens the other side only if the close succeeded, otherwise
   "reverse" would double the position. REAL sends 2x the position's lots at market.
+
+### Quick Trade (Upstox Chart 360 style)
+- **Off by default**: off, the overlay is not mounted and option legs keep the entry-spot anchor. On, option legs are
+  drawn on their strike line (`legAnchor(..., { atStrike: true })`) next to that strike's chips.
+- **Overlays read the chart's geometry, they do not re-render it.** `ScalperChart` fills `viewportRef`
+  (`priceToY`, `plotWidth`, `plotHeight`); the overlay polls it every 150 ms and re-renders itself on price pushes.
+  Passing live premiums as chart props would re-render the memoised chart on every tick.
+- **Live prices only** on a chip (`ltpById`); no live tick (outside the bridge window, stale feed, closed market) shows
+  `—` and the popup's Buy / Sell are disabled with the reason. Never a snapshot or `prev_close`.
+- **Every strike in view**, thinned by doubling steps from ATM when they are closer than 24 px (ATM always kept), so
+  chips never overlap.
+- **Orders** go through the terminal's `onTradeContract` -> `placeContract` (lot cap, session, live price, broker routing,
+  `isx`), market, at once; one order per click (overlay latch + `oneClickBusyRef`). Lots per click come from a select
+  (Buy and Sell separately), never a typed box (`dhan-commit-on-blur`).
+- **Placement**: chips sit `CHIPS_RIGHT` (430 px) from the right, clear of the OI bars and the position chip, pulled
+  right on a narrow pane so they never leave the plot.
 
 ### Price-scale "+" menu and hotkeys
 - **Hover:** within the price axis band, show a "+" at the snapped price (use the instrument's tick, never a

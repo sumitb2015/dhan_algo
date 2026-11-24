@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BarChart3, CandlestickChart, Columns2, LayoutList, Square, AlignRight, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Trash2, TrendingUp, Zap,
+  BarChart3, CandlestickChart, Columns2, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Trash2, TrendingUp, Zap,
 } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import DataChip from '@/components/DataChip';
@@ -44,6 +44,7 @@ import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
 import { Switch } from '@/components/ui/switch';
 import type { OiMode } from '@/lib/indexScalperOiProfile';
+import { QUICK_ON_KEY, QUICK_SETTINGS_KEY, DEFAULT_QUICK, clampQuickSettings, type QuickSettings } from '@/lib/indexScalperQuickTrade';
 
 // v2: v1 could hold an ATM pin taken before any spot was known (the middle of the strike list, e.g. 24200). v1 is
 // read for the layout, instruments and timeframes only; its option strikes go back to ATM.
@@ -133,6 +134,11 @@ export default function IndexScalperTerminal() {
   const [paneStatus, setPaneStatus] = useState<[PaneStatus, PaneStatus]>([NO_STATUS, NO_STATUS]);
   // Call / Put OI bars at each strike on the underlying chart(s). Per viewer, on by default.
   const [showOi, setShowOi] = useState(true);
+  // Quick Trade (strike lines with live C / P chips, Buy / Sell in one click). OFF by default: off, the page is exactly
+  // what it was before the feature existed.
+  const [quickOn, setQuickOnState] = useState(false);
+  const [quickSettings, setQuickSettingsState] = useState<QuickSettings>(DEFAULT_QUICK);
+  const [quickMenu, setQuickMenu] = useState(false);
   // What the bars show: the total OI, or today's change in OI.
   const [oiMode, setOiModeState] = useState<OiMode>('total');
   const [days, setDays] = useState(15);
@@ -224,10 +230,20 @@ export default function IndexScalperTerminal() {
     }
     if (readPref(OI_KEY) === '0') setShowOi(false);
     if (readPref(OI_MODE_KEY) === 'change') setOiModeState('change');
+    if (readPref(QUICK_ON_KEY) === '1') setQuickOnState(true);
+    setQuickSettingsState(clampQuickSettings(loadJson<unknown>(QUICK_SETTINGS_KEY, null)));
     setLayoutReady(true);
   }, []);
   const setOi = (on: boolean) => { setShowOi(on); savePref(OI_KEY, on ? '1' : '0'); };
   const setOiMode = (m: OiMode) => { setOiModeState(m); savePref(OI_MODE_KEY, m); };
+  const setQuickOn = (on: boolean) => { setQuickOnState(on); savePref(QUICK_ON_KEY, on ? '1' : '0'); if (!on) setQuickMenu(false); };
+  const patchQuick = (patch: Partial<QuickSettings>) => setQuickSettingsState(prev => {
+    const next = clampQuickSettings({ ...prev, ...patch });
+    savePref(QUICK_SETTINGS_KEY, JSON.stringify(next));
+    return next;
+  });
+  // The pane prop: null when off, else the settings (identity changes only when a setting does).
+  const quickProp = useMemo(() => (quickOn ? quickSettings : null), [quickOn, quickSettings]);
   // An ATM pin the pane made itself is saved as ATM (0), so the next session resolves today's ATM; a picked strike is kept.
   useEffect(() => {
     if (!layoutReady) return;
@@ -1200,6 +1216,25 @@ export default function IndexScalperTerminal() {
             <Switch size="sm" checked={showOi} onCheckedChange={setOi} aria-label="OI profile" />
             <span className={cn('w-6 text-[10px] font-bold', showOi ? 'text-emerald-400' : 'text-zinc-500')} aria-hidden>{showOi ? 'ON' : 'OFF'}</span>
           </label>
+          {sep}
+          <div className="relative flex items-center">
+            <label className="flex items-center gap-1.5 h-7 px-1.5 rounded text-xs font-semibold text-zinc-300 cursor-pointer select-none hover:bg-zinc-800"
+              title="Quick Trade: every strike on the chart shows its live Call / Put price; click one to Buy or Sell your preset lots at market">
+              <Crosshair className="w-4 h-4" aria-hidden />
+              Quick
+              <Switch size="sm" checked={quickOn} onCheckedChange={setQuickOn} aria-label="Quick Trade" />
+            </label>
+            <button type="button" aria-label="Quick Trade settings" aria-expanded={quickMenu} disabled={!quickOn}
+              title={quickOn ? 'Quick Trade settings: lots per click, product' : 'Turn Quick Trade on first'}
+              onClick={() => setQuickMenu(v => !v)} className={cn(btn, 'px-1.5 disabled:opacity-40', quickMenu && 'bg-zinc-800 text-white')}>
+              <Settings2 className="w-4 h-4" />
+            </button>
+            {quickMenu && quickOn && (
+              <QuickSettingsMenu settings={quickSettings} onPatch={patchQuick} nrmlLocked={nrmlOnly(underlying)}
+                maxLots={MAX_LOTS} onClose={() => setQuickMenu(false)} />
+            )}
+          </div>
+          {sep}
           <div role="group" aria-label="OI shows" className={cn('flex rounded border border-zinc-700 overflow-hidden', !showOi && 'opacity-50')}
             title={showOi ? 'Bars show the total OI, or today\'s change in OI (added = filled, shed = outlined)' : 'Turn the OI profile on first'}>
             {([['total', 'Total'], ['change', 'Chg']] as const).map(([m, label]) => (
@@ -1302,6 +1337,7 @@ export default function IndexScalperTerminal() {
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
               onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
+              quick={quickProp} real={real} onQuickTrade={onTradeContract}
             />
               {layout === 2 && <div className="w-px bg-zinc-800 shrink-0" />}
               {layout === 2 && (
@@ -1317,6 +1353,7 @@ export default function IndexScalperTerminal() {
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
               onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
+              quick={quickProp} real={real} onQuickTrade={onTradeContract}
             />
               )}
             </>
@@ -1416,3 +1453,55 @@ export default function IndexScalperTerminal() {
   );
 }
 
+
+/** Quick Trade settings popover: lots per click for Buy and for Sell (a select: a discrete choice commits at once and a
+ *  half-typed number can never size an order, see dhan-commit-on-blur) and the product. CRUDEOILM opens NRML only. */
+function QuickSettingsMenu({ settings, onPatch, nrmlLocked, maxLots, onClose }: {
+  settings: QuickSettings; onPatch: (p: Partial<QuickSettings>) => void; nrmlLocked: boolean; maxLots: number; onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Element | null;
+      if (ref.current?.contains(t) || t?.closest?.('[aria-label="Quick Trade settings"]')) return;
+      onClose();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey); };
+  }, [onClose]);
+  const opts = Array.from({ length: maxLots }, (_, i) => i + 1);
+  const sel = 'h-7 w-16 px-1 rounded border border-zinc-700 bg-zinc-900 text-xs font-mono text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60';
+  const product = nrmlLocked ? 'MARGIN' : settings.product;
+  return (
+    <div ref={ref} role="dialog" aria-label="Quick Trade settings panel"
+      className="absolute left-0 top-9 z-[60] w-60 rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl p-3 flex flex-col gap-2.5 text-xs">
+      <div className="font-bold text-zinc-100">Quick Trade</div>
+      <label className="flex items-center justify-between gap-2 text-zinc-300">
+        <span>Buy lots per click</span>
+        <select aria-label="Buy lots per click" value={settings.buyLots} onChange={e => onPatch({ buyLots: Number(e.target.value) })} className={sel}>
+          {opts.map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
+      </label>
+      <label className="flex items-center justify-between gap-2 text-zinc-300">
+        <span>Sell lots per click</span>
+        <select aria-label="Sell lots per click" value={settings.sellLots} onChange={e => onPatch({ sellLots: Number(e.target.value) })} className={sel}>
+          {opts.map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
+      </label>
+      <div className="flex items-center justify-between gap-2 text-zinc-300">
+        <span>Product</span>
+        <div role="group" aria-label="Quick Trade product" className="flex rounded border border-zinc-700 overflow-hidden"
+          title={nrmlLocked ? 'MCX crude opens NRML only' : undefined}>
+          {([['INTRADAY', 'Intraday'], ['MARGIN', 'NRML']] as const).map(([v, l]) => (
+            <button key={v} type="button" aria-pressed={product === v} disabled={nrmlLocked}
+              onClick={() => onPatch({ product: v })}
+              className={cn('h-7 px-2 font-bold disabled:cursor-not-allowed', product === v ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}>{l}</button>
+          ))}
+        </div>
+      </div>
+      <p className="text-[10px] leading-snug text-zinc-500">One click on Buy / Sell sends a market order at once (REAL only when armed). Max {maxLots} lots per order.</p>
+    </div>
+  );
+}
