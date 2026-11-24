@@ -162,6 +162,39 @@ level, but the order is placed on the option's **premium**, and SIM compares it 
 option legs are converted (delta-based or premium-axis), do not offer them, or label them as underlying-level
 alerts. Futures legs are exact.
 
+## Performance: what keeps the chart smooth
+The page receives bridge pushes at 20-40 Hz. `useLiveOptionsWS` coalesces them to at most one React update per frame,
+so the page itself re-renders on every frame that has a push. Everything below keeps that cheap.
+- **Memoised chart:** `ScalperChart` is `memo(...)`. Every prop the page passes is a state value, a memo, or a
+  `useCallback`; never an inline arrow. One inline arrow or one object rebuilt per push re-renders the whole chart on
+  every push.
+- **Keep `legs` stable:** `ltpById` is a new Map on each push. `legs` keeps its identity through `legsKey` (memo on
+  the key). A push that moves no held leg then changes nothing on the chart.
+- **No prices in identity objects:** `chartContract` is keyed on contract identity (id, symbol, expiry, broker). With
+  the live LTP inside it, every callback built from it changed on every push. Orders price from `ltpById` and the
+  ticket from `ticketLtp`.
+- **Order callbacks read the position size through `legsRef`**, not a `legs` dependency, so P&L ticks don't rebuild
+  `placeContract` and everything above it.
+- **Supertrend flips cost one series:** while the forming bar stays flipped, the tail path still runs. Only the
+  coloured series is re-sent, and only when the flip state changes (`recolor`). Before this, every tick re-sent all
+  13k bars and every indicator for the rest of the bar.
+- **Lazy initial state:** `useState(() => …)` for anything that formats a date. A plain
+  `useState({ day: istDayKey() })` builds an `Intl` formatter on every render.
+- **Costs measured on 13k one-minute bars:** default EMA + Supertrend recompute ≈3.4 ms; all eight indicators ≈16 ms.
+  They recompute only when `bars` changes, and `applyTick` returns the same array when a tick doesn't move the bar.
+- **Order latency:** click to `fetch` is ≈1-2 ms. Nothing may be awaited before the send. Fresh reads (positions +
+  order book, in parallel) belong only to exits, where the ownership rules need them.
+- **How to measure:**
+  - Run a throwaway Playwright spec on the dev server: mock prices moving every 100 ms, 13k bars, a REAL position
+    with a TP and an SL.
+  - Collect a CDP `Profiler` CPU profile and aggregate self-time by function.
+  - Use `long-animation-frame` and `longtask` PerformanceObservers for frame cost. Playwright's `page.clock` fakes
+    `requestAnimationFrame` and `performance.now`, so frame intervals timed with rAF are meaningless there.
+  - To count renders, log in the component body. In dev Strict Mode every render logs twice: halve the count.
+  - To find the prop that defeats a memo, diff the props against the previous render.
+  - Result after these fixes, in a 12 s window: long tasks 71 (≈4.8 s) -> 0; long frames 65 (5.3 s) -> 9 (0.5 s),
+    0 ms blocking.
+
 ## Adding a new instrument or overlay: checklist
 1. Add its spec to `INSTRUMENTS` (segment, tick, strike step, candle segment / instrument).
 2. Set `lotUnits` and `pnlMultiplier` for every broker, and add a `qtyLots` unit test per broker.
@@ -202,3 +235,5 @@ alerts. Futures legs are exact.
 | NSE-only session check | Crude evening candles frozen | `inMarketSession(underlying, …)` |
 | Fill from a snapshot or `prev_close` | Paper fills at stale prices | live-only `ltpById` + `feedAgeSec` |
 | e2e against `next start` | "Unchanged" results after edits | dev server on :3100 |
+| Inline arrow / price-bearing object as a chart prop | Chart re-renders on every feed push | `useCallback`, identity-only memo, `legsKey` |
+| Full redraw while the forming bar stays flipped | Long tasks on every tick after a Supertrend flip | `recolor`: re-send only the coloured series |

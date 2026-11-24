@@ -4,7 +4,7 @@
 // and open option positions drawn at the index level they belong to, each with qty / avg / live P&L and an Exit button.
 // Market data only; every order goes through the parent's callbacks.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createChart, CandlestickSeries, LineSeries, HistogramSeries, ColorType, CrosshairMode, LineStyle, PriceScaleMode,
   type IChartApi, type ISeriesApi, type IPriceLine, type UTCTimestamp, type SeriesType, type MouseEventParams, type Time,
@@ -12,7 +12,7 @@ import {
 } from 'lightweight-charts';
 import { Eye, EyeOff, Settings2, X, Plus, ArrowDown, ArrowUp, ArrowUpDown, Bell, FileText, Minus } from 'lucide-react';
 import { useChartChrome } from '@/lib/chartTheme';
-import { computeIndicator, indicatorLabel, tailUnchanged, type Bar, type IndicatorInstance, pointColor, flipsAtLast } from '@/lib/indexScalperIndicators';
+import { computeIndicator, indicatorLabel, tailUnchanged, type Bar, type IndicatorInstance, pointColor, flipsAtLast, type OutSeries } from '@/lib/indexScalperIndicators';
 import { bracketKind, fmtRupees, legAnchor, legPnl, type ScalperLeg } from '@/lib/indexScalperPositions';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { displayLotUnits, qtyUnits, type Underlying } from '@/lib/indexScalperInstrument';
@@ -94,7 +94,16 @@ function istLabel(shifted: number): string {
 /** Whole rupees with Indian grouping ("+9,120", "-2,640"), as the TP / SL / position chips show them. */
 const inrWhole = (n: number) => Math.round(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
 
-export default function ScalperChart(props: Props) {
+/** One indicator series as chart points: whitespace for a null, a per-point colour where the line has one. */
+function seriesData(s: OutSeries, bars: Bar[]) {
+  return s.values.map((v, i) => {
+    if (v === null || !Number.isFinite(v)) return { time: toTime(bars[i].t) };
+    const color = pointColor(s, i);
+    return color ? { time: toTime(bars[i].t), value: v, color } : { time: toTime(bars[i].t), value: v };
+  });
+}
+
+function ScalperChart(props: Props) {
   const {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, legs, entrySpots,
     onExitLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
@@ -308,9 +317,12 @@ export default function ScalperChart(props: Props) {
     const flip = outputs.some(({ out }) => out.series.some(flipsAtLast));
     const tail = !!prev && sig === sigRef.current && prev.first === bars[0].t
       && (bars.length === prev.n || bars.length === prev.n + 1)
-      && tailUnchanged(prev.tail, prev.n, bars)
-      // A Supertrend flipping on the forming bar (now, or on the last pass) recolours the point before it: redraw.
-      && !flip && !prev.flip;
+      && tailUnchanged(prev.tail, prev.n, bars);
+    // A direction-coloured line (Supertrend) paints the point BEFORE a flip transparent, so that point's colour changes
+    // only when the forming bar's flip state changes, or a new bar opens already flipped. Only then is that one series
+    // re-sent; candles and every other series still take the cheap update. (Re-sending everything while the forming
+    // bar stayed flipped redrew all 13k bars on every tick for the rest of the bar.)
+    const recolor = !!prev && (bars.length === prev.n ? flip !== prev.flip : flip);
     const lastBar = bars[bars.length - 1];
 
     if (tail) {
@@ -320,8 +332,9 @@ export default function ScalperChart(props: Props) {
         for (const { out } of outputs) {
           for (const s of out.series) {
             const api = indSeriesRef.current[k++];
-            const v = s.values[s.values.length - 1];
             if (!api) continue;
+            if (recolor && s.colors && s.style === 'line') { api.setData(seriesData(s, bars) as never); continue; }
+            const v = s.values[s.values.length - 1];
             if (v === null) continue;
             const color = pointColor(s, s.values.length - 1);
             api.update((color ? { time: toTime(lastBar.t), value: v, color } : { time: toTime(lastBar.t), value: v }) as never);
@@ -371,12 +384,7 @@ export default function ScalperChart(props: Props) {
       for (const s of out.series) {
         const api = indSeriesRef.current[k++];
         if (!api) continue;
-        const data = s.values.map((v, i) => {
-          if (v === null || !Number.isFinite(v)) return { time: toTime(bars[i].t) };
-          const color = pointColor(s, i);
-          return color ? { time: toTime(bars[i].t), value: v, color } : { time: toTime(bars[i].t), value: v };
-        });
-        api.setData(data as never);
+        api.setData(seriesData(s, bars) as never);
       }
     }
     prevRef.current = { n: bars.length, first: bars[0].t, tail: bars.slice(-2), flip };
@@ -1352,3 +1360,7 @@ export default function ScalperChart(props: Props) {
 }
 
 function useChromeStable() { return useChartChrome(); }
+
+/** Memoised: the page re-renders on every feed push (20-40 a second); the chart only needs to when its own props change
+ *  (bars, legs, orders, brackets). Every prop the page passes is a state value, a memo or a stable callback. */
+export default memo(ScalperChart);

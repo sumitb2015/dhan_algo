@@ -33,7 +33,7 @@ import {
   INSTRUMENTS, dhanOrderQty, kotakOrderQty, pnlMultiplier, lotUnits, qtyLots, type Underlying,
 } from '@/lib/indexScalperInstrument';
 import {
-  MAX_LOTS, applyFill, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, type ScalperLeg,
+  MAX_LOTS, applyFill, legsFromDhanPositions, legsKey, orderUnits, ownedCloseOrder, ownedQtyFromOrders, type ScalperLeg,
 } from '@/lib/indexScalperPositions';
 import { closeOrderProduct } from '@/lib/positionProduct';
 import {
@@ -133,7 +133,7 @@ export default function IndexScalperTerminal() {
 
   const [real, setReal] = useState(false);
   const [armOpen, setArmOpen] = useState(false);
-  const [sim, setSim] = useState<SimState>({ day: istDayKey(), legs: {}, realized: 0 });
+  const [sim, setSim] = useState<SimState>(() => ({ day: istDayKey(), legs: {}, realized: 0 }));
   const [simReady, setSimReady] = useState(false);
   const [simBrackets, setSimBrackets] = useState<Record<string, { tp?: number; sl?: number }>>({});
   const [entrySpots, setEntrySpots] = useState<Record<string, number>>({});
@@ -377,7 +377,7 @@ export default function IndexScalperTerminal() {
   }, [feed.expiry, feed.future, feed.strikeIds, feed.ltpById]);
   const kotakSymbols = feed.kotak?.symbols;
 
-  const legs: ScalperLeg[] = useMemo(() => {
+  const legsRaw: ScalperLeg[] = useMemo(() => {
     if (real && broker === 'kotak') return legsFromKotakPositions(realRows, kotakSymbols ?? {}, kotakPrice, underlying);
     if (real) return legsFromDhanPositions(realRows, feed.ltpById, underlying);
     return Object.values(sim.legs).filter(l => l.netQty !== 0).map(l => {
@@ -385,6 +385,14 @@ export default function IndexScalperTerminal() {
       return { id: l.securityId, securityId: l.securityId, product: '', symbol: l.symbol, strike: l.strike, type: l.type, netQty: l.netQty, avg: l.avg, ltp: live ?? null, sim: true, mult: 1 };
     });
   }, [real, broker, realRows, sim.legs, feed.ltpById, kotakSymbols, kotakPrice, underlying]);
+  // Same content, same array: ltpById is a new Map on every feed push (20-40 a second), but most pushes move no held leg.
+  // Keeping the identity lets the memoised chart skip those renders.
+  const legsSig = legsKey(legsRaw);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const legs = useMemo(() => legsRaw, [legsSig]);
+  // Order callbacks read the open quantity through a ref, so a P&L tick does not rebuild them (and the chart with them).
+  const legsRef = useRef(legs);
+  useEffect(() => { legsRef.current = legs; });
   // Bottom panel rows: the REAL Dhan book (open + closed rows), or the SIM paper book in the same shape.
   const panelPositions: PositionRowView[] = useMemo(() => {
     if (real && broker === 'kotak') {
@@ -536,7 +544,7 @@ export default function IndexScalperTerminal() {
       const kotakLot = lotUnits(underlying, k.lotSize);
       if (kotakLot === null) return { ok: false, text: 'Kotak lot size unknown for this contract: refusing the order' };
       const kQty = kotakOrderQty(underlying, req.lots, kotakLot);
-      const before = legs.find(l => l.securityId === sym)?.netQty ?? 0;
+      const before = legsRef.current.find(l => l.securityId === sym)?.netQty ?? 0;
       const out = await sendReal({
         tradingSymbol: sym, quantity: kQty, side: req.side, orderType: req.orderType,
         price: req.price ?? undefined, triggerPrice: req.trigger ?? undefined, product: req.product,
@@ -550,7 +558,7 @@ export default function IndexScalperTerminal() {
     if (!c.securityId || !/^\d+$/.test(c.securityId)) return { ok: false, text: 'No Dhan security id for this contract' };
     const dQty = dhanOrderQty(underlying, req.lots, unitsPerLot ?? 0);
     if (!(dQty > 0)) return { ok: false, text: 'Lot size unknown' };
-    const before = legs.find(l => l.securityId === c.securityId)?.netQty ?? 0;
+    const before = legsRef.current.find(l => l.securityId === c.securityId)?.netQty ?? 0;
     const out = await sendReal({
       securityId: c.securityId, quantity: dQty, side: req.side, orderType: req.orderType,
       exchangeSegment: INSTRUMENTS[underlying].dhanSegment,
@@ -560,7 +568,7 @@ export default function IndexScalperTerminal() {
     loadPositions();
     void loadOrders();
     return out;
-  }, [real, legs, sendReal, simFill, rememberSpot, loadPositions, loadOrders, underlying]);
+  }, [real, sendReal, simFill, rememberSpot, loadPositions, loadOrders, underlying]);
 
   const submitTicket = useCallback(async (req: TicketRequest) => {
     if (ticketBusy) return;
@@ -785,19 +793,23 @@ export default function IndexScalperTerminal() {
     void tradeNow(c, side);
   }, [feed.future, feed.expiry, tradeNow, flash]);
 
+  // The chart's contract (the future on screen). Keyed on its identity only, never its price: feed.future is a new object
+  // on every feed push, and the chart callbacks built from this would re-render the memoised chart 20-40 times a second.
+  // No price is needed here: orders and the ticket price from the live feed (ltpById / ticketLtp).
+  const futDhanId = feed.future?.dhanId ?? null;
+  const futKotakSymbol = feed.future?.kotakSymbol ?? null;
+  const futExpiry = feed.future?.expiry ?? null;
   const chartContract = useMemo<PickedContract | null>(() => {
-    const f = feed.future;
-    const isKotak = brokerRef.current === 'kotak';
-    if (!f || (isKotak ? !f.kotakSymbol : !f.dhanId)) return null;
+    if (broker === 'kotak' ? !futKotakSymbol : !futDhanId) return null;
     return {
       strike: 0,
       type: 'FUT',
-      securityId: f.dhanId ?? f.kotakSymbol ?? null,
-      ltp: f.ltp,
-      expiry: f.expiry ?? feed.expiry,
-      tradingSymbol: f.kotakSymbol ?? undefined,
+      securityId: futDhanId ?? futKotakSymbol ?? null,
+      ltp: null,
+      expiry: futExpiry ?? feed.expiry,
+      tradingSymbol: futKotakSymbol ?? undefined,
     };
-  }, [feed.future, feed.expiry]);
+  }, [broker, futDhanId, futKotakSymbol, futExpiry, feed.expiry]);
 
   const chartContractName = useMemo(() => {
     if (underlying === 'CRUDEOILM') {
@@ -1054,7 +1066,7 @@ export default function IndexScalperTerminal() {
   // ── indicators ─────────────────────────────────────────────────────
   const addIndicator = (k: IndicatorKind) => { setIndicators(p => [...p, newIndicator(k, nextId())]); setPickerOpen(false); };
   const patchIndicator = (id: string, patch: Partial<IndicatorInstance>) => setIndicators(p => p.map(i => (i.id === id ? { ...i, ...patch } : i)));
-  const removeIndicator = (id: string) => setIndicators(p => p.filter(i => i.id !== id));
+  const removeIndicator = useCallback((id: string) => setIndicators(p => p.filter(i => i.id !== id)), []);
 
   // A ticket belongs to the expiry it was picked under (its security id is that expiry's): close it on a switch.
   useEffect(() => {
@@ -1084,6 +1096,23 @@ export default function IndexScalperTerminal() {
       <Icon className="w-[18px] h-[18px]" />
     </button>
   );
+
+  // Stable callbacks for the memoised chart (inline arrows would re-render it on every feed push).
+  const onToolDone = useCallback(() => setTool('cursor'), []);
+  const onToggleIndicator = useCallback((id: string) => setIndicators(p => p.map(i => (i.id === id ? { ...i, visible: !i.visible } : i))), []);
+  const onEditIndicator = useCallback((id: string) => { setEditId(id); setPickerOpen(true); }, []);
+  const onOpenChartTicket = useCallback((req: { price: number; lots: number; orderType: 'LIMIT' }) => {
+    if (chartContract) {
+      setTicket(chartContract);
+      setTicketOrderType(req.orderType);
+      setTicketPrice(req.price);
+      setTicketLots(req.lots);
+      setTicketMsg(null);
+    } else {
+      flash({ ok: false, text: 'No contract identifier for chart order' });
+    }
+  }, [chartContract, flash]);
+  const onChartAlert = useCallback((sym: string, p: number) => { flash({ ok: true, text: `Alert set on ${sym} at ₹${p.toFixed(2)}` }); }, [flash]);
 
   return (
     <div ref={rootRef} data-testid="index-scalper" className={cn('flex flex-col h-screen overflow-hidden bg-zinc-950 text-white', real && 'ring-2 ring-inset ring-rose-600/70')}>
@@ -1198,31 +1227,19 @@ export default function IndexScalperTerminal() {
         <div className="relative flex-1 min-w-0 min-h-0">
           {indReady && (
             <ScalperChart
-              bars={liveBars} indicators={indicators} tool={tool} onToolDone={() => setTool('cursor')} clearToken={clearToken}
+              bars={liveBars} indicators={indicators} tool={tool} onToolDone={onToolDone} clearToken={clearToken}
               logScale={logScale} pctScale={pctScale} autoScale={autoScale}
               legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} exitingId={exitingId}
-              onToggleIndicator={id => setIndicators(p => p.map(i => (i.id === id ? { ...i, visible: !i.visible } : i)))}
-              onRemoveIndicator={removeIndicator} onEditIndicator={id => { setEditId(id); setPickerOpen(true); }}
+              onToggleIndicator={onToggleIndicator}
+              onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
               symbolLabel={underlying === 'CRUDEOILM' ? `CRUDEOILM · ${interval} · FUT` : `NIFTY · ${interval} · IDX`} focus={focus}
               contractName={chartContractName}
               lots={scalpLots}
               openOrders={chartOpenOrders}
               onCancelOrder={cancelOrder}
               onPlaceLimitOrder={onPlaceChartOrder}
-              onOpenTicket={req => {
-                if (chartContract) {
-                  setTicket(chartContract);
-                  setTicketOrderType(req.orderType);
-                  setTicketPrice(req.price);
-                  setTicketLots(req.lots);
-                  setTicketMsg(null);
-                } else {
-                  flash({ ok: false, text: 'No contract identifier for chart order' });
-                }
-              }}
-              onAlert={(sym, p) => {
-                flash({ ok: true, text: `Alert set on ${sym} at ₹${p.toFixed(2)}` });
-              }}
+              onOpenTicket={onOpenChartTicket}
+              onAlert={onChartAlert}
               simBrackets={simBrackets}
               onSetBracket={onSetBracket}
               onCancelBracket={onCancelBracket}

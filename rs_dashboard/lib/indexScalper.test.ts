@@ -305,3 +305,11 @@ test('a future is drawn at its average (the chart is that future); TP / SL follo
   assert.equal(bracketKind('STOP_LOSS_MARKET', 6130, 6110, false), 'SL');
   assert.equal(bracketKind('', 6090, 6110, false), 'TP'); // unknown type: side of the entry decides
 });
+
+test('legsKey: unchanged legs give the same key (the page keeps the array and the chart skips a render)', async () => {
+  const { legsKey } = await import('./indexScalperPositions.ts');
+  const leg = { id: 'a', securityId: '1', product: 'INTRADAY', symbol: 'X', strike: 0, type: 'FUT' as const, netQty: 6, avg: 6110, ltp: 6120, sim: false, mult: 10 };
+  assert.equal(legsKey([leg]), legsKey([{ ...leg }]));
+  assert.notEqual(legsKey([leg]), legsKey([{ ...leg, ltp: 6121 }])); // a price move is a change (P&L chip)
+  assert.notEqual(legsKey([leg]), legsKey([{ ...leg, netQty: 5 }]));
+});

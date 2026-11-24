@@ -48,6 +48,12 @@ export function bracketKind(orderType: string, price: number, anchor: number, is
   return (isLong ? price >= anchor : price <= anchor) ? 'TP' : 'SL';
 }
 
+/** Everything the chart and panels show of a leg list, as one string. A feed push that changes no held leg (most pushes:
+ *  they move other strikes) gives the same key, so the page can keep the same `legs` array and the chart skips a render. */
+export function legsKey(legs: ScalperLeg[]): string {
+  return legs.map(l => `${l.id}|${l.securityId}|${l.product}|${l.symbol}|${l.strike}|${l.type}|${l.netQty}|${l.avg}|${l.ltp}|${l.sim ? 1 : 0}|${l.mult ?? 1}`).join(';');
+}
+
 /** Open P&L in rupees; null when the LTP is unknown. */
 export function legPnl(leg: ScalperLeg): number | null {
   if (leg.ltp === null || !Number.isFinite(leg.ltp)) return null;
