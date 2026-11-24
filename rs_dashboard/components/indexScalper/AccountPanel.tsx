@@ -29,6 +29,9 @@ const STATUS_CLS: Record<OrderBucket, string> = {
 export interface AccountPanelProps {
   real: boolean;
   positions: PositionRowView[];
+  /** The positions book was actually read (REAL: a successful read and no current error). Until then the day P&L is
+   *  unknown, never 0.00. */
+  positionsLoaded: boolean;
   /** Exit for an open row (the terminal's own-quantity exit); null when this row cannot be exited from here. */
   canExit: (row: PositionRowView) => boolean;
   onExit: (row: PositionRowView) => void;
@@ -64,7 +67,7 @@ export default function AccountPanel(p: AccountPanelProps) {
   const closedRows = useMemo(() => p.positions.filter(r => r.netQty === 0), [p.positions]);
   const counts = useMemo(() => orderCounts(p.orders), [p.orders]);
   const shownOrders = orderFilter === 'all' ? p.orders : p.orders.filter(o => o.bucket === orderFilter);
-  const today = dayPnl(p.positions);
+  const today = dayPnl(p.positions, p.positionsLoaded);
   const holdPnl = holdingPnl(p.holdings);
 
   const toggle = () => setOpen(v => { const n = !v; try { savePref(OPEN_KEY, n ? '1' : '0'); } catch { /* per-viewer only */ } return n; });
@@ -81,7 +84,8 @@ export default function AccountPanel(p: AccountPanelProps) {
     const a = document.createElement('a');
     a.href = url; a.download = `index-scalper-${tab}-${new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })}.csv`;
     a.click();
-    URL.revokeObjectURL(url);
+    // released after the browser has taken the download (revoking at once can cancel it, e.g. in Firefox)
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
   };
 
   const tabs: { key: Tab; label: string; n?: number }[] = [
@@ -107,7 +111,9 @@ export default function AccountPanel(p: AccountPanelProps) {
             className={cn('p-1 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800', FOCUS)}>{open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}</button>
         </div>
         <div className="flex items-stretch divide-x divide-zinc-800 tabular-nums">
-          <Stat label={p.real ? "Today's Position P&L" : "Today's Position P&L (SIM)"} value={fmt(today)} cls={pnlCls(today)} testId="day-pnl" />
+          <Stat label={p.real ? "Today's Position P&L" : "Today's Position P&L (SIM)"} value={fmt(today.pnl)} cls={pnlCls(today.pnl)} testId="day-pnl"
+            note={today.unpriced > 0 ? `partial · ${today.unpriced} unpriced` : undefined}
+            noteTitle="Open positions with no price (e.g. an expiry other than the chain's) are not in this total" />
           <Stat label="Holding P&L" value={fmt(holdPnl)} cls={pnlCls(holdPnl)} />
           <Stat label="Available Margin" value={fmt(p.funds.available)} cls="text-sky-400" />
           <Stat label="Used Margin" value={fmt(p.funds.used)} cls="text-zinc-300" />
@@ -266,11 +272,14 @@ export default function AccountPanel(p: AccountPanelProps) {
   );
 }
 
-function Stat({ label, value, cls, testId }: { label: string; value: string; cls: string; testId?: string }) {
+function Stat({ label, value, cls, testId, note, noteTitle }: { label: string; value: string; cls: string; testId?: string; note?: string; noteTitle?: string }) {
   return (
     <div className="px-4 first:pl-0 last:pr-0">
       <div className="text-[11px] text-zinc-400 whitespace-nowrap">{label}</div>
-      <div data-testid={testId} className={cn('text-xs font-semibold', cls)}>{value}</div>
+      <div className="flex items-baseline gap-1.5">
+        <span data-testid={testId} className={cn('text-xs font-semibold', cls)}>{value}</span>
+        {note && <span data-testid={testId ? `${testId}-partial` : undefined} title={noteTitle} className="text-[10px] text-amber-300 whitespace-nowrap">{note}</span>}
+      </div>
     </div>
   );
 }

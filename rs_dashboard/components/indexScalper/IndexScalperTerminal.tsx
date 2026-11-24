@@ -110,6 +110,8 @@ export default function IndexScalperTerminal() {
   const [holdingsRaw, setHoldingsRaw] = useState<Record<string, unknown>[]>([]);
   const [holdingsErr, setHoldingsErr] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
+  // REAL positions have been read successfully at least once since REAL was armed (the day P&L is unknown before).
+  const [realLoaded, setRealLoaded] = useState(false);
   const [exitingId, setExitingId] = useState<string | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
   // One-click size: the widget's top stepper sets it; Buy CE / Buy PE and the chain's B / S use it too.
@@ -231,25 +233,41 @@ export default function IndexScalperTerminal() {
       if (!j.success || !j.data) { setPosErr(j.error ?? 'Could not load positions'); return null; }
       setPosErr(null);
       setRealRows(j.data);
+      setRealLoaded(true);
       return j.data;
     } catch (e) { setPosErr(String((e as Error).message ?? e)); return null; }
   }, []);
 
-  const loadOrders = useCallback(async () => {
+  // Order book reads: the timer skips while one is in flight or the tab is hidden, and only the newest request's reply
+  // is applied (a slow old reply must not put a just-cancelled order back to PENDING). A read asked for by an action
+  // (placement, cancel) always goes, superseding any in flight.
+  const ordersSeqRef = useRef(0);
+  const ordersInFlightRef = useRef(false);
+  const loadOrders = useCallback(async (fromTimer = false) => {
+    if (fromTimer && (ordersInFlightRef.current || document.visibilityState === 'hidden')) return;
+    const seq = ++ordersSeqRef.current;
+    ordersInFlightRef.current = true;
     try {
       const r = await fetch('/api/scalper/orders');
       const j = await r.json() as { success: boolean; data?: Record<string, unknown>[]; error?: string };
+      if (seq !== ordersSeqRef.current) return;
       if (!j.success || !Array.isArray(j.data)) { setOrdersErr(j.error ?? 'Could not load orders'); return; }
       setOrdersErr(null);
       setOrderBook(j.data);
-    } catch (e) { setOrdersErr(String((e as Error).message ?? e)); }
+    } catch (e) {
+      if (seq === ordersSeqRef.current) setOrdersErr(String((e as Error).message ?? e));
+    } finally {
+      if (seq === ordersSeqRef.current) ordersInFlightRef.current = false;
+    }
   }, []);
   useEffect(() => {
     // the order book is read on mount and then every 5 s (state is set after the fetch resolves, not synchronously)
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadOrders();
-    const t = setInterval(() => { void loadOrders(); }, 5000);
-    return () => clearInterval(t);
+    const t = setInterval(() => { void loadOrders(true); }, 5000);
+    const onVis = () => { if (document.visibilityState === 'visible') void loadOrders(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVis); };
   }, [loadOrders]);
   useEffect(() => {
     let dead = false;
@@ -266,7 +284,7 @@ export default function IndexScalperTerminal() {
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (!real) { setRealRows([]); setPosErr(null); return; }
+    if (!real) { setRealRows([]); setPosErr(null); setRealLoaded(false); return; }
     loadPositions();
     const t = setInterval(loadPositions, 3000);
     return () => clearInterval(t);
@@ -714,6 +732,7 @@ export default function IndexScalperTerminal() {
       <AccountPanel
         real={real}
         positions={panelPositions}
+        positionsLoaded={real ? realLoaded && !posErr : true}
         canExit={r => r.netQty !== 0 && !!legForRow(r)}
         onExit={r => { const l = legForRow(r); if (l) void exitLeg(l); }}
         exitingKey={exitingRowKey}

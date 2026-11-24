@@ -119,7 +119,10 @@ export function positionRows(rows: Row[], ltpById: Map<string, number>): Positio
     const securityId = String(r.securityId ?? r.security_id ?? '');
     const netQty = num(r.netQty) ?? 0;
     const buyAvg = num(r.buyAvg), sellAvg = num(r.sellAvg);
-    const avg = netQty > 0 ? buyAvg : netQty < 0 ? sellAvg : null;
+    // Today's average for the open side; a position carried from an earlier day has none (0), its entry is costPrice.
+    const dayAvg = netQty > 0 ? buyAvg : netQty < 0 ? sellAvg : null;
+    const cost = num(r.costPrice);
+    const avg = netQty === 0 ? null : dayAvg !== null && dayAvg > 0 ? dayAvg : cost !== null && cost > 0 ? cost : null;
     const live = ltpById.get(securityId);
     const realized = num(r.realizedProfit);
     let unrealized: number | null = netQty === 0 ? 0 : num(r.unrealizedProfit);
@@ -137,13 +140,18 @@ export function positionRows(rows: Row[], ltpById: Map<string, number>): Positio
   });
 }
 
-/** Today's position P&L: every row's realized + open P&L. No positions at all is a real 0 (as Dhan shows it); rows
- *  that exist but carry no figure are null (unknown, never shown as 0). */
-export function dayPnl(rows: PositionRowView[]): number | null {
-  if (rows.length === 0) return 0;
-  let any = false, sum = 0;
-  for (const r of rows) if (r.pnl !== null) { any = true; sum += r.pnl; }
-  return any ? sum : null;
+/** Today's position P&L: every row's realized + open P&L. `loaded` says the book was actually read: an empty book that
+ *  was read is a real 0 (as Dhan shows it), one that was never read (first reply pending, or the read failed) is null.
+ *  `unpriced` counts open rows whose open P&L is unknown, so a partial total is never shown as complete. */
+export function dayPnl(rows: PositionRowView[], loaded = true): { pnl: number | null; unpriced: number } {
+  if (!loaded) return { pnl: null, unpriced: 0 };
+  if (rows.length === 0) return { pnl: 0, unpriced: 0 };
+  let any = false, sum = 0, unpriced = 0;
+  for (const r of rows) {
+    if (r.netQty !== 0 && r.unrealized === null) unpriced++;
+    if (r.pnl !== null) { any = true; sum += r.pnl; }
+  }
+  return { pnl: any ? sum : null, unpriced };
 }
 
 export interface HoldingRowView { key: string; symbol: string; qty: number; avg: number | null; ltp: number | null; invested: number | null; value: number | null; pnl: number | null; pnlPct: number | null }

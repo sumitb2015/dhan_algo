@@ -18,7 +18,7 @@ function candles() {
   });
 }
 
-type MockState = { calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[]; orders?: Record<string, unknown>[]; noLive?: boolean; chainCalls?: number; liveExpiry?: string; marginCalls?: number; cancels?: string[]; holdings?: Record<string, unknown>[] };
+type MockState = { calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[]; orders?: Record<string, unknown>[]; noLive?: boolean; chainCalls?: number; liveExpiry?: string; marginCalls?: number; cancels?: string[]; holdings?: Record<string, unknown>[]; positionsFail?: boolean };
 
 async function mockApi(page: Page, state: MockState) {
   await page.route('**/api/**', async (route: Route) => {
@@ -31,7 +31,9 @@ async function mockApi(page: Page, state: MockState) {
     if (p === '/api/index-scalper/candles') return json(route, { success: true, candles: candles(), interval: '5' });
     if (p === '/api/options/expiries') return json(route, { success: true, data: ['2026-12-01', '2026-12-08'] });
     if (p === '/api/scalper/lookup') {
-      const strikes = Object.fromEntries(Object.entries(IDS).map(([k, [ce, pe]]) => [k, { ceId: ce, peId: pe }]));
+      // each expiry has its own contracts: the later expiry's ids end in 8
+      const suffix = u.searchParams.get('expiry') === '2026-12-08' ? '8' : '';
+      const strikes = Object.fromEntries(Object.entries(IDS).map(([k, [ce, pe]]) => [k, { ceId: ce + suffix, peId: pe + suffix }]));
       return json(route, { success: true, data: { lotSize: 65, strikes } });
     }
     if (p === '/api/options/chain') {
@@ -63,7 +65,10 @@ async function mockApi(page: Page, state: MockState) {
       return json(route, { success: true, status: { status: 'RUNNING' }, quotes: { underlying: 'NIFTY', expiry, spot: SPOT, atm: SPOT, updated_at: new Date().toISOString(), strikes } });
     }
     if (p === '/api/scalper/funds') return json(route, { success: true, data: { availabelBalance: 4684089.17, utilizedAmount: 0 } });
-    if (p === '/api/scalper/positions') return json(route, { success: true, data: state.positions });
+    if (p === '/api/scalper/positions') {
+      if (state.positionsFail) return json(route, { success: false, error: 'Dhan API unavailable' }, 502);
+      return json(route, { success: true, data: state.positions });
+    }
     if (p === '/api/scalper/orders' && method === 'GET') return json(route, { success: true, data: state.orders ?? [] });
     if (p === '/api/scalper/orders' && method === 'DELETE') {
       (state.cancels ??= []).push(String(body?.orderId ?? ''));
@@ -362,7 +367,7 @@ test.describe('Index Scalper', () => {
     await expect(w.getByRole('button', { name: /^Buy ATM put/ })).toBeEnabled({ timeout: 15_000 });
     await w.getByRole('button', { name: /^Buy ATM put/ }).click();
     await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
-    expect(state.calls[0].body).toMatchObject({ securityId: '402', quantity: 65, side: 'BUY', orderType: 'MARKET', source: 'isx' });
+    expect(state.calls[0].body).toMatchObject({ securityId: '4028', quantity: 65, side: 'BUY', orderType: 'MARKET', source: 'isx' }); // the 08-Dec contract
     expect(state.blocked).toEqual([]);
   });
 
@@ -420,5 +425,33 @@ test.describe('Index Scalper', () => {
     await expect(panel).toContainText('NIFTY 01 DEC 25350 PUT');
     expect(state.calls).toEqual([]);
     expect(state.blocked).toEqual([]);
+  });
+
+  test('day P&L: unknown (—) when REAL positions cannot be read, never 0.00', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], positions: [], positionsFail: true };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId('day-pnl')).toHaveText('0.00'); // SIM, no paper positions: a real zero
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    await expect(page.getByTestId('account-panel')).toContainText('Dhan API unavailable', { timeout: 15_000 });
+    await expect(page.getByTestId('day-pnl')).toHaveText('—');
+  });
+
+  test('day P&L is flagged partial when an open paper leg has no price (its expiry left the chain)', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], positions: [] };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'Option chain' }).click();
+    await page.getByRole('button', { name: 'Trade 25350 PE' }).click();
+    await page.getByTestId('order-ticket').getByRole('button', { name: /^Buy / }).click();
+    await expect(page.getByTestId('day-pnl-partial')).toHaveCount(0);
+    await page.getByTestId('option-chain-panel').getByRole('combobox').selectOption('2026-12-08');
+    await expect(page.getByTestId('day-pnl-partial')).toHaveText('partial · 1 unpriced', { timeout: 15_000 });
+    expect(state.calls).toEqual([]);
   });
 });

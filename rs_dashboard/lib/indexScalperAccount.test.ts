@@ -4,11 +4,12 @@ import {
   dayPnl, fundsView, holdingPnl, holdingRows, orderCounts, orderRows, positionRows, symbolLabel, timeLabel, toCsv,
 } from './indexScalperAccount.ts';
 
-// The shape Dhan's /orders really returns (2026-11-24), identifiers replaced.
+// The shape Dhan's /orders really returns (2026-11-24), identifiers replaced. Its createTime is 09:47:40, while Dhan's own
+// Orders tab showed 09:47:15 for this order: the UI time is not in this payload, so the panel shows 09:47:40.
 const cancelled = {
   orderId: 'O1', correlationId: 'Z_CHART', orderStatus: 'CANCELLED', transactionType: 'SELL', exchangeSegment: 'NSE_FNO',
   productType: 'MARGIN', orderType: 'LIMIT', tradingSymbol: 'NIFTY-Dec2026-25550-CE', securityId: '47812', quantity: 65,
-  price: 180.0, triggerPrice: 0.0, createTime: '2026-11-24 09:47:15', updateTime: '2026-11-24 09:47:40',
+  price: 180.0, triggerPrice: 0.0, createTime: '2026-11-24 09:47:40', updateTime: '2026-11-24 09:47:40',
   drvExpiryDate: '2026-12-01', drvOptionType: 'CALL', drvStrikePrice: 25550.0, omsErrorDescription: '', averageTradedPrice: 0, filledQty: 0,
 };
 
@@ -16,7 +17,7 @@ test('order row reads like Dhan\'s panel', () => {
   const [r] = orderRows([cancelled]);
   assert.equal(r.symbol, 'NIFTY 01 DEC 25550 CALL');
   assert.equal(r.exchange, 'NSE');
-  assert.equal(r.time, '24 Nov 2026, 09:47:15');
+  assert.equal(r.time, '24 Nov 2026, 09:47:40');
   assert.equal(r.side, 'SELL');
   assert.equal(r.orderType, 'Limit');
   assert.equal(r.product, 'Normal');
@@ -64,8 +65,20 @@ test('positions: live LTP marks the open part, realized is Dhan\'s, closed rows 
   assert.equal(rows[1].product, 'Normal');
   assert.equal(rows[2].ltp, null); // no live price: Dhan's own unrealized
   assert.equal(rows[2].pnl, 325);
-  assert.equal(dayPnl(rows), 2275);
-  assert.equal(dayPnl([]), 0); // no positions: a real zero, as Dhan shows
+  assert.deepEqual(dayPnl(rows), { pnl: 2275, unpriced: 0 });
+  assert.deepEqual(dayPnl([]), { pnl: 0, unpriced: 0 }); // a book that was read and is empty: a real zero, as Dhan shows
+  assert.deepEqual(dayPnl([], false), { pnl: null, unpriced: 0 }); // never read (pending / failed): unknown, not 0
+  // an open row with no price at all is counted, so the total is flagged partial
+  const unpriced = positionRows([{ tradingSymbol: 'X', securityId: '9', productType: 'INTRADAY', netQty: 65, buyAvg: 10, realizedProfit: 5 }], new Map());
+  assert.deepEqual(dayPnl(unpriced), { pnl: 5, unpriced: 1 });
+});
+
+test('a position carried from an earlier day is valued from costPrice (Dhan\'s day averages are 0)', () => {
+  const [r] = positionRows([{ tradingSymbol: 'NIFTY-Dec2026-25350-PE', securityId: '402', exchangeSegment: 'NSE_FNO', productType: 'MARGIN',
+    netQty: 65, buyQty: 0, sellQty: 0, buyAvg: 0, sellAvg: 0, costPrice: 150, realizedProfit: 0, unrealizedProfit: 1000 }], new Map([['402', 170]]));
+  assert.equal(r.avg, 150);
+  assert.equal(r.ltp, 170);
+  assert.equal(r.unrealized, 1300);
 });
 
 test('holdings P&L from Dhan\'s lastTradedPrice; unknown price is no P&L, not a loss', () => {
