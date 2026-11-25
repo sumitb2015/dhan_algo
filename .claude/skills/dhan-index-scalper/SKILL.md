@@ -67,6 +67,13 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
   placed/unknown order ID is recorded. Kotak sends no price: Kotak legs are priced from Dhan's chain.
 - Orders, SIM fills and SIM closes are allowed in the **trading session**: NSE F&O 09:15-15:40 IST (close auction;
   `inOrderSession` -> `feed.marketOpen`), MCX its session. The NIFTY index itself stops at 15:30 (its candles do too).
+- **SIM working orders** (`lib/indexScalperSimOrders.ts`, added 2026-11-25): a limit away from the price, a stop (SL-M)
+  or a stop-limit (SL) rests as a paper order (`SIM-` id, "PENDING (SIM)" row first in Orders and on the chart; cancel and
+  drag-to-move work locally). Placement uses the broker's rules (`orderEditError`). Fills on the contract's live price:
+  LIMIT at its own price, SL-M at the live price on the trigger, SL triggers then rests as a limit. Paused on stale /
+  closed; fills only while its instrument is on screen (the feed streams that one); DAY orders (`indexScalper.simOrders.v1`).
+  The paper book gets the same one-cancels-other as REAL (`ocoEvents` / `ocoActions` over the SIM rows), and a SIM
+  reverse cancels closing-side paper orders first. Before this, SIM refused any limit that was not marketable.
 - Market orders and SIM fills need a live tick (`ltpById`, fresh `feed_at`). A ticket is bound to the expiry it was
   picked under. MCX crude opens NRML only (`8064509f`).
 - Nothing may be awaited between the click and the send (click -> fetch ≈1-2 ms).

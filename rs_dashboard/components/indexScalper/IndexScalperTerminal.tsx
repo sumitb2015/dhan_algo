@@ -17,6 +17,7 @@ import { useTabLeader } from '@/hooks/useTabLeader';
 import { qtyBook, tradeChimeFor } from '@/lib/indexScalperChime';
 import { reverseBlockers, reverseLotsError } from '@/lib/indexScalperReverse';
 import { netBySecurity, ocoActions, ocoEvents, type OcoEvent } from '@/lib/indexScalperOco';
+import { isSimOrderId, simOrderRow, simOrderStep, validSimOrders, type SimOrder } from '@/lib/indexScalperSimOrders';
 import { armTrail, retrail, stepTrail, trailStillValid, validTrails, type TrailState } from '@/lib/indexScalperTrail';
 import NavBar from '@/components/NavBar';
 import DataChip from '@/components/DataChip';
@@ -102,6 +103,8 @@ const SIM_KEY = 'indexScalper.sim.v1';
 const SOUND_KEY = 'indexScalper.tradeSound';
 /** SIM trailing stops (REAL ones live in memory only: REAL is armed per page load). */
 const TRAIL_KEY = 'indexScalper.trail.v1';
+/** Paper working orders (SIM limits / stops waiting for their price): today's only. */
+const SIM_ORDERS_KEY = 'indexScalper.simOrders.v1';
 const SPOT_KEY = 'indexScalper.entrySpots.v1';
 
 interface SimLeg { securityId: string; symbol: string; strike: number; type: 'CE' | 'PE' | 'FUT'; netQty: number; avg: number; /** realized P&L of this leg today */ realized?: number }
@@ -212,6 +215,23 @@ export default function IndexScalperTerminal() {
   const [sim, setSim] = useState<SimState>(() => ({ day: istDayKey(), legs: {}, realized: 0 }));
   const [simReady, setSimReady] = useState(false);
   const [simBrackets, setSimBrackets] = useState<Record<string, { tp?: number; sl?: number }>>({});
+  // Paper working orders (lib/indexScalperSimOrders.ts). The ref is the source of truth for the fill watcher, so a price
+  // update that arrives before React re-renders can never fill one order twice.
+  const [simOrders, setSimOrdersState] = useState<SimOrder[]>([]);
+  const simOrdersRef = useRef<SimOrder[]>([]);
+  const setSimOrders = useCallback((next: SimOrder[]) => {
+    simOrdersRef.current = next;
+    setSimOrdersState(next);
+    savePref(SIM_ORDERS_KEY, JSON.stringify(next));
+  }, []);
+  useEffect(() => {
+    let saved: SimOrder[] = [];
+    try { saved = validSimOrders(JSON.parse(readPref(SIM_ORDERS_KEY) ?? '[]'), istDayKey()); } catch { saved = []; }
+    simOrdersRef.current = saved;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSimOrdersState(saved);
+  }, []);
+  const simOrderSeq = useRef(0);
   const [entrySpots, setEntrySpots] = useState<Record<string, number>>({});
   const [realRows, setRealRows] = useState<Record<string, unknown>[]>([]);
   const [posErr, setPosErr] = useState<string | null>(null);
@@ -580,6 +600,9 @@ export default function IndexScalperTerminal() {
     [orderBook, broker, kotakSymbols, kotakRecords],
   );
   const panelHoldings = useMemo(() => holdingRows(holdingsRaw), [holdingsRaw]);
+  // What the Orders tab and the charts show: in SIM the paper working orders come first (status "PENDING (SIM)").
+  const simOrderRows = useMemo(() => simOrders.filter(o => o.underlying === underlying).map(simOrderRow), [simOrders, underlying]);
+  const ordersView = useMemo(() => (real ? panelOrders : [...simOrderRows, ...panelOrders]), [real, panelOrders, simOrderRows]);
 
   // ── order placement ────────────────────────────────────────────────
   interface Outcome { ok: boolean; unknown?: boolean; text: string }
@@ -665,17 +688,29 @@ export default function IndexScalperTerminal() {
       : `${underlying}-${f.expiry}-${c.strike}-${c.type}`;
 
     if (!real) {
-      if (req.orderType !== 'MARKET' && req.orderType !== 'LIMIT') return { ok: false, text: 'SIM fills market and marketable limit orders only' };
-      if (!(live && live > 0) || f.feedAgeSec === null) return { ok: false, text: 'No live price to fill the paper order' };
-      if (f.stale) return { ok: false, text: 'Live prices are stale: not filling a paper order on an old price' };
-      if (!f.marketOpen) return { ok: false, text: `${isMcx(underlying) ? 'MCX' : 'NSE'} is closed: paper orders fill only during the session` };
-      let fillPx = live;
-      if (req.orderType === 'LIMIT') {
-        const lim = req.price ?? 0;
-        const marketable = req.side === 'BUY' ? lim >= live : lim <= live;
-        if (!marketable) return { ok: false, text: `Limit ${lim} is not marketable at ${live.toFixed(2)} (SIM does not rest orders)` };
-        fillPx = live;
+      if (!(live && live > 0) || f.feedAgeSec === null) return { ok: false, text: 'No live price for the paper order' };
+      if (f.stale) return { ok: false, text: 'Live prices are stale: not taking a paper order on an old price' };
+      if (!f.marketOpen) return { ok: false, text: `${isMcx(underlying) ? 'MCX' : 'NSE'} is closed: paper orders work only during the session` };
+      const fillNow = req.orderType === 'MARKET'
+        || (req.orderType === 'LIMIT' && (req.side === 'BUY' ? (req.price ?? 0) >= live : (req.price ?? 0) <= live));
+      if (!fillNow) {
+        // A limit away from the market, a stop or a stop-limit: a paper WORKING order, filled by the watcher when the
+        // contract's live price reaches it. The same placement rules as the broker's (lib/indexScalperOrderEdit).
+        const tick = isFut ? INSTRUMENTS[underlying].futTick : INSTRUMENTS[underlying].optTick;
+        const err = orderEditError(req.orderType, req.side, req.price ?? 0, req.trigger ?? 0, live, tick);
+        if (err) return { ok: false, text: `SIM: ${err}` };
+        const o: SimOrder = {
+          id: `SIM-${Date.now().toString(36)}${++simOrderSeq.current}`, underlying, securityId: c.securityId!, symbol,
+          type: c.type, strike: c.strike, expiry: isFut ? c.expiry : (f.expiry ?? ''), side: req.side,
+          orderType: req.orderType as SimOrder['orderType'], price: req.orderType === 'STOP_LOSS_MARKET' ? null : req.price,
+          trigger: req.orderType === 'LIMIT' ? null : req.trigger, units: size.units, lots: req.lots, product,
+          placedAt: Date.now(), day: istDayKey(),
+        };
+        setSimOrders([...simOrdersRef.current, o]);
+        const lvl = o.orderType === 'LIMIT' ? `@ ${o.price?.toFixed(2)}` : o.orderType === 'STOP_LOSS' ? `trigger ${o.trigger?.toFixed(2)} limit ${o.price?.toFixed(2)}` : `trigger ${o.trigger?.toFixed(2)}`;
+        return { ok: true, text: `SIM ${req.side} ${o.orderType === 'LIMIT' ? 'Limit' : o.orderType === 'STOP_LOSS' ? 'Stop Limit' : 'Stop'} ${req.lots} lot${req.lots > 1 ? 's' : ''} ${isFut ? 'FUT' : `${c.strike} ${c.type}`} ${lvl}: working, fills when the price gets there` };
       }
+      const fillPx = live;
       simFill(c, req.side, size.units, fillPx, symbol);
       return { ok: true, text: `SIM ${req.side} ${req.lots} lot${req.lots > 1 ? 's' : ''} ${isFut ? 'FUT' : `${c.strike} ${c.type}`} @ ${fillPx.toFixed(2)}` };
     }
@@ -722,7 +757,7 @@ export default function IndexScalperTerminal() {
     loadPositions();
     void loadOrders();
     return out;
-  }, [real, sendReal, simFill, rememberSpot, loadPositions, loadOrders, underlying]);
+  }, [real, sendReal, simFill, setSimOrders, rememberSpot, loadPositions, loadOrders, underlying]);
 
   const submitTicket = useCallback(async (req: TicketRequest) => {
     if (ticketBusy) return;
@@ -1036,13 +1071,19 @@ export default function IndexScalperTerminal() {
   }, [cancellingId, flash, loadOrders]);
   /** Cancel from the panel / chart: this page's own order at once; any other placer's (a strategy's stop, the mobile
    *  app, another terminal) only after a confirmation, since on the chart it looks just like this page's own. */
-  const panelOrdersRef = useRef(panelOrders);
-  useEffect(() => { panelOrdersRef.current = panelOrders; });
+  const panelOrdersRef = useRef(ordersView);
+  useEffect(() => { panelOrdersRef.current = ordersView; });
   const cancelOrder = useCallback(async (orderId: string) => {
+    if (isSimOrderId(orderId)) {
+      if (!simOrdersRef.current.some(o => o.id === orderId)) return;
+      setSimOrders(simOrdersRef.current.filter(o => o.id !== orderId));
+      flash({ ok: true, text: 'SIM order cancelled' });
+      return;
+    }
     const row = panelOrdersRef.current.find(o => o.id === orderId);
     if (row && !row.own) { setCancelAsk(row); return; }
     await sendCancel(orderId);
-  }, [sendCancel]);
+  }, [sendCancel, setSimOrders, flash]);
 
   // One click, one order: a ref (not state) so a fast double click cannot send twice before React re-renders.
   const oneClickBusyRef = useRef(false);
@@ -1118,8 +1159,8 @@ export default function IndexScalperTerminal() {
     // The exact root, then a space / dash / digit: CRUDEOIL and CRUDEOILM never draw each other's orders (a "contains
     // CRUDE" match put a CRUDEOIL future order on the CRUDEOILM chart), NIFTY never NIFTYNXT50's.
     const root = new RegExp(`^${underlying}(?=[\\s\\d-]|$)`);
-    return panelOrders.filter(o => o.bucket === 'open' && root.test(o.symbol.toUpperCase()));
-  }, [panelOrders, underlying]);
+    return ordersView.filter(o => o.bucket === 'open' && root.test(o.symbol.toUpperCase()));
+  }, [ordersView, underlying]);
 
   // `contract` is the pane's: the option it plots, or the underlying's future (ChartPane binds it).
   const onPlaceChartOrder = useCallback(async (c: PickedContract | null, req: { side: 'BUY' | 'SELL'; price: number; lots: number; orderType?: 'LIMIT' | 'STOP_LOSS' }) => {
@@ -1190,6 +1231,37 @@ export default function IndexScalperTerminal() {
       }
     }
   }, [real, legs, simBrackets, exitSimLeg, flash]);
+
+  // In SIM mode: fill paper working orders when their contract's live price reaches them (lib/indexScalperSimOrders.ts).
+  // Same pause as every paper fill: stale prices or a closed market fill nothing. An order fills only while its
+  // instrument is on screen (the feed streams that one); a day-old order expires.
+  useEffect(() => {
+    if (real || !simReady) return;
+    const list = simOrdersRef.current;
+    if (!list.length) return;
+    const today = istDayKey();
+    const priceOk = !feed.stale && feed.feedAgeSec !== null && feed.marketOpen;
+    let changed = false;
+    const keep: SimOrder[] = [];
+    const fills: [SimOrder, number][] = [];
+    for (const o of list) {
+      if (o.day !== today) { changed = true; continue; }
+      const live = priceOk && o.underlying === underlying ? feed.ltpById.get(o.securityId) : undefined;
+      if (!live) { keep.push(o); continue; }
+      const r = simOrderStep(o, live);
+      if (r.fill !== null) { fills.push([o, r.fill]); changed = true; continue; }
+      if (r.order !== o) changed = true;
+      keep.push(r.order);
+    }
+    if (!changed) return;
+    setSimOrders(keep);
+    for (const [o, px] of fills) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- booking a fill the price update just caused
+      simFill({ strike: o.strike, type: o.type, securityId: o.securityId, expiry: o.expiry, ltp: px }, o.side, o.units, px, o.symbol);
+      const kind = o.orderType === 'LIMIT' ? 'Limit' : o.orderType === 'STOP_LOSS' ? 'Stop Limit' : 'Stop';
+      flash({ ok: true, text: `SIM ${o.side} ${kind} filled: ${o.lots} lot${o.lots > 1 ? 's' : ''} ${o.type === 'FUT' ? 'FUT' : `${o.strike} ${o.type}`} @ ${px.toFixed(2)}` });
+    }
+  }, [real, simReady, feed.ltpById, feed.stale, feed.feedAgeSec, feed.marketOpen, underlying, simFill, setSimOrders, flash]);
 
   const onSetBracket = useCallback(async (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }) => {
     if (!real || req.leg.sim) {
@@ -1269,6 +1341,31 @@ export default function IndexScalperTerminal() {
     const row = panelOrdersRef.current.find(o => o.id === req.orderId);
     if (!row) { flash({ ok: false, text: `Order ${req.orderId} is no longer in the order book` }); return false; }
     if (!isEditable(row)) { flash({ ok: false, text: `Order ${req.orderId} cannot be edited here (only this page's working Limit / SL / SL-M orders)` }); return false; }
+    if (isSimOrderId(row.id)) {
+      // A paper working order: moved / resized in place, checked like a broker modify against the live price.
+      const o = simOrdersRef.current.find(x => x.id === row.id);
+      if (!o) return false;
+      const f = feedRef.current;
+      const tick = row.isOption ? INSTRUMENTS[underlying].optTick : INSTRUMENTS[underlying].futTick;
+      const live = f.ltpById.get(o.securityId) ?? null;
+      const levels = req.level !== undefined ? movedLevels(row, req.level, tick) : { price: row.price ?? 0, trigger: row.trigger ?? 0 };
+      const levelErr = orderEditError(row.rawType, o.side, levels.price, levels.trigger, live, tick);
+      if (levelErr) { flash({ ok: false, text: `SIM order: ${levelErr}` }); return false; }
+      let units = o.units, lots = o.lots;
+      if (req.lots !== undefined) {
+        const lotsErr = editLotsError(req.lots, 0, INSTRUMENTS[underlying].maxLots);
+        if (lotsErr) { flash({ ok: false, text: `SIM order: ${lotsErr}` }); return false; }
+        units = (o.units / o.lots) * req.lots; lots = req.lots;
+      }
+      const isLimit = row.rawType === 'LIMIT';
+      setSimOrders(simOrdersRef.current.map(x => (x.id === o.id ? {
+        ...x, units, lots,
+        price: isLimit || x.orderType === 'STOP_LOSS' ? levels.price : x.price,
+        trigger: isLimit ? x.trigger : levels.trigger,
+      } : x)));
+      flash({ ok: true, text: `SIM order moved${req.lots !== undefined ? `: ${lots} lot${lots === 1 ? '' : 's'}` : ''}` });
+      return true;
+    }
     if (!real) { flash({ ok: false, text: 'Arm REAL to edit a broker order' }); return false; }
     if (modifyBusyRef.current) return false;
     const f = feedRef.current;
@@ -1320,7 +1417,7 @@ export default function IndexScalperTerminal() {
       modifyBusyRef.current = false;
       void loadOrders();
     }
-  }, [real, underlying, flash, loadOrders]);
+  }, [real, underlying, flash, loadOrders, setSimOrders]);
 
   const onCancelBracket = useCallback(async (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => {
     if (req.orderId) {
@@ -1359,6 +1456,9 @@ export default function IndexScalperTerminal() {
     const revSide: 'BUY' | 'SELL' = leg.netQty > 0 ? 'SELL' : 'BUY';
     setSimBrackets(prev => { if (!prev[leg.id]) return prev; const next = { ...prev }; delete next[leg.id]; return next; });
     dropTrail(leg.id);
+    // Paper limits / stops on the closing side would add to the reversed position: cancelled first, as in REAL.
+    const paperBlk = reverseBlockers(simOrdersRef.current.map(simOrderRow), leg.securityId, leg.netQty > 0);
+    if (paperBlk.own.length) setSimOrders(simOrdersRef.current.filter(o => !paperBlk.own.includes(o.id)));
     // Only open the other side once the close went through: otherwise "reverse" would double the position.
     const closed = exitSimLeg(leg);
     if (!closed.ok) { flash({ ok: false, text: `Reverse ${legName(leg)}: not closed: ${closed.text}` }); return; }
@@ -1544,6 +1644,29 @@ export default function IndexScalperTerminal() {
     ocoQueueRef.current.push(...events);
     void drainOco();
   }, [legs, real, broker, underlying, bookReady, drainOco]);
+
+  // SIM one-cancels-other on the paper book, by the same rules as REAL (lib/indexScalperOco.ts): when a paper position goes
+  // flat, the paper limit / stop orders left on its old closing side are cancelled; when it is reduced, bigger ones are cut.
+  const simOcoPrevRef = useRef<Map<string, number> | null>(null);
+  useEffect(() => {
+    if (real || !simReady) { simOcoPrevRef.current = null; return; }
+    const book = netBySecurity(legs);
+    const prev = simOcoPrevRef.current;
+    simOcoPrevRef.current = book;
+    if (!prev) return;
+    const events = ocoEvents(prev, book);
+    if (!events.length) return;
+    const rows = simOrdersRef.current.map(simOrderRow);
+    const acts = ocoActions(events, rows);
+    if (!acts.cancel.length && !acts.resize.length) return;
+    const drop = new Set(acts.cancel.map(o => o.id));
+    const cut = new Map(acts.resize.map(r => [r.order.id, r.qty]));
+    setSimOrders(simOrdersRef.current.filter(o => !drop.has(o.id)).map(o => {
+      const q = cut.get(o.id);
+      return q === undefined ? o : { ...o, units: q, lots: Math.max(1, Math.round((q / o.units) * o.lots)) };
+    }));
+    if (drop.size) flash({ ok: true, text: `SIM position closed: cancelled its other paper order${drop.size === 1 ? '' : 's'}` });
+  }, [legs, real, simReady, setSimOrders, flash]);
 
   // SIM: a paper target / stop belongs to the open leg only. Exit, a trailing-stop hit or a reverse leaves the leg flat;
   // its old levels must not come back on the next position on that contract.
@@ -1933,7 +2056,7 @@ export default function IndexScalperTerminal() {
         canExit={r => r.netQty !== 0 && !!legForRow(r)}
         onExit={r => { const l = legForRow(r); if (l) void exitLeg(l); }}
         exitingKey={exitingRowKey}
-        orders={panelOrders}
+        orders={ordersView}
         onCancelOrder={id => void cancelOrder(id)}
         cancellingId={cancellingId}
         holdings={panelHoldings}

@@ -332,6 +332,70 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('SIM working orders: a Sell Limit above the price rests and fills there; the target filling cancels the paper stop', async ({ page, context }) => {
+    test.setTimeout(120_000);
+    const state: MockState = { calls: [], blocked: [], underlyingCalls: [], candleCalls: [], positions: [] };
+    await signIn(context);
+    await mockCrudeApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByLabel('Broker for new orders')).toBeEnabled({ timeout: 30_000 });
+    await page.getByRole('button', { name: 'CRUDEOIL', exact: true }).click();
+    await expect(page.getByTestId('chart-pane-0')).toContainText('CRUDEOIL FUT', { timeout: 30_000 });
+    const pane = page.getByTestId('chart-pane-0');
+    const ticket = page.getByTestId('order-ticket');
+    const panel = page.getByTestId('account-panel');
+    const place = async (side: 'Buy' | 'Sell', type: 'Limit' | 'Stop', px: string) => {
+      await page.getByRole('button', { name: 'Buy FUT', exact: true }).first().click(); // no Scalper: opens the ticket
+      await ticket.getByRole('button', { name: type, exact: true }).click();
+      await ticket.getByLabel(type === 'Limit' ? 'Price' : 'Trigger price').fill(px);
+      await ticket.getByRole('button', { name: new RegExp(`^${side} `) }).click();
+    };
+
+    // 1. Sell Limit 6130 with the future at 6120: not marketable -> a paper working order (was: refused)
+    await place('Sell', 'Limit', '6130');
+    await expect(ticket).toContainText('working, fills when the price gets there');
+    await panel.getByRole('tab', { name: 'Orders' }).click();
+    await expect(panel.getByTestId('panel-order-row')).toHaveCount(1);
+    await expect(panel.getByTestId('panel-order-row')).toContainText('PENDING (SIM)');
+    await expect(pane.getByTestId('position-chip')).toHaveCount(0);
+
+    // it survives a reload (today's paper orders are saved)
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByLabel('Broker for new orders')).toBeEnabled({ timeout: 30_000 });
+    await page.getByRole('button', { name: 'CRUDEOIL', exact: true }).click();
+    await panel.getByRole('tab', { name: 'Orders' }).click();
+    await expect(panel.getByTestId('panel-order-row')).toHaveCount(1, { timeout: 15_000 });
+
+    // 2. the price trades up to it: filled at 6130 (its own price), a 1-lot short appears, the order is gone
+    state.spot = 6133;
+    await expect(pane.getByTestId('position-chip')).toHaveCount(1, { timeout: 15_000 });
+    await expect(pane.getByTestId('position-chip')).toHaveAttribute('data-side', 'short');
+    await expect(panel.getByTestId('panel-order-row')).toHaveCount(0);
+
+    // 3. bracket the short with paper orders: Buy Stop 6145 (stop) and Buy Limit 6100 (target)
+    await place('Buy', 'Stop', '6145');
+    await place('Buy', 'Limit', '6100');
+    await expect(panel.getByTestId('panel-order-row')).toHaveCount(2);
+    // a stop on the wrong side of the price is refused, as at the broker
+    await place('Buy', 'Stop', '6120');
+    await expect(ticket).toContainText("A Buy stop's trigger must be above the live price");
+    await expect(panel.getByTestId('panel-order-row')).toHaveCount(2);
+
+    // 4. the target trades: the short closes and the paper stop is cancelled with it (one-cancels-other)
+    state.spot = 6099;
+    await expect(pane.getByTestId('position-chip')).toHaveCount(0, { timeout: 15_000 });
+    await expect(panel.getByTestId('panel-order-row')).toHaveCount(0, { timeout: 10_000 });
+
+    // 5. Cancel from the Orders tab removes a working paper order
+    await place('Sell', 'Limit', '6150');
+    await expect(panel.getByTestId('panel-order-row')).toHaveCount(1);
+    await panel.getByRole('button', { name: /^Cancel order/ }).click();
+    await expect(panel.getByTestId('panel-order-row')).toHaveCount(0);
+
+    expect(state.calls).toEqual([]); // paper only: no order route touched
+    expect(state.blocked).toEqual([]);
+  });
+
   test('CRUDEOIL on Kotak: 1 lot = 100 barrels', async ({ page, context }) => {
     const state: MockState = { calls: [], blocked: [], underlyingCalls: [], candleCalls: [], positions: [] };
     await signIn(context);

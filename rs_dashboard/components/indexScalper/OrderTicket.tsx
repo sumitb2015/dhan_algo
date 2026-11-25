@@ -136,8 +136,8 @@ export default function OrderTicket({
 
         <div className="flex items-center gap-3 text-xs border-b border-zinc-800">
           {TYPES.map(t => (
-            <button key={t.v} type="button" onClick={() => setOrderType(t.v)} disabled={!real && t.v !== 'MARKET' && t.v !== 'LIMIT'}
-              title={!real && t.v !== 'MARKET' && t.v !== 'LIMIT' ? 'Stop orders need REAL mode (they rest at the exchange)' : undefined}
+            <button key={t.v} type="button" onClick={() => setOrderType(t.v)}
+              title={!real && t.v !== 'MARKET' ? 'SIM: a limit away from the price, a stop or a stop-limit waits as a paper order and fills when the price gets there' : undefined}
               className={cn('pb-1.5 -mb-px border-b-2 font-semibold disabled:opacity-40', orderType === t.v ? 'text-white border-sky-500' : 'text-zinc-400 border-transparent hover:text-zinc-200')}>
               {t.label}
             </button>
