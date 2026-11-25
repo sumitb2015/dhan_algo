@@ -345,6 +345,48 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('zoom buttons at the bottom of each chart: in keeps the live edge, out widens, reset fits the bars again', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    const pane = page.getByTestId('chart-pane-0');
+    await expect(pane.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    const zoom = pane.getByTestId('chart-zoom');
+    await expect(zoom.getByRole('button', { name: 'Zoom in' })).toBeVisible();
+    // each click bumps data-seq once the chart has applied it; read the range after that
+    let seq = 0;
+    const click = async (name: string) => {
+      await zoom.getByRole('button', { name }).click();
+      seq++;
+      await expect(zoom).toHaveAttribute('data-seq', String(seq));
+    };
+    const range = async () => ({ from: Number(await zoom.getAttribute('data-from')), to: Number(await zoom.getAttribute('data-to')) });
+    await click('Reset zoom');
+    const fit = await range();
+    const w0 = fit.to - fit.from;
+    expect(w0).toBeGreaterThan(20);
+    // zoom in: 70 % of the bars, the right edge (the live candle) kept where it was
+    await click('Zoom in');
+    const zin = await range();
+    expect(zin.to).toBeCloseTo(fit.to, 1);
+    expect(zin.to - zin.from).toBeCloseTo(w0 * 0.7, 0);
+    // zoom out twice: wider than the fitted view
+    await click('Zoom out');
+    await click('Zoom out');
+    const zout = await range();
+    expect(zout.to - zout.from).toBeGreaterThan(w0);
+    // reset: back to the fitted range
+    await click('Reset zoom');
+    const again = await range();
+    expect(again.to - again.from).toBeCloseTo(w0, 0);
+    // two charts: each pane has its own controls
+    await page.getByRole('button', { name: 'Two charts side by side' }).click();
+    await expect(page.getByTestId('chart-zoom')).toHaveCount(2, { timeout: 30_000 });
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
   test('background grid: on by default, toggled off from the scale bar, remembered after a reload', async ({ page, context }) => {
     const state = newState();
     await signIn(context);

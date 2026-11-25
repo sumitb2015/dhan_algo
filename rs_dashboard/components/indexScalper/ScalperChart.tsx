@@ -593,14 +593,9 @@ function ScalperChart(props: Props) {
   }, [viewKey, hasBars, focus]);
 
   // Reset scale (header button): auto-scale the price axis (undoing a hand drag / zoom) and re-frame the time axis.
-  const resetDoneRef = useRef(resetSeq);
-  useEffect(() => {
+  const resetView = useCallback(() => {
     const chart = chartRef.current;
     const b = barsRef.current;
-    if (resetDoneRef.current === resetSeq) return;
-    // Consumed even when there is no chart yet (a pane still mounting starts auto-scaled anyway): otherwise a pending
-    // click would fire later on an unrelated range change and undo a zoom made since.
-    resetDoneRef.current = resetSeq;
     if (!chart) return;
     chart.priceScale('right').applyOptions({ autoScale: true });
     if (b.length === 0) return;
@@ -613,7 +608,41 @@ function ScalperChart(props: Props) {
         ts.fitContent();
       }
     } catch { ts.fitContent(); }
-  }, [resetSeq, focus]);
+  }, [focus]);
+  const resetDoneRef = useRef(resetSeq);
+  useEffect(() => {
+    if (resetDoneRef.current === resetSeq) return;
+    // Consumed even when there is no chart yet (a pane still mounting starts auto-scaled anyway): otherwise a pending
+    // click would fire later on an unrelated range change and undo a zoom made since.
+    resetDoneRef.current = resetSeq;
+    resetView();
+  }, [resetSeq, resetView]);
+
+  // Zoom buttons (bottom of the chart, as on the other charts): scale the visible bar range, keeping its RIGHT edge
+  // where it is, so the live candle stays in view while zooming (a centred zoom pushes it off the right side).
+  // The control strip notes the visible range after each click (data-from / data-to, in bars): no React state, so a pan
+  // or a tick never re-renders the chart for it; the e2e reads it.
+  const zoomBarRef = useRef<HTMLDivElement>(null);
+  const noteRange = useCallback(() => {
+    // fitContent / setVisibleLogicalRange land on the chart's next frame: read after it.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const r = chartRef.current?.timeScale().getVisibleLogicalRange();
+      const el = zoomBarRef.current;
+      if (!r || !el) return;
+      el.dataset.from = r.from.toFixed(2);
+      el.dataset.to = r.to.toFixed(2);
+      el.dataset.seq = String(Number(el.dataset.seq ?? 0) + 1);
+    }));
+  }, []);
+  const zoomBy = useCallback((factor: number) => {
+    const ts = chartRef.current?.timeScale();
+    const r = ts?.getVisibleLogicalRange();
+    if (!ts || !r) return;
+    const width = r.to - r.from;
+    const next = Math.min(Math.max(width * factor, 10), 5000); // at least 10 bars on screen, at most 5,000
+    ts.setVisibleLogicalRange({ from: r.to - next, to: r.to });
+    noteRange();
+  }, [noteRange]);
 
   // ── position lines ────────────────────────────────────────────────
   const placed = useMemo(() => legs.map(leg => ({ leg, anchor: legAnchor(leg, entrySpots[leg.securityId], { premium, atStrike: strikeAnchor }), pnl: legPnl(leg) })), [legs, entrySpots, premium, strikeAnchor]);
@@ -1139,9 +1168,16 @@ function ScalperChart(props: Props) {
     };
   }, [menu, lotsProp, last, onPlaceLimitOrder, onOpenTicket]);
 
+  const zoomBtn = 'flex items-center justify-center w-6 h-6 rounded-full text-xs bg-zinc-900 border border-zinc-700 text-zinc-100 hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60';
   return (
     <div className="relative w-full h-full min-h-0">
       <div ref={boxRef} className={cn('absolute inset-0', tool !== 'cursor' && 'cursor-crosshair')} />
+      {/* Zoom out / reset / zoom in, above the time axis (same controls as the other charts) */}
+      <div ref={zoomBarRef} data-testid="chart-zoom" className="absolute bottom-8 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1">
+        <button type="button" onClick={() => zoomBy(1 / 0.7)} title="Zoom out" aria-label="Zoom out" className={zoomBtn}>−</button>
+        <button type="button" onClick={() => { resetView(); noteRange(); }} title="Reset zoom: auto-scale the price axis and fit the bars" aria-label="Reset zoom" className={zoomBtn}>↺</button>
+        <button type="button" onClick={() => zoomBy(0.7)} title="Zoom in" aria-label="Zoom in" className={zoomBtn}>+</button>
+      </div>
       {oiProfile && <canvas ref={oiCanvasRef} data-testid="oi-profile" aria-hidden className="absolute inset-0 w-full h-full pointer-events-none z-[1]" />}
 
       {/* OHLC + indicator legend */}
