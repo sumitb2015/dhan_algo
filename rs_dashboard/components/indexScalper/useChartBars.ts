@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { applyTick, mergeHistory, type Bar } from '@/lib/indexScalperIndicators';
-import { inMarketSession } from '@/lib/indexScalperSession';
+import { inMarketSession, inOrderSession } from '@/lib/indexScalperSession';
 import type { Underlying } from '@/lib/indexScalperInstrument';
 import type { ResolvedSource } from '@/lib/indexScalperChartSource';
 import type { IndexScalperFeed } from './useIndexScalperFeed';
@@ -96,8 +96,9 @@ export function useChartBars(
   useEffect(() => {
     if (livePrice === null || !(livePrice > 0) || feed.stale || feed.feedAgeSec === null) return;
     // Outside the market session a held-over price must not invent a candle.
-    if (!inMarketSession(underlying, Date.now())) return;
-    setBars(prev => (liveTagRef.current === tag ? applyTick(prev, livePrice, Number(interval), Date.now() / 1000, underlying) : prev), tag);
+    // (an option's premium trades to 15:40, the index stops at 15:30)
+    if (!(isOption ? inOrderSession(underlying, Date.now()) : inMarketSession(underlying, Date.now()))) return;
+    setBars(prev => (liveTagRef.current === tag ? applyTick(prev, livePrice, Number(interval), Date.now() / 1000, underlying, isOption) : prev), tag);
     // feed.stale / feedAgeSec are read as guards only: a new tick is what moves a bar.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [livePrice, feed.quotes, tag, interval, underlying]);

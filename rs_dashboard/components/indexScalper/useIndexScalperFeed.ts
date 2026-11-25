@@ -7,7 +7,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import type { LiveQuotes } from '@/components/Scalper';
 import { chainSnapshot, type RestChain } from '@/lib/indexScalperChain';
-import { inMarketSession } from '@/lib/indexScalperSession';
+import { inOrderSession } from '@/lib/indexScalperSession';
 import type { KotakSymbolInfo } from '@/lib/indexScalperKotak';
 import type { Underlying } from '@/lib/indexScalperInstrument';
 
@@ -44,7 +44,8 @@ export interface IndexScalperFeed {
   /** Seconds since the last tick; null when no tick has arrived. */
   feedAgeSec: number | null;
   stale: boolean;
-  /** Market session open now (NSE: 09:15-15:30 IST; MCX: 09:00-23:30/23:55 IST). Outside it nothing fills or sends at market. */
+  /** Trading session open now (NSE F&O: 09:15-15:40 IST, the close auction; MCX: 09:00-23:30/23:55 IST). Outside it
+   *  nothing fills or sends at market. Index candles keep their own 15:30 cash close (`inMarketSession`). */
   marketOpen: boolean;
   lotSize: number | null;
   strikeIds: Map<number, StrikeIds>;
@@ -302,7 +303,7 @@ export function useIndexScalperFeed(
     expiries, expiry, setExpiry, quotes, chain, chainSource: quotes ? 'live' : chain ? 'snapshot' : null, snapshotError,
     spot, feedAgeSec,
     stale: feedAgeSec !== null && feedAgeSec > STALE_FEED_MS / 1000,
-    marketOpen: nowMs > 0 && inMarketSession(underlying, nowMs),
+    marketOpen: nowMs > 0 && inOrderSession(underlying, nowMs),
     lotSize: lookupFor === `${underlying}:${expiry}` ? lotSize : null,
     strikeIds, ltpById, future,
     kotak, kotakError: broker === 'kotak' && !kotak ? (kotakSymbolsError ?? kotakLookupError) : null,

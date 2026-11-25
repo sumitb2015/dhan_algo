@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { inNseSession, inMcxSession, inMarketSession } from './indexScalperSession.ts';
+import { inNseSession, inNseFnoSession, inMcxSession, inMarketSession, inOrderSession } from './indexScalperSession.ts';
 
 const ist = (iso: string) => Date.parse(`${iso}+05:30`);
 
@@ -27,4 +27,15 @@ test('inMarketSession routes by underlying', () => {
   const eveningWeekday = ist('2026-11-25T16:30:00');
   assert.equal(inMarketSession('NIFTY', eveningWeekday), false);
   assert.equal(inMarketSession('CRUDEOILM', eveningWeekday), true);
+});
+
+test('NSE F&O (orders, option premiums) trade to 15:40 IST; the index (cash) still closes at 15:30', () => {
+  assert.equal(inNseFnoSession(ist('2026-11-25T15:35:00')), true);
+  assert.equal(inNseFnoSession(ist('2026-11-25T15:39:59')), true);
+  assert.equal(inNseFnoSession(ist('2026-11-25T15:40:00')), false);
+  assert.equal(inNseFnoSession(ist('2026-11-25T09:14:59')), false);
+  assert.equal(inNseFnoSession(ist('2026-11-24T11:00:00')), false); // holiday
+  assert.equal(inOrderSession('NIFTY', ist('2026-11-25T15:35:00')), true);
+  assert.equal(inMarketSession('NIFTY', ist('2026-11-25T15:35:00')), false); // no index candle after 15:30
+  assert.equal(inOrderSession('CRUDEOILM', ist('2026-11-25T16:30:00')), true);
 });

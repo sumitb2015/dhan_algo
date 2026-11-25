@@ -34,7 +34,7 @@ Related skills:
 | Saved-settings migration | `migrateIndicatorsV1`; localStorage keys `indexScalper.indicators.v1` -> `v2` |
 | Live candles from ticks; REST history as backfill | `applyTick`, `mergeHistory` (same file); the terminal's live-bars effect |
 | Fast tail update vs full redraw | `tailUnchanged`, `flipsAtLast`, `pointColor`; the chart's `data + indicators` effect |
-| Session gate per instrument | `lib/indexScalperSession.ts`: `inMarketSession` (NSE via `nseHolidays`, MCX via `mcxSession`) |
+| Session gate per instrument | `lib/indexScalperSession.ts`: `inMarketSession` (index candles: NSE cash to 15:30), `inOrderSession` (orders, paper fills, option premium candles: NSE F&O to 15:40, the close auction); NSE via `nseHolidays`, MCX via `mcxSession` |
 | Position anchor (where a leg is drawn) | `lib/indexScalperPositions.ts`: `legAnchor` |
 | TP vs SL classification of a working order | `bracketKind` (same file) |
 | Quantity -> lots / contract units | `lib/indexScalperInstrument.ts`: `qtyUnits`, `qtyLots`, `lotUnits`, `pnlMultiplier` |
@@ -91,6 +91,9 @@ Related skills:
 - REST history (`/api/index-scalper/candles`) loads only on an interval or range change, after a hidden tab, or after
   a stale feed. `mergeHistory` joins it with the live bars. History is tagged with its interval, so a switch never
   mixes two intervals.
+- **Two NSE closes.** The index (cash) stops at 15:30; F&O trades to **15:40** (SEBI close auction, same clock as
+  `optionsPricing.ts`). Orders / `feed.marketOpen` and option premium candles use `inOrderSession`; index candles use
+  `inMarketSession`. Orders cut at 15:30 used to refuse trades the exchange still takes (fixed 2026-11-25).
 - **No candles outside the session.** Gate every tick with `inMarketSession(underlying, now)`, never with an NSE-only
   check. MCX runs 09:00 to 23:30 IST during US daylight saving and to 23:55 otherwise; a hard-coded 09:15-15:30 froze
   crude's evening candles. A held-over spot on a holiday must not invent a bar.

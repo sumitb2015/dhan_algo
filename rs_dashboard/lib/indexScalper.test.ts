@@ -155,6 +155,11 @@ test('applyTick updates the forming bar, rolls a new one in-session, and never i
   assert.equal(applyTick(bars, 105, 5, after), bars); // NIFTY: closed at 18:00 IST
   assert.notEqual(applyTick(bars, 105, 5, after, 'CRUDEOILM'), bars); // CRUDEOILM: open at 18:00 IST
   assert.equal(applyTick(bars, 0, 5, t0 + 60), bars);
+  // 15:35 IST: the index is closed (no candle), an option's premium still trades (F&O to 15:40)
+  const t1535 = Date.parse('2026-11-25T15:35:00+05:30') / 1000;
+  const late = [{ t: t1535 - 600, o: 100, h: 100, l: 100, c: 100 }];
+  assert.equal(applyTick(late, 105, 5, t1535), late);
+  assert.notEqual(applyTick(late, 105, 5, t1535, 'NIFTY', true), late);
 });
 
 test('chart fast path only when every bar but the forming one is as drawn', () => {

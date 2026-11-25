@@ -1374,7 +1374,7 @@ export default function IndexScalperTerminal() {
           {candleErr && <span className="mr-3">Candles: {candleErr}</span>}
           {posErr && <span className="mr-3">Positions: {posErr}</span>}
           {feed.kotakError && <span data-testid="kotak-error" className="mr-3">{feed.kotakError}: Kotak orders and exits wait for it.</span>}
-          {!feed.marketOpen && <span data-testid="market-closed" className="mr-3">{underlying === 'CRUDEOILM' ? 'MCX is closed (session 09:00-23:30/23:55 IST)' : 'NSE is closed (session 09:15-15:30 IST)'}: paper fills and market orders are off.</span>}
+          {!feed.marketOpen && <span data-testid="market-closed" className="mr-3">{underlying === 'CRUDEOILM' ? 'MCX is closed (session 09:00-23:30/23:55 IST)' : 'NSE F&O is closed (session 09:15-15:40 IST)'}: paper fills and market orders are off.</span>}
           {notLive && <span className="mr-3">No live ticks (market closed or the tick bridge is not running): the option chain is Dhan&apos;s last snapshot, and market orders are refused.</span>}
           {feed.stale && <span>Live ticks are stale ({Math.round(feed.feedAgeSec ?? 0)}s): market closed or bridge down. Market orders are refused.</span>}
         </div>

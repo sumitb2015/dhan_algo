@@ -1,6 +1,6 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { json, signIn } from './support';
-import { installSessionClock, sessionIso } from './isxClock';
+import { installSessionClock, moveSessionClock, sessionIso } from './isxClock';
 
 // /index-scalper with every /api/* call mocked in the browser: no Dhan session needed and no order can reach a broker.
 // Any non-GET the mock does not handle is refused with 599 and fails the test.
@@ -479,6 +479,21 @@ test.describe('Index Scalper', () => {
     await page.getByTestId('option-chain-panel').getByRole('combobox').selectOption('2026-12-08');
     await expect(page.getByTestId('day-pnl-partial')).toHaveText('partial · 1 unpriced', { timeout: 15_000 });
     expect(state.calls).toEqual([]);
+  });
+
+  test('15:35 IST: NSE F&O is still open (close auction to 15:40), so a paper order fills', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], positions: [] };
+    await signIn(context);
+    await mockApi(page, state);
+    await moveSessionClock(page, Date.parse('2026-11-25T10:05:00Z')); // 15:35 IST
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'Option chain' }).click();
+    await page.getByRole('button', { name: 'Trade 25350 PE' }).click();
+    await page.getByTestId('order-ticket').getByRole('button', { name: /^Buy / }).click();
+    await expect(page.getByTestId('position-chip')).toHaveCount(1, { timeout: 15_000 });
+    await expect(page.getByTestId('market-closed')).toHaveCount(0);
+    expect(state.calls).toEqual([]); // SIM: no order route
   });
 
   test('after the close nothing fills: paper orders are refused and the page says NSE is closed', async ({ page, context }) => {

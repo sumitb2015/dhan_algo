@@ -3,7 +3,7 @@
 // private copy), except VWAP, which has no shared index-safe version.
 
 import { emaSmaSeeded, smaArray, rsiArray, macdSeries, adxDmiArray, supertrendSeries } from './indicators.ts';
-import { inMarketSession } from './indexScalperSession.ts';
+import { inMarketSession, inOrderSession } from './indexScalperSession.ts';
 import type { Underlying } from './indexScalperInstrument.ts';
 
 export interface Bar { t: number; o: number; h: number; l: number; c: number }
@@ -275,7 +275,8 @@ export function computeIndicator(bars: Bar[], ind: IndicatorInstance): Indicator
 }
 
 /** Fold a live spot tick into the bar list: update the forming bar, or open a new one when the interval has rolled over
- *  inside the market session (NSE: 09:15-15:30 IST; MCX: 09:00-23:30/23:55 IST). Outside the session, or when the tick is not newer than the last bar, the
+ *  inside the market session (NSE index: 09:15-15:30 IST; an option's premium, `option`: F&O to 15:40; MCX:
+ *  09:00-23:30/23:55 IST). Outside the session, or when the tick is not newer than the last bar, the
  *  list comes back unchanged so a frozen after-hours spot never invents candles. Returns the same array when nothing changed. */
 export function applyTick(
   bars: Bar[],
@@ -283,9 +284,10 @@ export function applyTick(
   intervalMin: number,
   nowSec: number,
   underlying: Underlying = 'NIFTY',
+  option = false,
 ): Bar[] {
   if (bars.length === 0 || !(price > 0)) return bars;
-  if (!inMarketSession(underlying, nowSec * 1000)) return bars;
+  if (!(option ? inOrderSession(underlying, nowSec * 1000) : inMarketSession(underlying, nowSec * 1000))) return bars;
   const step = intervalMin * 60;
   const last = bars[bars.length - 1];
   const ist = nowSec + 19800;
