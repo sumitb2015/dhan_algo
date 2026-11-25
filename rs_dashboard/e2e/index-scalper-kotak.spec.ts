@@ -132,11 +132,11 @@ test.describe('Index Scalper on Kotak', () => {
     expect(s.blocked).toEqual([]);
   });
 
-  test('Exit closes only what this page\'s recorded Kotak orders filled; a strategy\'s share stays open', async ({ page, context }) => {
+  test('Exit closes the whole Kotak row, including a share opened elsewhere (strategy / mobile app)', async ({ page, context }) => {
     const sym = KSYM('25350', 'PE');
     const s: KState = {
       calls: [], blocked: [], records: [{ orderId: 'K1', symbol: sym, side: 'SELL', product: 'MIS', at: 0 }],
-      // 715 short at Kotak: 65 from this page's order K1, 650 from a strategy's order S1
+      // 715 short at Kotak: 65 from this page's order K1, 650 from a strategy's order S1. Exit closes all 715.
       positions: [{ tradingSymbol: sym, securityId: '99887', netQty: -715, buyQty: 0, sellQty: 715, buyAvg: 0, sellAvg: 240, productType: 'MIS', realizedProfit: 0, lastTradedPrice: 0, unrealizedProfit: 0 }],
       book: [
         { orderId: 'K1', tradingSymbol: sym, transactionType: 'SELL', quantity: 65, orderStatus: 'COMPLETE', filledQty: 65, productType: 'MIS', createTime: '25-Nov-2026 10:20:00' },
@@ -159,7 +159,7 @@ test.describe('Index Scalper on Kotak', () => {
     await panel.getByRole('tab', { name: /^Positions/ }).click();
     await row.getByRole('button', { name: /^Exit / }).click();
     await expect.poll(() => kotakOrderPosts(s).length, { timeout: 15_000 }).toBe(1);
-    expect(kotakOrderPosts(s)[0].body).toMatchObject({ tradingSymbol: sym, quantity: 65, side: 'BUY', orderType: 'MARKET', product: 'INTRADAY', intent: 'close' });
+    expect(kotakOrderPosts(s)[0].body).toMatchObject({ tradingSymbol: sym, quantity: 715, side: 'BUY', orderType: 'MARKET', product: 'INTRADAY', intent: 'close' });
     expect(dhanAccountCalls(s)).toEqual([]);
     expect(s.blocked).toEqual([]);
   });
@@ -220,7 +220,7 @@ test.describe('Index Scalper on Kotak', () => {
     expect(s.blocked).toEqual([]);
   });
 
-  test('Cancel on a working Kotak order this page placed goes to Kotak\'s cancel', async ({ page, context }) => {
+  test('Cancel on any working Kotak order (this page\'s or not) goes to Kotak\'s cancel', async ({ page, context }) => {
     const sym = KSYM('25350', 'PE');
     const s: KState = {
       calls: [], blocked: [], positions: [],
@@ -234,7 +234,7 @@ test.describe('Index Scalper on Kotak', () => {
     const panel = page.getByTestId('account-panel');
     await panel.getByRole('tab', { name: 'Orders' }).click();
     await expect(panel.getByRole('button', { name: 'Cancel order K3' })).toBeVisible({ timeout: 15_000 });
-    await expect(panel.getByRole('button', { name: 'Cancel order S9' })).toHaveCount(0); // not this page's
+    await expect(panel.getByRole('button', { name: 'Cancel order S9' })).toHaveCount(1); // not this page's: cancellable too
     await panel.getByRole('button', { name: 'Cancel order K3' }).click();
     await expect.poll(() => s.calls.filter(c => c.path === '/api/scalper/kotak/orders' && c.method === 'DELETE').map(c => c.body?.orderId)).toEqual(['K3']);
     expect(dhanAccountCalls(s)).toEqual([]);

@@ -155,10 +155,10 @@ test.describe('Index Scalper', () => {
     expect(state.blocked).toEqual([]);
   });
 
-  test('REAL: arming is explicit, broker position is drawn, Exit closes only what this page opened and tags source isx', async ({ page, context }) => {
+  test('REAL: arming is explicit, broker position is drawn, Exit closes the whole broker row (any owner) and tags source isx', async ({ page, context }) => {
     const state: MockState = {
       calls: [], blocked: [],
-      // 715 at the broker, of which this page's isx orders filled 65; the other 650 belong to a strategy.
+      // 715 at the broker: 65 from this page's isx orders, 650 opened elsewhere (mobile app / strategy). Exit closes all.
       positions: [{
         tradingSymbol: 'NIFTY-Dec2026-25350-PE', securityId: '402', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY',
         netQty: 715, buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG',
@@ -182,7 +182,7 @@ test.describe('Index Scalper', () => {
     const chip = page.getByTestId('position-chip');
     await expect(chip).toBeVisible({ timeout: 15_000 });
     await expect(chip).toContainText('PE 25350');
-    // the broker's whole position (715 = 11 lots) is drawn; Exit below still closes only this page's 65
+    // the broker's whole position (715 = 11 lots) is drawn, and Exit closes all of it, whoever opened it
     await expect(chip.getByTestId('position-lots')).toHaveText('11');
     await expect(chip).toContainText('+21,414 INR');
     await expect(page.getByTestId('day-pnl')).toHaveText('21,414.25'); // 715 x (229.95 - 200), live LTP
@@ -190,13 +190,13 @@ test.describe('Index Scalper', () => {
     await page.getByRole('button', { name: 'Exit PE 25350' }).click();
     await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
     expect(state.calls[0].body).toMatchObject({
-      securityId: '402', quantity: 65, side: 'SELL', orderType: 'MARKET', productType: 'INTRADAY', source: 'isx', exchangeSegment: 'NSE_FNO',
+      securityId: '402', quantity: 715, side: 'SELL', orderType: 'MARKET', productType: 'INTRADAY', source: 'isx', exchangeSegment: 'NSE_FNO',
     });
     expect(String(state.calls[0].body?.idempotencyKey ?? '').length).toBeGreaterThanOrEqual(8);
     expect(state.blocked).toEqual([]);
   });
 
-  test('REAL Exit All: one order per owned row, never a second pass, legs it did not open are left alone', async ({ page, context }) => {
+  test('REAL Exit All: one order per broker row (duplicates collapsed), never a second pass, legs opened elsewhere closed too', async ({ page, context }) => {
     const row = { tradingSymbol: 'NIFTY-Dec2026-25350-PE', securityId: '402', exchangeSegment: 'NSE_FNO', sellAvg: 230, buyAvg: 0, positionType: 'SHORT' };
     const state: MockState = {
       calls: [], blocked: [],
@@ -216,9 +216,10 @@ test.describe('Index Scalper', () => {
     await expect(page.getByTestId('position-chip')).toHaveCount(2, { timeout: 15_000 });
 
     await page.getByRole('button', { name: 'Exit All' }).click();
-    await expect(page.getByRole('status').filter({ hasText: 'Exit All' })).toContainText('1 leg(s) not opened from this page left open', { timeout: 15_000 });
-    expect(state.calls.length).toBe(1);
-    expect(state.calls[0].body).toMatchObject({ securityId: '402', quantity: 65, side: 'BUY', productType: 'INTRADAY', source: 'isx' });
+    await expect(page.getByRole('status').filter({ hasText: 'Exit All' })).toContainText('Exit All sent for 2 leg(s)', { timeout: 15_000 });
+    expect(state.calls.length).toBe(2);
+    expect(state.calls.map(c => c.body?.productType).sort()).toEqual(['INTRADAY', 'MARGIN']);
+    for (const c of state.calls) expect(c.body).toMatchObject({ securityId: '402', quantity: 65, side: 'BUY', source: 'isx' });
     expect(state.blocked).toEqual([]);
   });
 
@@ -382,7 +383,7 @@ test.describe('Index Scalper', () => {
     expect(state.blocked).toEqual([]);
   });
 
-  test('account panel: Dhan-style summary, tabs, orders with status chips, own-order cancel only, paper positions with Exit', async ({ page, context }) => {
+  test('account panel: Dhan-style summary, tabs, orders with status chips, cancel on any working order, paper positions with Exit', async ({ page, context }) => {
     const order = {
       orderId: '2152611247467', correlationId: 'Z_CHART', orderStatus: 'CANCELLED', transactionType: 'SELL', exchangeSegment: 'NSE_FNO',
       productType: 'MARGIN', orderType: 'LIMIT', tradingSymbol: 'NIFTY-Dec2026-25550-CE', securityId: '47812', quantity: 65, price: 180,
@@ -404,7 +405,7 @@ test.describe('Index Scalper', () => {
     await expect(panel).toContainText('46,84,089.17');
     await expect(panel).toContainText('-12.26'); // Holding P&L
 
-    // Orders tab: Dhan's columns and status chips; Cancel only on THIS page's working order
+    // Orders tab: Dhan's columns and status chips; Cancel on every working order (this page's or not), none on a closed one
     await panel.getByRole('tab', { name: 'Orders' }).click();
     await expect(panel.getByRole('button', { name: 'All 3' })).toBeVisible();
     await expect(panel.getByRole('button', { name: 'Open 2' })).toBeVisible();
@@ -415,7 +416,8 @@ test.describe('Index Scalper', () => {
     await expect(row).toContainText('24 Nov 2026, 09:47:15');
     for (const t of ['NSE', 'Sell', 'Limit', 'Normal', '65', '180.00', 'CANCELLED', '2152611247467']) await expect(row).toContainText(t);
     await panel.getByRole('button', { name: 'All 3' }).click();
-    await expect(panel.getByRole('button', { name: 'Cancel order 888' })).toHaveCount(0); // a strategy's order
+    await expect(panel.getByRole('button', { name: 'Cancel order 888' })).toHaveCount(1); // a strategy's order: cancellable too
+    await expect(panel.getByRole('button', { name: 'Cancel order 2152611247467' })).toHaveCount(0); // cancelled already
     await panel.getByRole('button', { name: 'Cancel order 777' }).click();
     await expect.poll(() => state.cancels ?? []).toEqual(['777']);
 
