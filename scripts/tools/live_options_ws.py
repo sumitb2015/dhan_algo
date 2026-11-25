@@ -813,6 +813,8 @@ def main():
                             'symbol': fut_symbol_tracked,
                             'expiry': fut_expiry_tracked,
                             'basis': fut_basis,
+                            # Day's cumulative traded volume (additive field): a chart's VWAP on the future is weighted by it.
+                            'volume': int(_f(fut_tick.get('volume')) or 0),
                         }
 
             # Build per-strike quotes

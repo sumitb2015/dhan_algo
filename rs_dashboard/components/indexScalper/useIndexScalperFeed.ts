@@ -51,6 +51,9 @@ export interface IndexScalperFeed {
   strikeIds: Map<number, StrikeIds>;
   /** security id -> last premium, for every strike the bridge tracks. */
   ltpById: Map<string, number>;
+  /** security id -> the day's cumulative traded volume (options from the chain; the CRUDEOILM future from the bridge's
+   *  `future.volume`), live only. Charts turn its increases into bar volume for a volume-weighted VWAP. */
+  volumeById: Map<string, number>;
   /** Future contract for the selected option month (MCX mini future, or Nifty future). */
   future: FutureContractInfo | null;
   /** Kotak contracts when Kotak is the page's broker (null on Dhan, and until both reads land). */
@@ -257,6 +260,24 @@ export function useIndexScalperFeed(
     return m;
   }, [quotes, strikeIds, dhanFuture, underlying]);
 
+  const volumeById = useMemo(() => {
+    const m = new Map<string, number>();
+    const src = quotes;
+    if (!src) return m;
+    for (const sd of Object.values(src.strikes ?? {})) {
+      const ids = strikeIds.get(Number(sd.strike));
+      if (!ids) continue;
+      if (ids.ceId && sd.ce?.volume > 0) m.set(String(ids.ceId), sd.ce.volume);
+      if (ids.peId && sd.pe?.volume > 0) m.set(String(ids.peId), sd.pe.volume);
+    }
+    // The bridge's future is the option month's own (CRUDEOILM): its volume belongs to that contract only.
+    const fv = src.future?.volume;
+    if (underlying === 'CRUDEOILM' && dhanFuture?.securityId && fv && fv > 0 && (!src.future?.expiry || src.future.expiry === dhanFuture.expiry)) {
+      m.set(dhanFuture.securityId, fv);
+    }
+    return m;
+  }, [quotes, strikeIds, dhanFuture, underlying]);
+
   const hasLive = !!quotes;
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -305,7 +326,7 @@ export function useIndexScalperFeed(
     stale: feedAgeSec !== null && feedAgeSec > STALE_FEED_MS / 1000,
     marketOpen: nowMs > 0 && inOrderSession(underlying, nowMs),
     lotSize: lookupFor === `${underlying}:${expiry}` ? lotSize : null,
-    strikeIds, ltpById, future,
+    strikeIds, ltpById, volumeById, future,
     kotak, kotakError: broker === 'kotak' && !kotak ? (kotakSymbolsError ?? kotakLookupError) : null,
   };
 }

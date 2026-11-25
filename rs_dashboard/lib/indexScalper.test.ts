@@ -121,6 +121,34 @@ test('VWAP resets at the IST day change', () => {
   assert.equal(v[2], 200);
 });
 
+test('VWAP is volume-weighted when bars carry volume (a future / option), as on Dhan\'s chart; equal-weight without (index)', () => {
+  const day1 = 1_790_000_000;
+  const b = (t: number, c: number, v?: number): Bar => ({ t, o: c, h: c, l: c, c, ...(v !== undefined ? { v } : {}) });
+  // 100 x 1 + 110 x 9 -> 109, not the equal-weight 105
+  const w = sessionVwap([b(day1, 100, 1), b(day1 + 300, 110, 9)]);
+  assert.equal(w[0], 100);
+  assert.equal(w[1], 109);
+  assert.deepEqual(sessionVwap([b(day1, 100), b(day1 + 300, 110)]), [100, 105]); // no volume: average
+  // a zero-volume opening bar falls back to its own price until volume arrives
+  assert.deepEqual(sessionVwap([b(day1, 100, 0), b(day1 + 300, 110, 5)]), [100, 110]);
+  // and it resets each session
+  assert.equal(sessionVwap([b(day1, 100, 5), b(day1 + 86400, 200, 1)])[1], 200);
+});
+
+test('live ticks add their traded volume to the bar they land in; history and ticks never double-count a bar', () => {
+  const t0 = Date.parse('2026-11-25T10:00:00+05:30') / 1000;
+  const bars: Bar[] = [{ t: t0, o: 100, h: 100, l: 100, c: 100, v: 50 }];
+  const a = applyTick(bars, 100, 5, t0 + 30, 'CRUDEOILM', false, 20);
+  assert.equal(a.at(-1)!.v, 70); // same price, but volume traded: the bar still changes
+  const rolled = applyTick(a, 101, 5, t0 + 301, 'CRUDEOILM', false, 7);
+  assert.equal(rolled.at(-1)!.v, 7);
+  assert.equal(applyTick(bars, 100, 5, t0 + 30, 'CRUDEOILM'), bars); // no price move, no volume: unchanged
+  // merge: the forming bar keeps the larger of the history's and the ticks' volume (they cover the same trades)
+  const hist: Bar[] = [{ t: t0, o: 100, h: 101, l: 99, c: 100, v: 120 }];
+  const live: Bar[] = [{ t: t0, o: 100, h: 102, l: 100, c: 101, v: 30 }];
+  assert.equal(mergeHistory(hist, live, 5, t0 + 60).at(-1)!.v, 120);
+});
+
 test('Stochastic RSI: TradingView defaults (K 3, D 3, RSI 14, Stoch 14), own pane, K / D from stochRsiArray, 20 / 80 bands', () => {
   const bars = Array.from({ length: 120 }, (_, i) => bar(1_790_000_000 + i * 300, 100 + Math.sin(i / 5) * 6 + Math.cos(i / 3) * 2));
   const ind = newIndicator('stochrsi', 's');

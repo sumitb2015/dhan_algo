@@ -2,7 +2,8 @@
 Index Scalper candles: NIFTY index / CRUDEOILM future intraday candles (1/3/5/15 min) for the /index-scalper chart,
 or one option contract's premium candles (--security-id with --segment NSE_FNO --instrument OPTIDX, or MCX_COMM OPTFUT).
 
-Index candles only (no futures, no volume) so the chart matches the index the options are traded on.
+Each candle carries "v" (traded volume) when Dhan sends one (futures, options); the index has none, so it has no "v"
+and its VWAP is the session hlc3 average. A future's / option's VWAP is volume-weighted, as on Dhan's / TradingView's chart.
 Dhan only. Prints ONE JSON line: {"candles": [{"t": <epoch seconds>, "o","h","l","c"}], "interval": "5"}
 or {"error": "..."}; logs go to stderr.
 
@@ -63,10 +64,14 @@ def resample(rows, minutes, anchor_s):
             if bucket:
                 out.append(bucket)
             bucket = {"t": key, "o": r["o"], "h": r["h"], "l": r["l"], "c": r["c"]}
+            if "v" in r:
+                bucket["v"] = r["v"]
         else:
             bucket["h"] = max(bucket["h"], r["h"])
             bucket["l"] = min(bucket["l"], r["l"])
             bucket["c"] = r["c"]
+            if "v" in r:
+                bucket["v"] = bucket.get("v", 0) + r["v"]
     if bucket:
         out.append(bucket)
     return out
@@ -142,12 +147,20 @@ def main():
     if "time" not in df.columns:
         df = df.reset_index().rename(columns={df.index.name or "index": "time"})
 
+    vol_col = next((col for col in df.columns if str(col).lower() == "volume"), None)
+    # Volume only where it is real: an index's volume column is all zeros, and a "v" of 0 would read as "no trades".
+    # Never for an index: Dhan's IDX_I "volume" is a pseudo figure (millions per bar, a constant after the close) and the
+    # live index ticks carry none, so the index keeps its equal-weight session average.
+    has_vol = segment != "IDX_I" and vol_col is not None and float(df[vol_col].fillna(0).abs().sum()) > 0
     rows = []
     for _, r in df.iterrows():
         o, h, l, c = fnum(r.get("open")), fnum(r.get("high")), fnum(r.get("low")), fnum(r.get("close"))
         if None in (o, h, l, c):
             continue
-        rows.append({"t": to_epoch(r["time"]), "o": o, "h": h, "l": l, "c": c})
+        row = {"t": to_epoch(r["time"]), "o": o, "h": h, "l": l, "c": c}
+        if has_vol:
+            row["v"] = int(fnum(r.get(vol_col)) or 0)
+        rows.append(row)
     rows.sort(key=lambda x: x["t"])
     # de-duplicate identical timestamps (keep the last)
     uniq = {}

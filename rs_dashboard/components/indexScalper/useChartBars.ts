@@ -93,12 +93,24 @@ export function useChartBars(
 
   // Live price: spot for the underlying; the option's live bridge LTP (never a snapshot or prev close) for an option.
   const livePrice = isOption ? (contractId ? feed.ltpById.get(contractId) ?? null : null) : feed.spot;
+  // The day's cumulative volume of what this pane plots (an option; the CRUDEOILM future); the NIFTY index has none.
+  const volId = isOption ? contractId : (underlying === 'CRUDEOILM' ? feed.future?.dhanId ?? null : null);
+  const liveVol = volId ? feed.volumeById.get(volId) ?? null : null;
+  // Last cumulative volume seen for this pane's contract: each tick adds the increase to its bar (the first tick after a
+  // switch only sets the baseline; a drop, e.g. a new session, resets it).
+  const volRef = useRef<{ tag: string; cum: number } | null>(null);
   useEffect(() => {
     if (livePrice === null || !(livePrice > 0) || feed.stale || feed.feedAgeSec === null) return;
     // Outside the market session a held-over price must not invent a candle.
     // (an option's premium trades to 15:40, the index stops at 15:30)
     if (!(isOption ? inOrderSession(underlying, Date.now()) : inMarketSession(underlying, Date.now()))) return;
-    setBars(prev => (liveTagRef.current === tag ? applyTick(prev, livePrice, Number(interval), Date.now() / 1000, underlying, isOption) : prev), tag);
+    let dv = 0;
+    if (liveVol !== null) {
+      const seen = volRef.current;
+      if (seen && seen.tag === tag && liveVol >= seen.cum) dv = liveVol - seen.cum;
+      volRef.current = { tag, cum: liveVol };
+    }
+    setBars(prev => (liveTagRef.current === tag ? applyTick(prev, livePrice, Number(interval), Date.now() / 1000, underlying, isOption, dv) : prev), tag);
     // feed.stale / feedAgeSec are read as guards only: a new tick is what moves a bar.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [livePrice, feed.quotes, tag, interval, underlying]);

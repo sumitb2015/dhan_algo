@@ -21,7 +21,7 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
 | Instruments (segment, tick, strike step, lot units per broker) | `lib/indexScalperInstrument.ts` `INSTRUMENTS`, `qtyLots`, `lotUnits`, `pnlMultiplier` |
 | Prices: chain, index/future ticks, feed age | `useIndexScalperFeed.ts` over the shared options bridge (`live_options_ws.py`, WS :8765) |
 | Chain panel; SNAPSHOT fallback | `OptionChainPanel.tsx`; `lib/indexScalperChain.ts` over `/api/options/chain` (display only) |
-| Candle backfill | `api/index-scalper/candles/` -> `scripts/tools/index_scalper_candles.py` (cold ≈1.5-2 s, then cached); intervals 1/3/5/15/30/60: 3 resampled from Dhan's 1 m, 30 / 60 from 15 m, anchored to the session open |
+| Candle backfill | `api/index-scalper/candles/` -> `scripts/tools/index_scalper_candles.py` (cold ≈1.5-2 s, then cached); intervals 1/3/5/15/30/60: 3 resampled from Dhan's 1 m, 30 / 60 from 15 m, anchored to the session open; bars carry `v` (volume) for futures / options, never for the index |
 | Orders (SIM ledger, REAL send, exits, brackets) | `IndexScalperTerminal.tsx`: `placeContract`, `sendReal`, `exitRealRow`, `readExitState`, `exitLeg`, `exitAll`, `adjustLeg` |
 | Broker rows -> legs | `legsFromDhanPositions` (`lib/indexScalperPositions.ts`), `legsFromKotakPositions` (`lib/indexScalperKotak.ts`) |
 | Kotak orders | `api/index-scalper/kotak-order/` -> `lib/kotakPlaceOrder.ts`; records in `debug/index_scalper_kotak_orders.json` |

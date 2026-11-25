@@ -1,6 +1,6 @@
 ---
 name: dhan-trading-chart
-description: Use when building or changing a TradingView-style trading chart in rs_dashboard (lightweight-charts candles with orders and positions drawn on it) - the Index Scalper's ScalperChart, or a new page that wants one - or when a chart's position line, TP / SL line, working-order chip, drag-to-move bracket, price-scale "+" menu, chart hotkeys, indicator values (EMA, Supertrend, VWAP vs TradingView / Dhan's chart), tick-built live candles, session gating, autoscale, or the last-price label looks or behaves wrong. Symptoms: a stop shown as a target, a TP / SL off-screen, a position with no line after reload, a 10x estimated P&L, an off-tick price from the chart, "NIFTY" on another instrument, Supertrend diagonals across the chart, indicator values that differ from TradingView, OI bars or labels piling up, a change-in-OI bar of zero where there is no baseline, Quick Trade chips out of line or showing a dash on an untraded strike.
+description: Use when building or changing a TradingView-style trading chart in rs_dashboard (lightweight-charts candles with orders and positions drawn on it) - the Index Scalper's ScalperChart, or a new page that wants one - or when a chart's position line, TP / SL line, working-order chip, drag-to-move bracket, price-scale "+" menu, chart hotkeys, indicator values (EMA, Supertrend, VWAP vs TradingView / Dhan's chart), tick-built live candles, session gating, autoscale, or the last-price label looks or behaves wrong. Symptoms: a VWAP that differs from Dhan's on a future or option, a stop shown as a target, a TP / SL off-screen, a position with no line after reload, a 10x estimated P&L, an off-tick price from the chart, "NIFTY" on another instrument, Supertrend diagonals across the chart, indicator values that differ from TradingView, OI bars or labels piling up, a change-in-OI bar of zero where there is no baseline, Quick Trade chips out of line or showing a dash on an untraded strike.
 ---
 
 # Dhan Trading Chart (lightweight-charts + order overlays)
@@ -62,7 +62,12 @@ Related skills:
 - **Stochastic RSI:** the shared `stochRsiArray` (lib/indicators.ts, also Signal Orb's): TradingView's K = SMA(stoch(RSI),
   K), D = SMA(K, D), defaults K 3 / D 3 / RSI 14 / Stoch 14, 20 / 80 guides; a flat RSI window is null, as in Pine.
   Matched `pandas_ta.stochrsi` on 1,843 NIFTY daily bars (last K / D equal to 1e-13; max 0.075 in the RSI warm-up).
-- **VWAP:** session-anchored hlc3 (`sessionVwap`). An index has no volume, so on an index chart this is an average.
+- **VWAP:** session-anchored hlc3 (`sessionVwap`), **volume-weighted** when bars carry `v` (a future, an option), as
+  Dhan's / TradingView's chart; equal-weight on the index (no volume). Volume comes from the candle script (`v` per
+  bar; never for IDX_I: Dhan's index "volume" is a pseudo figure) and, live, from the day's cumulative volume
+  (`feed.volumeById`: chain options, the bridge's `future.volume`) turned into per-bar increases in `useChartBars`
+  (`applyTick`'s `volDelta`; `mergeHistory` keeps the larger of history / ticks for the forming bar, never the sum).
+  Equal weight put CRUDEOILM's VWAP at 7503.01 vs Dhan's 7513.11 (2026-11-25); weighted it matched to the paisa.
 - **Proof:** a "matches TradingView" claim needs a fixture with candles and the broker chart's printed values.
   A visual check is not proof.
 

@@ -6,7 +6,8 @@ import { emaSmaSeeded, smaArray, rsiArray, stochRsiArray, macdSeries, adxDmiArra
 import { barAnchorSec, inMarketSession, inOrderSession } from './indexScalperSession.ts';
 import type { Underlying } from './indexScalperInstrument.ts';
 
-export interface Bar { t: number; o: number; h: number; l: number; c: number }
+/** `v` = traded volume in the bar, when the instrument has one (a future, an option); an index has none. */
+export interface Bar { t: number; o: number; h: number; l: number; c: number; v?: number }
 
 export type IndicatorKind = 'ema' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'rsi' | 'stochrsi' | 'macd' | 'adx';
 
@@ -123,19 +124,28 @@ export function istDay(t: number): number {
   return Math.floor((t + 19800) / 86400);
 }
 
-/** Session-reset VWAP on hlc3. The NSE index feed carries no volume, so every bar has equal weight: this is the average
- *  typical price of the session, labelled as such (same definition the Renko page uses). */
+/** Session-reset VWAP on hlc3 (TradingView `ta.vwap(hlc3)`). Weighted by each bar's volume when the session's bars
+ *  carry one (a future, an option: matches Dhan's / TradingView's chart); the NSE index has no volume, so there every bar
+ *  has equal weight and this is the session's average typical price (same as the Renko page). Weighting the crude future
+ *  equally put its VWAP ~10 points off Dhan's (7503.01 vs 7513.11 on 2026-11-25). */
 export function sessionVwap(bars: Bar[]): (number | null)[] {
   const out: (number | null)[] = [];
   let day = -1;
   let sum = 0;
   let n = 0;
+  let pv = 0;
+  let vol = 0;
   for (const b of bars) {
     const d = istDay(b.t);
-    if (d !== day) { day = d; sum = 0; n = 0; }
-    sum += (b.h + b.l + b.c) / 3;
+    if (d !== day) { day = d; sum = 0; n = 0; pv = 0; vol = 0; }
+    const tp = (b.h + b.l + b.c) / 3;
+    sum += tp;
     n += 1;
-    out.push(sum / n);
+    const v = b.v !== undefined && Number.isFinite(b.v) && b.v > 0 ? b.v : 0;
+    pv += tp * v;
+    vol += v;
+    // Volume-weighted once the session has any volume; before that (or for the index) the equal-weight average.
+    out.push(vol > 0 ? pv / vol : sum / n);
   }
   return out;
 }
@@ -303,6 +313,8 @@ export function applyTick(
   nowSec: number,
   underlying: Underlying = 'NIFTY',
   option = false,
+  /** Volume traded since the previous tick (the day's cumulative volume's increase); added to the bar it lands in. */
+  volDelta = 0,
 ): Bar[] {
   if (bars.length === 0 || !(price > 0)) return bars;
   if (!(option ? inOrderSession(underlying, nowSec * 1000) : inMarketSession(underlying, nowSec * 1000))) return bars;
@@ -313,12 +325,14 @@ export function applyTick(
   const ist = nowSec + 19800;
   const bucket = Math.floor((ist - anchor) / step) * step + anchor - 19800;
   if (bucket < last.t) return bars;
+  const dv = Number.isFinite(volDelta) && volDelta > 0 ? volDelta : 0;
   if (bucket === last.t) {
-    if (last.c === price && price <= last.h && price >= last.l) return bars;
-    const next = { ...last, c: price, h: Math.max(last.h, price), l: Math.min(last.l, price) };
+    if (dv === 0 && last.c === price && price <= last.h && price >= last.l) return bars;
+    const next: Bar = { ...last, c: price, h: Math.max(last.h, price), l: Math.min(last.l, price) };
+    if (dv > 0) next.v = (last.v ?? 0) + dv;
     return [...bars.slice(0, -1), next];
   }
-  return [...bars, { t: bucket, o: price, h: price, l: price, c: price }];
+  return [...bars, { t: bucket, o: price, h: price, l: price, c: price, ...(dv > 0 ? { v: dv } : {}) }];
 }
 
 const sameBar = (a: Bar | undefined, b: Bar | undefined) =>
@@ -351,7 +365,12 @@ export function mergeHistory(history: Bar[], live: Bar[], intervalMin: number, n
   for (const b of live) {
     if (b.t < last.t) continue;
     if (b.t === last.t) {
-      if (forming) out[out.length - 1] = { t: last.t, o: last.o, h: Math.max(last.h, b.h), l: Math.min(last.l, b.l), c: b.c };
+      // The forming bar's volume: the history's (bar start to the fetch) or the ticks' (since the page started counting),
+      // whichever is larger: they overlap, so adding them would count the same trades twice.
+      if (forming) {
+        const v = Math.max(last.v ?? 0, b.v ?? 0);
+        out[out.length - 1] = { t: last.t, o: last.o, h: Math.max(last.h, b.h), l: Math.min(last.l, b.l), c: b.c, ...(v > 0 ? { v } : {}) };
+      }
       continue;
     }
     out.push(b);
