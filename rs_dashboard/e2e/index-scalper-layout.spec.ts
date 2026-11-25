@@ -430,6 +430,7 @@ test.describe('Index Scalper layout + option charts', () => {
     await page.getByRole('button', { name: 'Two charts side by side' }).click();
     const right = page.getByTestId('chart-pane-1');
     await expect(right).toContainText('NIFTY 25350 CE', { timeout: 30_000 });
+    await right.getByTestId('indicator-list-toggle').click();
     await expect(right.getByText('Volume (20)', { exact: true })).toBeVisible();
     // the old scale-bar switch is gone
     await expect(page.getByRole('button', { name: 'Volume', exact: true })).toHaveCount(0);
@@ -456,6 +457,7 @@ test.describe('Index Scalper layout + option charts', () => {
     await expect(row10.getByRole('button', { name: 'Show indicator' })).toHaveCount(1);
     await page.reload({ waitUntil: 'domcontentloaded' });
     const after = page.getByTestId('chart-pane-1');
+    // the open list is remembered across the reload too
     await expect(after.getByText('Volume (10)', { exact: true })).toBeVisible({ timeout: 60_000 });
     await expect(after.locator('div', { has: page.getByText('Volume (10)', { exact: true }) }).last().getByRole('button', { name: 'Show indicator' })).toHaveCount(1);
     // listed in the Indicators menu

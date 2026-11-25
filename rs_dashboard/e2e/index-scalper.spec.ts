@@ -108,7 +108,10 @@ test.describe('Index Scalper', () => {
     await expect(page.getByTestId('option-chain-panel')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Trade 25350 PE' })).toBeVisible({ timeout: 30_000 });
     await expect(page.getByTestId('chain-snapshot')).toHaveCount(0); // live ticks: no snapshot badge
-    // default indicators from the reference screenshot: Supertrend + EMA
+    // default indicators from the reference screenshot: Supertrend + EMA, listed in a dropdown that starts collapsed
+    await expect(page.getByTestId('indicator-list')).toHaveCount(0);
+    await page.getByTestId('indicator-list-toggle').first().click();
+    await expect(page.getByTestId('indicator-list').first()).toBeVisible();
     await expect(page.getByText('Supertrend (10, 2)')).toBeVisible();
     await expect(page.getByText('EMA (20)')).toBeVisible();
 
@@ -142,6 +145,7 @@ test.describe('Index Scalper', () => {
 
     await page.getByRole('button', { name: /Indicators/ }).click();
     await page.getByRole('button', { name: /^RSI/ }).click();
+    await page.getByTestId('indicator-list-toggle').first().click();
     await expect(page.getByText('RSI (14)')).toBeVisible();
 
     await page.getByRole('button', { name: 'Indicator settings' }).last().click({ force: true });
@@ -182,6 +186,7 @@ test.describe('Index Scalper', () => {
     await page.getByRole('button', { name: /Indicators/ }).click();
     await page.getByRole('button', { name: /^EMA Cross/ }).click();
     await page.keyboard.press('Escape');
+    await page.getByTestId('indicator-list-toggle').first().click();
     await expect(page.getByText('EMA Cross (9, 20)')).toBeVisible();
     if (process.env.ISX_SHOT) { await page.waitForTimeout(800); await page.locator('canvas').first().locator('..').locator('..').screenshot({ path: process.env.ISX_SHOT }); }
     expect(state.blocked).toEqual([]);
@@ -195,6 +200,7 @@ test.describe('Index Scalper', () => {
     await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
     await page.getByRole('button', { name: /Indicators/ }).click();
     await page.getByRole('button', { name: /^Stochastic RSI/ }).click();
+    await page.getByTestId('indicator-list-toggle').first().click();
     await expect(page.getByText('Stochastic RSI (3, 3, 14, 14)')).toBeVisible();
     if (process.env.ISX_SHOT) await page.screenshot({ path: process.env.ISX_SHOT });
     expect(state.blocked).toEqual([]);

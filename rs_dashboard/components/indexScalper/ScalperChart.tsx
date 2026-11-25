@@ -11,7 +11,7 @@ import {
   type ISeriesMarkersPluginApi,
   type AutoscaleInfo,
 } from 'lightweight-charts';
-import { Eye, EyeOff, Settings2, X, Plus, ArrowDown, ArrowUp, ArrowUpDown, Bell, FileText, Minus } from 'lucide-react';
+import { ChevronDown, ChevronRight, Eye, EyeOff, Settings2, X, Plus, ArrowDown, ArrowUp, ArrowUpDown, Bell, FileText, Minus } from 'lucide-react';
 import { useChartChrome } from '@/lib/chartTheme';
 import { computeIndicator, indicatorLabel, tailUnchanged, volumeMa, type Bar, type IndicatorInstance, pointColor, flipsAtLast, type OutSeries } from '@/lib/indexScalperIndicators';
 import { bracketKind, fmtRupees, legAnchor, legPnl, type ScalperLeg } from '@/lib/indexScalperPositions';
@@ -26,6 +26,8 @@ import TrailControl from './TrailControl';
 import type { TrailState } from '@/lib/indexScalperTrail';
 import OrderEditPopover, { type OrderEditDraft } from './OrderEditPopover';
 import { isEditable } from '@/lib/indexScalperOrderEdit';
+
+const LEGEND_OPEN_KEY = 'indexScalper.legendOpen.v1';
 
 export type DrawTool = 'cursor' | 'hline' | 'trend' | 'ruler';
 
@@ -1168,6 +1170,13 @@ function ScalperChart(props: Props) {
     };
   }, [menu, lotsProp, last, onPlaceLimitOrder, onOpenTicket]);
 
+  // Indicator legend: a collapsed dropdown by default (it covered the candles); open state remembered per viewer.
+  const [legendOpen, setLegendOpen] = useState(false);
+  useEffect(() => { if (readPref(LEGEND_OPEN_KEY) === '1') setLegendOpen(true); }, []);
+  const toggleLegend = useCallback(() => {
+    setLegendOpen(o => { savePref(LEGEND_OPEN_KEY, o ? '0' : '1'); return !o; });
+  }, []);
+
   const zoomBtn = 'flex items-center justify-center w-6 h-6 rounded-full text-xs bg-zinc-900 border border-zinc-700 text-zinc-100 hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60';
   return (
     <div className="relative w-full h-full min-h-0">
@@ -1194,6 +1203,23 @@ function ScalperChart(props: Props) {
             </>
           )}
         </div>
+        {indicators.length > 0 && (
+          <button type="button" data-testid="indicator-list-toggle" aria-expanded={legendOpen}
+            aria-label={legendOpen ? 'Collapse indicator list' : 'Expand indicator list'}
+            title={legendOpen ? 'Collapse indicator list' : 'Expand indicator list'}
+            onClick={toggleLegend}
+            className="pointer-events-auto flex items-center gap-1.5 w-fit px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-900/80 text-[11px] font-mono text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60">
+            {legendOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+            <span className="flex items-center gap-0.5">
+              {indicators.map(ind => (
+                <span key={ind.id} className={cn('inline-block w-1.5 h-1.5 rounded-full', !ind.visible && 'opacity-30')} style={{ backgroundColor: ind.color }} />
+              ))}
+            </span>
+            <span className="tabular-nums">{indicators.filter(i => i.visible).length}/{indicators.length}</span>
+          </button>
+        )}
+        {legendOpen && indicators.length > 0 && (
+        <div data-testid="indicator-list" className="pointer-events-auto flex flex-col gap-0.5 w-fit px-1.5 py-1 rounded border border-zinc-700 bg-zinc-900/90 shadow-lg">
         {indicators.map(ind => (
           <div key={ind.id} className="pointer-events-auto flex items-center gap-1 text-[11px] font-mono group w-fit">
             <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: ind.color }} />
@@ -1214,6 +1240,8 @@ function ScalperChart(props: Props) {
             </span>
           </div>
         ))}
+        </div>
+        )}
       </div>
 
       {ruler && (
