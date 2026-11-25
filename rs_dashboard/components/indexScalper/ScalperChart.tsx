@@ -393,7 +393,7 @@ function ScalperChart(props: Props) {
     if (!chart || !candles || bars.length === 0) return;
 
     // The guide-line colour is in the signature so a theme flip rebuilds the oscillator guides.
-    const sig = JSON.stringify([chrome.baseline, indicators.filter(i => i.visible).map(i => [i.id, i.kind, i.params, i.color])]);
+    const sig = JSON.stringify([chrome.baseline, indicators.filter(i => i.visible).map(i => [i.id, i.kind, i.params, i.color, i.width ?? null])]);
     const prev = prevRef.current;
     // Fast path only when nothing but the forming bar moved: the bars before it must be exactly what was drawn. A candle
     // refresh that corrected an earlier tick-built bar (missed high/low) falls through to a full setData, which also
@@ -443,11 +443,13 @@ function ScalperChart(props: Props) {
           if (s.style === 'histogram') {
             api = chart.addSeries(HistogramSeries, { color: s.color, priceLineVisible: false, lastValueVisible: false, title: '' }, paneIdx);
           } else {
-            const thick = s.lineWidth ?? (s.colors ? 3 : 2);
+            // Price pane: the series' width (a user setting, or its own default), else 2 (3 for a coloured Supertrend).
+            // Own pane (oscillators): the user's width if set, else 1.
+            const thick = s.lineWidth ?? (paneIdx === 0 ? (s.colors ? 3 : 2) : 1);
             api = chart.addSeries(LineSeries, {
               // Every indicator line shows its name + last value on the price scale (Supertrend too: the label takes the
               // colour of its last point, so it reads green / red with the trend).
-              color: s.color, lineWidth: (paneIdx === 0 ? thick : 1) as 1 | 2 | 3, priceLineVisible: false, lastValueVisible: true, title: s.axisLabel,
+              color: s.color, lineWidth: thick as 1 | 2 | 3 | 4, priceLineVisible: false, lastValueVisible: true, title: s.axisLabel,
               crosshairMarkerVisible: false,
             }, paneIdx);
             for (const g of s.guides ?? []) api.createPriceLine({ price: g, color: chrome.baseline, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' });

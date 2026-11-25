@@ -73,6 +73,31 @@ test('legs opened elsewhere: more than this page\'s isx fills in the leg\'s dire
   assert.deepEqual(legsOpenedElsewhere([L('222|MARGIN', -130)], opened).map(l => l.id), ['222|MARGIN']); // opposite side: not ours
 });
 
+test('Bollinger: SMA basis +/- mult x POPULATION stdev (TradingView ta.bb), thin lines, orange basis', () => {
+  // closes 2, 4, 4, 4, 5, 5, 7, 9: mean 5, population stdev exactly 2 (the sample stdev would be 2.138)
+  const bb = bollinger([2, 4, 4, 4, 5, 5, 7, 9], 8, 2);
+  assert.equal(bb.mid[7], 5);
+  assert.equal(bb.up[7], 9);
+  assert.equal(bb.lo[7], 1);
+  assert.equal(bb.up[6], null); // warm-up
+  const bars = Array.from({ length: 40 }, (_, i) => bar(1_790_000_000 + i * 300, 100 + Math.sin(i / 3) * 4));
+  const out = computeIndicator(bars, newIndicator('bbands', 'b'));
+  assert.deepEqual(out.series.map(x => [x.key, x.lineWidth]), [['up', 1], ['mid', 1], ['lo', 1]]);
+  assert.notEqual(out.series[1].color, out.series[0].color); // basis distinct from the bands
+});
+
+test('an indicator\'s line width setting applies to all its lines, never to a histogram; anything else keeps the defaults', () => {
+  const bars = Array.from({ length: 60 }, (_, i) => bar(1_790_000_000 + i * 300, 100 + Math.sin(i / 3) * 4));
+  const bb = computeIndicator(bars, { ...newIndicator('bbands', 'b'), width: 3 });
+  assert.deepEqual(bb.series.map(x => x.lineWidth), [3, 3, 3]);
+  const macd = computeIndicator(bars, { ...newIndicator('macd', 'm'), width: 2 });
+  assert.deepEqual(macd.series.map(x => [x.key, x.style === 'histogram' ? undefined : x.lineWidth]), [['hist', undefined], ['macd', 2], ['sig', 2]]);
+  assert.equal(macd.series[0].lineWidth, undefined);
+  // no width / an invalid saved width: each line's own default (Bollinger 1, EMA unset = the chart's 2)
+  assert.deepEqual(computeIndicator(bars, newIndicator('bbands', 'b')).series.map(x => x.lineWidth), [1, 1, 1]);
+  assert.equal(computeIndicator(bars, { ...newIndicator('ema', 'e'), width: 9 }).series[0].lineWidth, undefined);
+});
+
 test('applyFill blends adds, keeps avg on reduce, resets on flip and flat', () => {
   assert.deepEqual(applyFill(0, 0, 'BUY', 65, 100), { netQty: 65, avg: 100 });
   assert.deepEqual(applyFill(65, 100, 'BUY', 65, 120), { netQty: 130, avg: 110 });

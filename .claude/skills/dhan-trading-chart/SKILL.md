@@ -59,6 +59,12 @@ Related skills:
 - **Defaults:** match what the user compares against. Dhan's chart is Supertrend **(10, 2)**, not (10, 3). This was
   pinned against a value read off Dhan's chart (25,405.52 at 23 Nov 15:25). When you change a default, version the
   localStorage key and migrate only untouched defaults (`migrateIndicatorsV1`). Never overwrite a user's own setting.
+- **Line width** is a per-indicator setting (`IndicatorInstance.width`, 1-4 px; Auto = each line's own default: 2 on the
+  price pane, 3 for a coloured Supertrend, 1 for Bollinger / daily levels and in an oscillator pane). `computeIndicator`
+  applies it to every line, never a histogram; it is part of the series signature so a change rebuilds the series.
+- **Bollinger Bands:** `bollinger` = SMA basis +/- mult x the POPULATION stdev (Pine `ta.stdev`, divides by N); matched a
+  pandas ddof=0 reference to 1e-9. `pandas_ta.bbands` divides by N - 1 (wider bands): not the reference. Drawn at 1 px
+  (bands in the indicator colour, basis orange) like TradingView; at the 2 px default they crowded the candles.
 - **Stochastic RSI:** the shared `stochRsiArray` (lib/indicators.ts, also Signal Orb's): TradingView's K = SMA(stoch(RSI),
   K), D = SMA(K, D), defaults K 3 / D 3 / RSI 14 / Stoch 14, 20 / 80 guides; a flat RSI window is null, as in Pine.
   Matched `pandas_ta.stochrsi` on 1,843 NIFTY daily bars (last K / D equal to 1e-13; max 0.075 in the RSI warm-up).

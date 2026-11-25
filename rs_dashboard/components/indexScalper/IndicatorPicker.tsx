@@ -5,7 +5,7 @@
 
 import { useEffect, useState } from 'react';
 import { Search, X } from 'lucide-react';
-import { INDICATOR_CATALOG, catalogEntry, clampParam, indicatorLabel, type IndicatorInstance, type IndicatorKind } from '@/lib/indexScalperIndicators';
+import { INDICATOR_CATALOG, LINE_WIDTHS, catalogEntry, clampParam, indicatorLabel, validWidth, type IndicatorInstance, type IndicatorKind } from '@/lib/indexScalperIndicators';
 import { cn } from '@/lib/utils';
 
 const SWATCHES = ['#3b82f6', '#f59e0b', '#ec4899', '#22c55e', '#a78bfa', '#06b6d4', '#eab308', '#ef4444', '#e4e4e7'];
@@ -67,6 +67,21 @@ export default function IndicatorPicker({ open, indicators, editId, onAdd, onCha
                   <button key={c} type="button" aria-label={`Colour ${c}`} onClick={() => onChange(editing.id, { color: c })}
                     className={cn('w-5 h-5 rounded-full border-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60', editing.color === c ? 'border-white' : 'border-transparent')} style={{ backgroundColor: c }} />
                 ))}
+              </div>
+            </div>
+            <div className="flex items-center gap-2 text-xs text-zinc-300">Line width
+              <div role="group" aria-label="Line width" className="flex rounded border border-zinc-700 overflow-hidden">
+                {([null, ...LINE_WIDTHS] as const).map(w => {
+                  const on = (validWidth(editing.width) ?? null) === w;
+                  return (
+                    <button key={w ?? 'auto'} type="button" aria-pressed={on} aria-label={w === null ? 'Line width auto' : `Line width ${w}`}
+                      title={w === null ? "Each line's default width" : `${w} px`}
+                      onClick={() => onChange(editing.id, { width: w ?? undefined })}
+                      className={cn('h-7 px-2 flex items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60', on ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}>
+                      {w === null ? 'Auto' : <span className="block w-4 rounded-full bg-current" style={{ height: w }} />}
+                    </button>
+                  );
+                })}
               </div>
             </div>
             <div className="flex justify-between pt-2">

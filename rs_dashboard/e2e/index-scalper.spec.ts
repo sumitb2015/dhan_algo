@@ -147,8 +147,25 @@ test.describe('Index Scalper', () => {
     const len = page.getByRole('dialog', { name: 'Indicators' }).getByRole('textbox').first();
     await len.fill('9');
     await len.blur();
+    // line width: Auto by default; 3 px is saved with the indicator and survives a reload
+    const dlg = page.getByRole('dialog', { name: 'Indicators' });
+    await expect(dlg.getByRole('button', { name: 'Line width auto' })).toHaveAttribute('aria-pressed', 'true');
+    await dlg.getByRole('button', { name: 'Line width 3' }).click();
+    await expect(dlg.getByRole('button', { name: 'Line width 3' })).toHaveAttribute('aria-pressed', 'true');
+    if (process.env.ISX_SHOT) await dlg.screenshot({ path: process.env.ISX_SHOT });
     await page.getByRole('button', { name: 'Done' }).click();
     await expect(page.getByText('RSI (9)')).toBeVisible();
+    await expect.poll(() => page.evaluate(() => {
+      const raw = localStorage.getItem('indexScalper.indicators.v2') ?? '[]';
+      return (JSON.parse(raw) as { kind: string; width?: number }[]).find(i => i.kind === 'rsi')?.width;
+    })).toBe(3);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    const rsiRow = page.locator('div', { has: page.getByText('RSI (9)', { exact: true }) }).last();
+    await rsiRow.hover();
+    await rsiRow.getByRole('button', { name: 'Indicator settings' }).click({ force: true });
+    await expect(page.getByRole('dialog', { name: 'Indicators' }).getByRole('button', { name: 'Line width 3' })).toHaveAttribute('aria-pressed', 'true');
+    await page.getByRole('button', { name: 'Done' }).click();
 
     await page.getByRole('button', { name: 'Remove indicator' }).last().click({ force: true });
     await expect(page.getByText('RSI (9)')).toHaveCount(0);

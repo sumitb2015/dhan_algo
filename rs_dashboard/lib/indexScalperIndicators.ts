@@ -17,7 +17,14 @@ export interface IndicatorInstance {
   params: Record<string, number>;
   color: string;
   visible: boolean;
+  /** Line width chosen in the indicator's settings (1-4 px) for all its lines; absent = each line's own default. */
+  width?: number;
 }
+
+export const LINE_WIDTHS = [1, 2, 3, 4] as const;
+export type LineWidth = (typeof LINE_WIDTHS)[number];
+/** A saved width if it is one of LINE_WIDTHS, else null (default widths). */
+export const validWidth = (w: unknown): LineWidth | null => (LINE_WIDTHS as readonly unknown[]).includes(w) ? (w as LineWidth) : null;
 
 export interface ParamDef { key: string; label: string; def: number; min: number; max: number }
 
@@ -108,7 +115,7 @@ export interface OutSeries {
    *  joins a line straight across whitespace, so without this every day change draws a slanted jump. */
   breaks?: boolean[];
   /** Line width on the price pane (default 2; daily levels are drawn at 1). */
-  lineWidth?: 1 | 2 | 3;
+  lineWidth?: LineWidth;
 }
 
 export interface IndicatorOutput {
@@ -186,6 +193,12 @@ export function dayBreaks(bars: Bar[]): boolean[] {
   return bars.map((b, i) => i + 1 < bars.length && istDay(bars[i + 1].t) !== istDay(b.t));
 }
 
+/** Bollinger basis colour (TradingView's default orange); the bands take the indicator's own colour. */
+const BB_BASIS = '#f97316';
+
+/** TradingView `ta.bb`: basis = SMA(close, period); bands = basis +/- mult x the POPULATION standard deviation (divides by
+ *  N, as Pine's `ta.stdev`). Matches a pandas population-stdev reference to 1e-9 on 5,772 NIFTY points (2026-11-25);
+ *  pandas_ta's `bbands` divides by N - 1 and draws slightly wider bands, so it is not the reference. */
 export function bollinger(closes: number[], period: number, mult: number): { mid: (number | null)[]; up: (number | null)[]; lo: (number | null)[] } {
   const mid = smaArray(closes, period);
   const up: (number | null)[] = [];
@@ -202,7 +215,15 @@ export function bollinger(closes: number[], period: number, mult: number): { mid
   return { mid, up, lo };
 }
 
+/** The indicator's series, with its user-chosen line width (if any) applied to every line (never to a histogram). */
 export function computeIndicator(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
+  const out = computeSeries(bars, ind);
+  const w = validWidth(ind.width);
+  if (w === null) return out;
+  return { ...out, series: out.series.map(s => (s.style === 'histogram' ? s : { ...s, lineWidth: w })) };
+}
+
+function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
   const closes = bars.map(b => b.c);
   const p = (k: string) => ind.params[k] ?? catalogEntry(ind.kind).params.find(x => x.key === k)!.def;
   const label = indicatorLabel(ind);
@@ -235,9 +256,11 @@ export function computeIndicator(bars: Bar[], ind: IndicatorInstance): Indicator
       return {
         pane: 'price',
         series: [
-          { key: 'up', label: `${label} upper`, axisLabel: 'BB upper', color: ind.color, style: 'line', values: bb.up },
-          { key: 'mid', label: `${label} basis`, axisLabel: 'BB basis', color: ind.color, style: 'line', values: bb.mid },
-          { key: 'lo', label: `${label} lower`, axisLabel: 'BB lower', color: ind.color, style: 'line', values: bb.lo },
+          // TradingView's look: thin (1 px) bands in the indicator's colour, the basis in its own orange. At the default 2 px
+          // three lines (plus Supertrend / EMA / VWAP) crowded the candles.
+          { key: 'up', label: `${label} upper`, axisLabel: 'BB upper', color: ind.color, style: 'line', values: bb.up, lineWidth: 1 },
+          { key: 'mid', label: `${label} basis`, axisLabel: 'BB basis', color: BB_BASIS, style: 'line', values: bb.mid, lineWidth: 1 },
+          { key: 'lo', label: `${label} lower`, axisLabel: 'BB lower', color: ind.color, style: 'line', values: bb.lo, lineWidth: 1 },
         ],
       };
     }
