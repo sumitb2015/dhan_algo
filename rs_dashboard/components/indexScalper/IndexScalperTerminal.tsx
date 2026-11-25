@@ -10,8 +10,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BarChart3, Building2, CandlestickChart, Columns2, Gauge, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Scaling, Trash2, TrendingUp, Zap,
+  BarChart3, Building2, CandlestickChart, Columns2, Gauge, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Scaling, Trash2, TrendingUp, Volume2, VolumeX, Zap,
 } from 'lucide-react';
+import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
+import { useTabLeader } from '@/hooks/useTabLeader';
+import { qtyBook, tradeChimeFor } from '@/lib/indexScalperChime';
 import NavBar from '@/components/NavBar';
 import DataChip from '@/components/DataChip';
 import MarketWatchWindow from './MarketWatchWindow';
@@ -92,6 +95,8 @@ const RANGES: { label: string; days: number; focus: number }[] = [
 const IND_KEY = 'indexScalper.indicators.v2';
 const IND_KEY_V1 = 'indexScalper.indicators.v1';
 const SIM_KEY = 'indexScalper.sim.v1';
+/** Trade chimes (entry / exit / order problem) on or off: '1' / '0', default on. */
+const SOUND_KEY = 'indexScalper.tradeSound';
 const SPOT_KEY = 'indexScalper.entrySpots.v1';
 
 interface SimLeg { securityId: string; symbol: string; strike: number; type: 'CE' | 'PE' | 'FUT'; netQty: number; avg: number; /** realized P&L of this leg today */ realized?: number }
@@ -226,6 +231,23 @@ export default function IndexScalperTerminal() {
   const feedRef = useRef(feed);
   const simRef = useRef(sim);
   useEffect(() => { feedRef.current = feed; simRef.current = sim; });
+
+  // ── trade chimes ───────────────────────────────────────────────────
+  // Entry / exit chimes come from changes in the position book (tradeChimeFor), a warning buzz from a REAL order that was
+  // rejected or has an unknown outcome. Sound only adds to the toast. Browsers keep it silent until the first click.
+  const [soundOn, setSoundOnState] = useState(true);
+  const soundOnRef = useRef(true);
+  useEffect(() => {
+    const on = readPref(SOUND_KEY) !== '0';
+    soundOnRef.current = on;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSoundOnState(on);
+  }, []);
+  const setSoundOn = useCallback((on: boolean) => { soundOnRef.current = on; setSoundOnState(on); savePref(SOUND_KEY, on ? '1' : '0'); }, []);
+  useEffect(() => installAlertSoundUnlock(), []);
+  // Every open tab polls the same REAL book: only the leader tab (or the tab that just sent an order) rings for it.
+  const { leaderRef: soundLeaderRef } = useTabLeader('index-scalper-sound');
+  const lastSentAtRef = useRef(0);
 
   const flash = useCallback((t: Toast) => {
     setToast(t);
@@ -486,6 +508,24 @@ export default function IndexScalperTerminal() {
   // Order callbacks read the open quantity through a ref, so a P&L tick does not rebuild them (and the chart with them).
   const legsRef = useRef(legs);
   useEffect(() => { legsRef.current = legs; });
+
+  // Entry / exit chime off the book. The first book after a mode, broker or instrument change (or before it has loaded)
+  // is only the baseline, so arming REAL over an open position or switching instruments never rings.
+  const bookBaseRef = useRef<{ key: string; book: Map<string, number> } | null>(null);
+  const bookReady = real ? realLoaded && (broker !== 'kotak' || !!kotakSymbols) : simReady;
+  useEffect(() => {
+    const key = `${real ? 'R' : 'S'}|${broker}|${underlying}`;
+    const book = qtyBook(legs);
+    const base = bookBaseRef.current;
+    if (!bookReady) { bookBaseRef.current = null; return; }
+    bookBaseRef.current = { key, book };
+    if (!base || base.key !== key || !soundOnRef.current) return;
+    // SIM is this tab's own paper book; a REAL change rings in the leader tab, or in the tab that just sent an order.
+    if (real && !soundLeaderRef.current && Date.now() - lastSentAtRef.current > 15_000) return;
+    const kind = tradeChimeFor(base.book, book);
+    if (kind === 'entry') playEntryChime();
+    else if (kind === 'exit') playExitChime();
+  }, [legs, real, broker, underlying, bookReady, soundLeaderRef]);
   // Bottom panel rows: the REAL Dhan book (open + closed rows), or the SIM paper book in the same shape.
   const panelPositions: PositionRowView[] = useMemo(() => {
     if (real && broker === 'kotak') {
@@ -541,7 +581,7 @@ export default function IndexScalperTerminal() {
 
   /** One REAL order on the page's broker. Dhan: /api/scalper/fast-order (security id, `isx` correlation). Kotak: the
    *  page's own route, which records the order ID as this page's (trading symbol; opens capped, closes not). */
-  const sendReal = useCallback(async (body: Record<string, unknown>, intent: 'open' | 'close' = 'open'): Promise<Outcome> => {
+  const sendRealOnce = useCallback(async (body: Record<string, unknown>, intent: 'open' | 'close'): Promise<Outcome> => {
     try {
       const kotak = brokerRef.current === 'kotak';
       const res = await fetch(kotak ? '/api/index-scalper/kotak-order' : '/api/scalper/fast-order', {
@@ -562,6 +602,13 @@ export default function IndexScalperTerminal() {
       return { ok: false, unknown: true, text: `No reply (${String((e as Error).message ?? e)}). Check Positions / Orders before retrying` };
     }
   }, [loadKotakRecords, underlying]);
+  /** sendRealOnce plus the warning buzz on a rejected / unknown order, and the "this tab just sent" mark for chimes. */
+  const sendReal = useCallback(async (body: Record<string, unknown>, intent: 'open' | 'close' = 'open'): Promise<Outcome> => {
+    lastSentAtRef.current = Date.now();
+    const out = await sendRealOnce(body, intent);
+    if (!out.ok && soundOnRef.current) playWarnChime();
+    return out;
+  }, [sendRealOnce]);
 
   const simFill = useCallback((c: PickedContract, side: 'BUY' | 'SELL', units: number, price: number, symbol: string) => {
     const id = c.securityId ?? `${c.type}${c.strike}`;
@@ -1464,6 +1511,11 @@ export default function IndexScalperTerminal() {
             <Zap className="w-3.5 h-3.5" />Scalper
           </button>
           {sep}
+          <button type="button" aria-pressed={!soundOn} aria-label={soundOn ? 'Mute trade chimes' : 'Unmute trade chimes'}
+            title={soundOn ? 'Trade chimes on: entry, exit and order problems (sounds start after your first click on the page). Click to mute.' : 'Trade chimes muted. Click to turn them on.'}
+            onClick={() => setSoundOn(!soundOn)} className={cn(btn, !soundOn && 'text-zinc-500')}>
+            {soundOn ? <Volume2 className="w-4 h-4" aria-hidden /> : <VolumeX className="w-4 h-4" aria-hidden />}
+          </button>
           <button type="button" aria-pressed={watchIdx} aria-label="Top indices" title="Top indices: live Nifty, Bank Nifty, sectors and India VIX (watch only)"
             onClick={() => setWatchIdx(v => !v)} className={cn(btn, 'flex items-center gap-1', watchIdx && 'bg-zinc-800 text-white')}>
             <Gauge className="w-4 h-4" aria-hidden />Indices

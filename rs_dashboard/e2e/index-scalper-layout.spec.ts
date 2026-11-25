@@ -361,6 +361,23 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('trade chimes: on by default, muted from the header, remembered after a reload', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    const mute = page.getByRole('button', { name: 'Mute trade chimes', exact: true });
+    await expect(mute).toBeVisible({ timeout: 60_000 });
+    await expect(mute).toHaveAttribute('aria-pressed', 'false');
+    await mute.click();
+    const unmute = page.getByRole('button', { name: 'Unmute trade chimes', exact: true });
+    await expect(unmute).toHaveAttribute('aria-pressed', 'true');
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('button', { name: 'Unmute trade chimes', exact: true })).toBeVisible({ timeout: 60_000 });
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
   test('Volume is an indicator: on by default with MA 20, its settings set the MA, hidden from the legend and remembered', async ({ page, context }) => {
     const state = newState();
     state.optVolume = true;
