@@ -76,6 +76,7 @@ async function mockApi(page: Page, state: State) {
     if (p === '/api/scalper/positions') return json(route, { success: true, data: state.positions });
     if (p === '/api/scalper/orders' && method === 'GET') return json(route, { success: true, data: state.orders });
     if (p === '/api/scalper/orders' && method === 'DELETE') { state.calls.push({ path: p, body }); return json(route, { success: true }); }
+    if (p === '/api/scalper/orders' && method === 'PATCH') { state.calls.push({ path: `${p}#PATCH`, body }); return json(route, { success: true }); }
     if (p === '/api/index-scalper/tick') return json(route, { success: true, tick: 0.05 });
     if (p === '/api/index-scalper/holdings') return json(route, { success: true, data: [] });
     if (p === '/api/scalper/fast-order') { state.calls.push({ path: p, body }); return json(route, { success: true, order_id: '7001' }); }
@@ -239,6 +240,71 @@ test.describe('Index Scalper layout + option charts', () => {
     await expect.poll(() => state.candleReqs.some(q => q.includes('interval=30'))).toBe(true);
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(page.getByRole('group', { name: 'Chart 1 timeframe' }).getByRole('button', { name: '30m' })).toHaveAttribute('aria-pressed', 'true', { timeout: 60_000 });
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('REAL working order: lots and price edited from its chip, and its line dragged to a new price (modify, isx)', async ({ page, context }) => {
+    const state = newState();
+    const ord = (x: Record<string, unknown>) => ({
+      securityId: '302', tradingSymbol: 'NIFTY-Dec2026-25350-CE', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY',
+      transactionType: 'BUY', orderType: 'LIMIT', price: 200, triggerPrice: 0, quantity: 65, filledQty: 0, orderStatus: 'PENDING',
+      drvOptionType: 'CALL', drvStrikePrice: 25350, drvExpiryDate: '2026-12-01', ...x,
+    });
+    state.orders = [
+      ord({ orderId: 'L1', correlationId: 'isxl1' }),
+      ord({ orderId: 'F1', correlationId: 'stg01', price: 190, createTime: '2026-11-25 09:20:00' }), // a strategy's
+    ];
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0')).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'Two charts side by side' }).click();
+    const right = page.getByTestId('chart-pane-1');
+    await expect(right).toContainText('NIFTY 25350 CE', { timeout: 30_000 });
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    const patches = () => state.calls.filter(c => c.path === '/api/scalper/orders#PATCH').map(c => c.body);
+
+    // the page's own order is editable; the strategy's has no editor and no drag handle
+    await expect(right.getByRole('button', { name: 'Edit order L1' })).toHaveText('1 lot', { timeout: 15_000 });
+    await expect(right.getByRole('button', { name: 'Edit order F1' })).toHaveCount(0);
+    await expect(right.getByTestId('order-line-handle')).toHaveCount(1);
+
+    // lots 1 -> 3 and price 200 -> 195 in one modify
+    await right.getByRole('button', { name: 'Edit order L1' }).click();
+    const ed = page.getByRole('dialog', { name: 'Edit order L1' });
+    await ed.getByLabel('Order lots').selectOption('3');
+    if (process.env.ISX_SHOT) await right.screenshot({ path: process.env.ISX_SHOT });
+    await ed.getByLabel('Order price').fill('195');
+    await ed.getByRole('button', { name: 'Modify' }).click();
+    await expect.poll(patches, { timeout: 15_000 }).toHaveLength(1);
+    expect(patches()[0]).toMatchObject({ orderId: 'L1', broker: 'dhan', orderType: 'LIMIT', quantity: 195, price: 195, source: 'isx' });
+    await expect(ed).toHaveCount(0);
+
+    // a Buy Limit typed above the live 210.50 is refused (it would fill at once): nothing sent
+    await right.getByRole('button', { name: 'Edit order L1' }).click();
+    await ed.getByLabel('Order price').fill('215');
+    await ed.getByRole('button', { name: 'Modify' }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'fills at once' })).toBeVisible();
+    expect(patches()).toHaveLength(1);
+    await ed.getByRole('button', { name: 'Close' }).click();
+
+    // drag the order's line down: one modify at a lower price on the 0.05 tick, same quantity (65)
+    const handle = right.getByTestId('order-line-handle');
+    const box = (await handle.boundingBox())!;
+    const x = box.x + 40;
+    const y = box.y + box.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    for (let i = 1; i <= 8; i++) await page.mouse.move(x, y + i * 6);
+    await page.mouse.up();
+    await expect.poll(patches, { timeout: 15_000 }).toHaveLength(2);
+    const moved = patches()[1] as { price: number; quantity: number; orderId: string };
+    expect(moved.orderId).toBe('L1');
+    expect(moved.quantity).toBe(65);
+    expect(moved.price).toBeLessThan(200);
+    expect(Math.abs(Math.round(moved.price / 0.05) * 0.05 - moved.price)).toBeLessThan(1e-6);
+    expect(state.calls.filter(c => c.path === '/api/scalper/fast-order')).toEqual([]);
     expect(state.blocked).toEqual([]);
   });
 

@@ -63,6 +63,11 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
 - Exit All: shorts first, then longs (a hedge is never gone while its short is open); stops at an unknown outcome.
 - Kotak keeps one guard: an order on the contract with an **unknown outcome holds its exit up to 60 s** until Kotak's
   order book shows it (`heldByUnknown`); closes above the freeze quantity go in whole-lot slices (`freezeSlices`).
+- **Modify** (a working order's lots / price from the chart): `onModifyOrder` -> `PATCH /api/scalper/orders` with
+  `source: 'isx'`, so the route applies the same per-order cap as placement (`dhanSourceCapError`; Kotak
+  `sourceLotCapError` with the contract from `kotakDerivativeBySymbol`). The route takes an SL-M with price 0 + a trigger
+  (`lib/orderModifyRules.ts`; it used to refuse price 0) and sends Kotak `SL-M` as its own price type (it was sent as
+  `SL`). Only this page's own orders are edited; REAL only.
 - Cancel is offered on **every** working order (panel and chart chips), but another placer's order (`OrderRowView.own`
   false: not `isx`, not a recorded Kotak ID) asks first: on the chart a strategy's stop looks like the page's own.
 - A TP / SL set from this page replaces only **its own** order of that kind on the contract. If another placer's order

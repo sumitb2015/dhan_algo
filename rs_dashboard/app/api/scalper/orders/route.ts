@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { dhanGet, dhanPut, dhanDelete } from '@/lib/dhanToken';
+import { kotakPriceType, modifyPriceError } from '@/lib/orderModifyRules';
+import { dhanSourceCapError } from '@/lib/dhanSourceCaps';
+import { sourceLotCapError } from '@/lib/kotakOrderRules';
+import { kotakDerivativeBySymbol } from '@/lib/kotakContracts';
 import { kotakPost, KOTAK_PATHS } from '@/lib/kotakToken';
 import { kiteDelete } from '@/lib/zerodhaToken';
 import { forgetZerodhaBook, readBrokerOrder } from '@/lib/brokerOrderStatus';
@@ -45,18 +49,36 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       validity = 'DAY',
       legName = 'ENTRY_LEG',
       broker = 'dhan',
+      // Optional: a caller that names its source gets that source's per-order cap, as when it places (Index Scalper: isx).
+      source,
+      exchangeSegment,
+      tradingSymbol,
+      underlying,
     } = body ?? {};
 
     if (!orderId) {
       return NextResponse.json({ success: false, error: 'orderId is required' }, { status: 400 });
     }
-    const newPrice = Number(price);
-    if (isNaN(newPrice) || newPrice <= 0) {
-      return NextResponse.json({ success: false, error: `Invalid price: ${price}` }, { status: 400 });
+    // An SL-M has no limit price (0) but needs a trigger; every other type needs a price (lib/orderModifyRules).
+    const priceErr = modifyPriceError(String(orderType), price, triggerPrice);
+    if (priceErr) {
+      return NextResponse.json({ success: false, error: priceErr }, { status: 400 });
     }
+    const newPrice = Number(price) || 0;
     const qty = Number(quantity);
     if (isNaN(qty) || qty <= 0) {
       return NextResponse.json({ success: false, error: `Invalid quantity: ${quantity}` }, { status: 400 });
+    }
+    // The per-source cap, exactly as on placement: a modify can grow an order past it otherwise.
+    if (source && broker === 'dhan') {
+      const capErr = dhanSourceCapError(Math.round(qty), String(source), String(exchangeSegment ?? ''));
+      if (capErr) return NextResponse.json({ success: false, error: capErr }, { status: 400 });
+    }
+    if (source && broker === 'kotak') {
+      const sym = String(tradingSymbol ?? '');
+      const contract = sym ? kotakDerivativeBySymbol(sym, String(underlying ?? 'NIFTY')) : null;
+      const capErr = sourceLotCapError(Math.round(qty), String(source), sym || String(orderId), contract?.lotSize ?? null);
+      if (capErr) return NextResponse.json({ success: false, error: capErr }, { status: 400 });
     }
 
     if (broker === 'dhan') {
@@ -78,7 +100,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       const res = await kotakPost(KOTAK_PATHS.modifyOrder, {
         no: String(orderId),
         pr: newPrice.toFixed(2),
-        pt: String(orderType).toUpperCase() === 'MARKET' ? 'MKT' : String(orderType).toUpperCase().startsWith('SL') ? 'SL' : 'L',
+        pt: kotakPriceType(String(orderType)),
         qt: String(Math.round(qty)),
         vd: String(validity).toUpperCase(),
         tp: String(Number(triggerPrice) || 0),

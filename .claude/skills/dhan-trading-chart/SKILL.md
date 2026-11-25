@@ -39,7 +39,7 @@ Related skills:
 | TP vs SL classification of a working order | `bracketKind` (same file) |
 | Quantity -> lots / contract units | `lib/indexScalperInstrument.ts`: `qtyUnits`, `qtyLots`, `lotUnits`, `pnlMultiplier` |
 | Bracket lines, chips, drag, ghost chip | `ScalperChart.tsx`: the `active brackets`, `bracket lines` and `dragging logic` sections, plus the chip JSX |
-| Working-order lines and chips | `ScalperChart.tsx`: `regularOrders` and the `open order lines` section |
+| Working-order lines and chips | `ScalperChart.tsx`: `regularOrders` and the `open order lines` section; drag (`ordDrag`, chip or the `order-line-handle` strip on the line) and lots / price editor (`OrderEditPopover.tsx`), rules in `lib/indexScalperOrderEdit.ts`, sent by the terminal's `onModifyOrder` |
 | Chip vertical layout | the chip-tops effect: `priceToCoordinate` polled every 150 ms, collisions pushed at least 26 px apart |
 | Autoscale including overlays | `autoscaleInfoProvider` on the candle series, plus `scaleLevelsRef` |
 | Price-scale "+" button and context menu; hotkeys | the `price scale hover` and `context menu events & keyboard shortcuts` sections |
@@ -128,6 +128,14 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
   chart *is* that future. Before this, a FUT position opened elsewhere or before a reload anchored at "strike" 0, so it
   lost its line, chip and TP / SL, and every order read as a TP. An option is anchored at the spot recorded when the
   page opened it, else its strike. Gate every chip and P&L calculation on `anchor.level > 0`.
+- **Which orders are a leg's TP / SL:** only closing-side orders on the leg's OWN contract, matched by `securityId`
+  (`activeBrackets`). A symbol-text match made an entry Buy Limit beside a long read as its TP, and dragging it re-placed
+  the entry as an exit sized to the position (fixed 2026-11-25). Every other order is a plain chip.
+- **Editing a working order** (plain chip): only this page's own (`isEditable`: `own`, open, LIMIT / STOP_LOSS /
+  STOP_LOSS_MARKET). Drag the chip or its line: a Limit moves its price, an SL-M its trigger, an SL-limit both by the
+  same amount (`movedLevels`); Esc cancels a drag. The lots / price popover commits only on Modify / Enter. Checked
+  against the live price like a new order (`orderEditError`: a Buy Limit above it fills at once, a stop on the wrong
+  side triggers at once), lots 1..20 and none on a part-filled order (`editLotsError`). REAL only.
 - **TP vs SL:** decide with `bracketKind(orderType, price, anchor, isLong)`. A stop order (SL, SL-M, STOP...) is the SL
   and a limit is the TP. Only an unknown type falls back to which side of the entry it sits. Deciding by side alone
   showed a stop below a long as "TP +3,65,700".

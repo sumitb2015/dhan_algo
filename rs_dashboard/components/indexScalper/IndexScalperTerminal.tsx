@@ -47,6 +47,7 @@ import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
 import { Switch } from '@/components/ui/switch';
 import type { OiMode } from '@/lib/indexScalperOiProfile';
+import { editLotsError, isEditable, movedLevels, orderEditError } from '@/lib/indexScalperOrderEdit';
 import { QUICK_ON_KEY, QUICK_SETTINGS_KEY, DEFAULT_QUICK, MAX_QUICK_RANGE, clampQuickSettings, lotsToRemove, type QuickSettings } from '@/lib/indexScalperQuickTrade';
 
 // v2: v1 could hold an ATM pin taken before any spot was known (the middle of the strike list, e.g. 24200). v1 is
@@ -1029,6 +1030,65 @@ export default function IndexScalperTerminal() {
     void loadOrders();
   }, [real, chartOpenOrders, chartContract, sendCancel, feed.expiry, feed.lotSize, underlying, placeContract, flash, loadOrders]);
 
+  /** Edit one of this page's working orders: move it to `level` (its line was dragged; a Limit moves its price, an SL-M
+   *  its trigger, an SL-limit both by the same amount) and / or change its `lots`. Checked against the live price like a
+   *  new order (lib/indexScalperOrderEdit), sent as a modify (PATCH /api/scalper/orders, `source: 'isx'`: the server
+   *  re-checks the lot cap). REAL only: in SIM the page sends nothing to the broker. */
+  const modifyBusyRef = useRef(false);
+  const onModifyOrder = useCallback(async (req: { orderId: string; level?: number; lots?: number }): Promise<boolean> => {
+    const row = panelOrdersRef.current.find(o => o.id === req.orderId);
+    if (!row) { flash({ ok: false, text: `Order ${req.orderId} is no longer in the order book` }); return false; }
+    if (!isEditable(row)) { flash({ ok: false, text: `Order ${req.orderId} cannot be edited here (only this page's working Limit / SL / SL-M orders)` }); return false; }
+    if (!real) { flash({ ok: false, text: 'Arm REAL to edit a broker order' }); return false; }
+    if (modifyBusyRef.current) return false;
+    const f = feedRef.current;
+    const kotak = brokerRef.current === 'kotak';
+    const tick = row.isOption ? INSTRUMENTS[underlying].optTick : INSTRUMENTS[underlying].futTick;
+    // The contract's live price: an option from the chain, the future from the feed; Kotak rows by their trading symbol.
+    let ltp: number | null = null;
+    if (kotak) {
+      const info = kotakSymbols?.[row.securityId];
+      ltp = info ? kotakPrice(info) : null;
+    } else if (f.future && f.future.dhanId === row.securityId) ltp = f.future.ltp ?? null;
+    else ltp = f.ltpById.get(row.securityId) ?? null;
+    const side = row.side as 'BUY' | 'SELL';
+    const levels = req.level !== undefined ? movedLevels(row, req.level, tick) : { price: row.price ?? 0, trigger: row.trigger ?? 0 };
+    const levelErr = orderEditError(row.rawType, side, levels.price, levels.trigger, ltp, tick);
+    if (levelErr) { flash({ ok: false, text: `Order ${row.id}: ${levelErr}` }); return false; }
+    // Quantity in the broker's own unit: the current one, or the new lots converted like a new order.
+    const lotSize = kotak ? f.kotak?.lotSize ?? null : f.lotSize;
+    const unitsPerLot = lotUnits(underlying, lotSize);
+    let quantity = row.qty ?? 0;
+    if (req.lots !== undefined) {
+      const lotsErr = editLotsError(req.lots, row.tradedQty);
+      if (lotsErr) { flash({ ok: false, text: `Order ${row.id}: ${lotsErr}` }); return false; }
+      if (unitsPerLot === null) { flash({ ok: false, text: 'Lot size unknown: nothing sent' }); return false; }
+      quantity = kotak ? kotakOrderQty(underlying, req.lots, unitsPerLot) : dhanOrderQty(underlying, req.lots, unitsPerLot);
+    }
+    if (!(quantity > 0)) { flash({ ok: false, text: `Order ${row.id}: unknown quantity, nothing sent` }); return false; }
+    modifyBusyRef.current = true;
+    try {
+      const r = await fetch('/api/scalper/orders', {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          orderId: row.id, broker: kotak ? 'kotak' : 'dhan', orderType: row.rawType, quantity,
+          price: levels.price, triggerPrice: levels.trigger, validity: 'DAY',
+          source: 'isx', exchangeSegment: row.segment || INSTRUMENTS[underlying].dhanSegment, tradingSymbol: row.securityId, underlying,
+        }),
+      });
+      const j = await r.json() as { success: boolean; error?: string };
+      const what = [req.level !== undefined ? `${row.rawType === 'STOP_LOSS_MARKET' ? 'trigger' : 'price'} ${(row.rawType === 'STOP_LOSS_MARKET' ? levels.trigger : levels.price).toFixed(2)}` : '', req.lots !== undefined ? `${req.lots} lot${req.lots === 1 ? '' : 's'}` : ''].filter(Boolean).join(', ');
+      flash({ ok: j.success, text: j.success ? `Order ${row.id} modified: ${what}` : `Modify refused: ${j.error ?? 'unknown error'}` });
+      return j.success;
+    } catch (e) {
+      flash({ ok: false, text: `Modify: no reply (${String((e as Error).message ?? e)}). Check Orders before retrying` });
+      return false;
+    } finally {
+      modifyBusyRef.current = false;
+      void loadOrders();
+    }
+  }, [real, underlying, kotakSymbols, kotakPrice, flash, loadOrders]);
+
   const onCancelBracket = useCallback(async (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => {
     if (req.orderId) {
       await cancelOrder(req.orderId);
@@ -1402,7 +1462,7 @@ export default function IndexScalperTerminal() {
               logScale={logScale} pctScale={pctScale} autoScale={autoScale}
               legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} onAdjustLeg={adjustLeg} exitingId={exitingId}
               onToggleIndicator={onToggleIndicator} onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
-              focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder}
+              focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder} onModifyOrder={onModifyOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
               onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
@@ -1418,7 +1478,7 @@ export default function IndexScalperTerminal() {
               logScale={logScale} pctScale={pctScale} autoScale={autoScale}
               legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} onAdjustLeg={adjustLeg} exitingId={exitingId}
               onToggleIndicator={onToggleIndicator} onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
-              focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder}
+              focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder} onModifyOrder={onModifyOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
               onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}

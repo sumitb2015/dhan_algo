@@ -83,6 +83,9 @@ export interface OrderRowView {
   /** Placed by this page (`isx` correlationId; Kotak: a recorded order ID, mapped to `isx-kotak`). Cancelling any
    *  other order asks first, and a TP / SL from this page never replaces it. */
   own: boolean;
+  /** The broker's own order type (Dhan vocabulary: LIMIT, STOP_LOSS, STOP_LOSS_MARKET, MARKET) and segment, for edits. */
+  rawType: string;
+  segment: string;
 }
 
 function isOptionOrder(o: Row): boolean {
@@ -122,6 +125,8 @@ export function orderRows(orders: Row[]): OrderRowView[] {
       reason: String(o.omsErrorDescription ?? '').trim(),
       cancellable: bucket === 'open',
       own: String(o.correlationId ?? '').startsWith('isx'),
+      rawType: String(o.orderType ?? '').toUpperCase(),
+      segment: String(o.exchangeSegment ?? ''),
     };
   }).sort((a, b) => (a.sortKey < b.sortKey ? 1 : a.sortKey > b.sortKey ? -1 : 0));
 }

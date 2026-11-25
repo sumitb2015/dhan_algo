@@ -69,6 +69,7 @@ interface Props {
   lots: number;
   openOrders: OrderRowView[];
   onCancelOrder: (orderId: string) => void;
+  onModifyOrder: (req: { orderId: string; level?: number; lots?: number }) => Promise<boolean>;
   onPlaceChartOrder: (contract: PickedContract | null, req: ChartOrderReq) => void;
   onOpenTicket: (contract: PickedContract | null, req: { price: number; lots: number; orderType: 'LIMIT' }) => void;
   onAlert: (symbol: string, price: number) => void;
@@ -231,7 +232,7 @@ function ChartPane(p: Props) {
           contractName={isOption ? label : p.futureName}
           lots={p.lots}
           openOrders={paneOrders}
-          onCancelOrder={p.onCancelOrder}
+          onCancelOrder={p.onCancelOrder} onModifyOrder={p.onModifyOrder}
           onPlaceLimitOrder={placeOrder}
           onOpenTicket={openTicket}
           onAlert={p.onAlert}

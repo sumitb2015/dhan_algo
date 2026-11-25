@@ -4,7 +4,7 @@
 // and open option positions drawn at the index level they belong to, each with qty / avg / live P&L and an Exit button.
 // Market data only; every order goes through the parent's callbacks.
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import {
   createChart, CandlestickSeries, LineSeries, HistogramSeries, ColorType, CrosshairMode, LineStyle, PriceScaleMode,
   type IChartApi, type ISeriesApi, type IPriceLine, type UTCTimestamp, type SeriesType, type MouseEventParams, type Time,
@@ -21,6 +21,9 @@ import { cn } from '@/lib/utils';
 import { fmtOI, fmtOIChange, oiBars, placeOiLabels, type OiMode, type OiProfile } from '@/lib/indexScalperOiProfile';
 import { legPremiumPnl, premiumBracketsFor } from '@/lib/indexScalperPremiumBrackets';
 import PremiumBracketControls from './PremiumBracketControls';
+import OrderEditPopover, { type OrderEditDraft } from './OrderEditPopover';
+import { isEditable } from '@/lib/indexScalperOrderEdit';
+import { MAX_LOTS } from '@/lib/indexScalperPositions';
 
 export type DrawTool = 'cursor' | 'hline' | 'trend' | 'ruler';
 
@@ -83,6 +86,9 @@ interface Props {
   lots?: number;
   openOrders?: OrderRowView[];
   onCancelOrder?: (orderId: string) => void;
+  /** Edit one of this page's working orders: `level` = where its line was dragged / typed, `lots` = new size. Resolves
+   *  true when the broker accepted the modify. */
+  onModifyOrder?: (req: { orderId: string; level?: number; lots?: number }) => Promise<boolean>;
   onPlaceLimitOrder?: (req: { side: 'BUY' | 'SELL'; price: number; lots: number; orderType?: 'LIMIT' | 'STOP_LOSS' }) => void;
   onOpenTicket?: (req: { price: number; lots: number; orderType: 'LIMIT' }) => void;
   onAlert?: (symbol: string, price: number) => void;
@@ -149,7 +155,7 @@ function ScalperChart(props: Props) {
   const {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, legs, entrySpots,
     onExitLeg, onAdjustLeg, adjustLots = 1, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
-    contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
+    contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
     premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, resetSeq = 0, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false, premiumOrders,
   } = props;
@@ -179,6 +185,10 @@ function ScalperChart(props: Props) {
   const [hover, setHover] = useState<Hover | null>(null);
   const [ruler, setRuler] = useState<string | null>(null);
   const [chipTops, setChipTops] = useState<Record<string, number>>({});
+  // A working order being dragged to a new price (chip or line), and the order whose edit popover is open.
+  const [ordDrag, setOrdDrag] = useState<{ id: string; price: number; startPrice: number; side: string } | null>(null);
+  const [ordEdit, setOrdEdit] = useState<OrderEditDraft | null>(null);
+  const ordDragLineRef = useRef<IPriceLine | null>(null);
   const [hoverScale, setHoverScale] = useState<{ y: number; price: number } | null>(null);
   const plusRef = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<{ y: number; price: number } | null>(null);
@@ -550,17 +560,10 @@ function ScalperChart(props: Props) {
 
       for (const ord of openOrders) {
         if (ord.side !== oppSide) continue;
-        const sName = (p.leg.symbol || '').toUpperCase();
-        const oName = (ord.symbol || '').toUpperCase();
-        const isCrudeMatch = underlying === 'CRUDEOILM' && (
-          p.leg.type === 'FUT' || oName.includes('CRUDE') || sName.includes('CRUDE')
-        );
-        const isNiftyMatch = underlying === 'NIFTY' && (
-          (p.leg.type === 'FUT' && (oName.includes('FUT') || oName.includes('NIFTY'))) ||
-          (p.leg.strike > 0 && oName.includes(String(p.leg.strike)))
-        );
-        const matchesLeg = isCrudeMatch || isNiftyMatch || (sName && (oName.includes(sName) || sName.includes(oName)));
-        if (!matchesLeg) continue;
+        // Only a closing order on THIS leg's contract is its TP / SL (matched by security id, never by symbol text):
+        // a name match made an entry order beside a position read as its bracket, and dragging it re-placed the entry
+        // as an exit sized to the position.
+        if (!ord.securityId || ord.securityId !== p.leg.securityId) continue;
 
         const ot = (ord.orderType || '').toUpperCase();
         const ordPrice = ord.price ?? ord.trigger ?? 0;
@@ -579,7 +582,7 @@ function ScalperChart(props: Props) {
       res[legId] = { tp, sl };
     }
     return res;
-  }, [placed, simBrackets, tentativeBrackets, openOrders, underlying, canBracket]);
+  }, [placed, simBrackets, tentativeBrackets, openOrders, canBracket]);
 
   // Autoscale levels: positions, TP / SL and working orders (the drag line is left out so the scale does not chase the
   // mouse). Changing them re-fits the price scale, but only while it is still auto-scaling: a price axis the user has
@@ -752,6 +755,46 @@ function ScalperChart(props: Props) {
     return openOrders.filter(o => !bracketOrderIds.has(o.id));
   }, [openOrders, bracketOrderIds]);
 
+  // Dragging a working order: a dashed preview line follows the mouse (snapped to this chart's tick); on release at a new
+  // price the order is modified through the terminal (checked against the live price there). Esc cancels the drag.
+  useEffect(() => {
+    const candles = candleRef.current;
+    const box = boxRef.current;
+    if (!ordDrag || !candles || !box) {
+      if (ordDragLineRef.current && candleRef.current) {
+        try { candleRef.current.removePriceLine(ordDragLineRef.current); } catch { /* gone */ }
+        ordDragLineRef.current = null;
+      }
+      return;
+    }
+    const color = ordDrag.side === 'BUY' ? '#0ea5e9' : '#f43f5e';
+    if (!ordDragLineRef.current) {
+      ordDragLineRef.current = candles.createPriceLine({ price: ordDrag.price, color, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'Move' });
+    }
+    let price = ordDrag.price;
+    const onMove = (e: MouseEvent) => {
+      const raw = candles.coordinateToPrice(e.clientY - box.getBoundingClientRect().top);
+      if (raw === null || !(raw > 0)) return;
+      price = Number((Math.round(raw / tickSize) * tickSize).toFixed(2));
+      ordDragLineRef.current?.applyOptions({ price });
+    };
+    const finish = (send: boolean) => {
+      const { id, startPrice } = ordDrag;
+      setOrdDrag(null);
+      if (send && Math.abs(price - startPrice) > 1e-9) void onModifyOrder?.({ orderId: id, level: price });
+    };
+    const onUp = () => finish(true);
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') finish(false); };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [ordDrag, onModifyOrder, tickSize]);
+
   useEffect(() => {
     const candles = candleRef.current;
     if (!candles) return;
@@ -761,31 +804,14 @@ function ScalperChart(props: Props) {
       const p = ord.price ?? ord.trigger;
       if (!p) continue;
       seen.add(ord.id);
-      const matchedPos = placed.find(pos => {
-        if (!canBracket(pos.leg)) return false;
-        const sName = (pos.leg.symbol || '').toUpperCase();
-        const oName = (ord.symbol || '').toUpperCase();
-        return (underlying === 'CRUDEOILM' && (oName.includes('CRUDE') || sName.includes('CRUDE'))) ||
-          (underlying === 'NIFTY' && (oName.includes('NIFTY') || sName.includes('NIFTY')));
-      });
-      let color = ord.side === 'BUY' ? '#0ea5e9' : '#f43f5e';
-      let title = `${ord.qty ?? ''} ${ord.side} ${ord.orderType}`;
-      if (matchedPos && matchedPos.anchor.level > 0 && ord.side === (matchedPos.leg.netQty > 0 ? 'SELL' : 'BUY')) {
-        const isLong = matchedPos.leg.netQty > 0;
-        if (bracketKind(ord.orderType || '', p, matchedPos.anchor.level, isLong) === 'TP') {
-          color = '#10b981'; // Green for TP
-          title = 'TP';
-        } else {
-          color = '#ef4444'; // Red for SL
-          title = 'SL';
-        }
-      }
+      const color = ord.side === 'BUY' ? '#0ea5e9' : '#f43f5e';
+      const title = `${ord.qty ?? ''} ${ord.side} ${ord.orderType}`;
       const opts = { price: p, color, lineWidth: 1 as const, lineStyle: LineStyle.Solid, axisLabelVisible: true, title };
       const ex = lines.get(ord.id);
       if (ex) ex.applyOptions(opts); else lines.set(ord.id, candles.createPriceLine(opts));
     }
     for (const [id, l] of lines) if (!seen.has(id)) { try { candles.removePriceLine(l); } catch { /* gone */ } lines.delete(id); }
-  }, [regularOrders, placed, underlying, canBracket]);
+  }, [regularOrders]);
 
   // Chip y-positions follow the price scale (zoom / pan / autoscale move it with no event), so re-read them on a short timer.
   useEffect(() => {
@@ -818,6 +844,12 @@ function ScalperChart(props: Props) {
       const out: Record<string, number> = {};
       let floor = -Infinity;
       for (const r of raw) { const y = Math.max(r.y, floor + 26); out[r.id] = y; floor = y; }
+      // The order lines' own y (not pushed apart like the chips): where a line can be grabbed and dragged.
+      for (const ord of regularOrders) {
+        const p = ord.price ?? ord.trigger;
+        const y = p ? candles.priceToCoordinate(p) : null;
+        if (y !== null) out[`oline_${ord.id}`] = Number(y);
+      }
       setChipTops(prev => {
         const ks = Object.keys(out);
         if (ks.length === Object.keys(prev).length && ks.every(k => Math.abs((prev[k] ?? -9) - out[k]) < 0.5)) return prev;
@@ -1173,102 +1205,62 @@ function ScalperChart(props: Props) {
         </div>
       )}
 
-      {/* working order chips on chart */}
+      {/* working order chips on chart: this page's own Limit / SL / SL-M orders can be dragged to a new price (chip or
+          line) and have their lots edited; another placer's order is shown with its x only */}
       {regularOrders.map(ord => {
         const p = ord.price ?? ord.trigger;
         if (!p) return null;
         const top = chipTops[`ord_${ord.id}`];
         if (top === undefined) return null;
         const isBuy = ord.side === 'BUY';
-
-        // Only a leg that can carry a TP / SL on this chart (a FUT on the underlying, the option on its premium chart):
-        // dragging an order chip re-places it on that leg's contract at this chart's price.
-        const bracketable = placed.filter(pos => canBracket(pos.leg));
-        const matchedPos = bracketable.find(pos => pos.anchor.level > 0 && ord.side === (pos.leg.netQty > 0 ? 'SELL' : 'BUY'))
-          ?? bracketable.find(pos => {
-            const sName = (pos.leg.symbol || '').toUpperCase();
-            const oName = (ord.symbol || '').toUpperCase();
-            return (underlying === 'CRUDEOILM' && (oName.includes('CRUDE') || sName.includes('CRUDE') || pos.leg.type === 'FUT')) ||
-              (underlying === 'NIFTY' && (oName.includes('NIFTY') || sName.includes('NIFTY') || pos.leg.type === 'FUT'));
-          })
-          ?? bracketable[0];
-
-        if (matchedPos && matchedPos.anchor.level > 0) {
-          const isLong = matchedPos.leg.netQty > 0;
-          // Order qty is in the broker's own unit (Dhan MCX: lots; Kotak / NSE: units): orderQtyMult converts it.
-          const lotSize = displayLotUnits(underlying, feedLotSize);
-          const totalUnits = ord.qty ? qtyUnits(ord.qty, orderQtyMult) : lotSize;
-          const lots = Math.max(1, Math.round(totalUnits / lotSize));
-          const ptDiff = isLong ? (p - matchedPos.anchor.level) : (matchedPos.anchor.level - p);
-          const pct = (ptDiff / matchedPos.anchor.level) * 100;
-          const pnl = ptDiff * totalUnits;
-          const kind = bracketKind(ord.orderType || '', p, matchedPos.anchor.level, isLong);
-          const isTp = kind === 'TP';
-
-          return (
-            <div
-              key={ord.id}
-              data-testid="order-chip"
-              style={{ top: top - 11 }}
-              className="absolute right-[84px] z-[55] flex items-center shadow-lg font-mono text-[11px]"
-            >
-              <div
-                title={`Click and drag to move ${kind} to a new price`}
-                onMouseDown={(e) => {
-                  e.stopPropagation();
-                  e.preventDefault();
-                  startDrag(kind, matchedPos.leg, matchedPos.anchor.level, isLong, lots, totalUnits, p);
-                }}
-                className={cn('h-[22px] px-2 rounded-l flex items-center font-bold select-none border cursor-grab active:cursor-grabbing hover:brightness-110 transition-colors',
-                  isTp ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-400' : 'bg-rose-950/90 border-rose-500/80 text-rose-400')}
-              >
-                {isTp ? 'TP' : 'SL'} {pnl >= 0 ? '+' : ''}{inrWhole(pnl)} ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)
-              </div>
-              <div
-                title={`Click and drag to move ${kind} to a new price`}
-                onMouseDown={(e) => {
-                  if ((e.target as HTMLElement).tagName.toLowerCase() === 'button') return;
-                  e.stopPropagation();
-                  e.preventDefault();
-                  startDrag(kind, matchedPos.leg, matchedPos.anchor.level, isLong, lots, totalUnits, p);
-                }}
-                className={cn('h-[22px] px-2 rounded-r flex items-center gap-1.5 bg-zinc-900 border border-l-0 text-zinc-200 cursor-grab active:cursor-grabbing select-none hover:brightness-110 transition-colors',
-                  isTp ? 'border-emerald-500/60' : 'border-rose-500/60')}
-              >
-                <span>{lots} {isLong ? 'Sell' : 'Buy'} {isTp ? 'Limit' : 'Stop Market'}</span>
-                {ord.cancellable && (
-                  <button
-                    type="button"
-                    aria-label={`Cancel order ${ord.id}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onCancelOrder?.(ord.id);
-                    }}
-                    className="h-[16px] w-[16px] rounded flex items-center justify-center text-zinc-400 hover:text-white hover:bg-rose-600 transition-colors cursor-pointer"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        }
-
+        const canEdit = !!onModifyOrder && isEditable(ord);
+        // Order qty is in the broker's own unit (Dhan MCX: lots; Kotak / NSE: units): orderQtyMult converts it.
+        const lotSize = displayLotUnits(underlying, feedLotSize);
+        const ordLots = ord.qty ? Math.max(1, Math.round(qtyUnits(ord.qty, orderQtyMult) / lotSize)) : null;
+        const lineY = chipTops[`oline_${ord.id}`];
+        const startOrdDrag = (e: React.MouseEvent) => {
+          if (!canEdit || (e.target as HTMLElement).closest('button')) return;
+          e.stopPropagation();
+          e.preventDefault();
+          setOrdEdit(null);
+          setOrdDrag({ id: ord.id, price: p, startPrice: p, side: ord.side });
+        };
         return (
-          <div key={ord.id} data-testid="order-chip" style={{ top: top - 11 }}
-            className={cn('absolute right-[84px] z-[55] flex items-center gap-1.5 pl-2 pr-1 h-[22px] rounded border text-[11px] font-mono bg-zinc-900 shadow',
-              isBuy ? 'border-sky-500/60' : 'border-rose-500/60')}>
-            <span className={cn('font-bold', isBuy ? 'text-sky-400' : 'text-rose-400')}>{ord.side}</span>
-            <span className="text-zinc-200">{ord.qty}</span>
-            <span className="text-zinc-400">{ord.orderType}</span>
-            <span className="text-zinc-300 font-semibold">@ {fmt(p)}</span>
-            {ord.cancellable && (
-              <button type="button" aria-label={`Cancel order ${ord.id}`} onClick={() => onCancelOrder?.(ord.id)}
-                className="ml-1 h-[18px] px-1 rounded bg-zinc-800 hover:bg-rose-600 text-zinc-400 hover:text-white text-[10px] font-bold transition-colors">
-                <X className="w-3 h-3" />
-              </button>
+          <Fragment key={ord.id}>
+            {canEdit && lineY !== undefined && (
+              <div data-testid="order-line-handle" aria-hidden title="Drag to move the order to a new price"
+                onMouseDown={startOrdDrag} style={{ top: lineY - 4 }}
+                className="absolute left-0 right-[64px] h-2 z-[50] cursor-ns-resize" />
             )}
-          </div>
+            <div data-testid="order-chip" style={{ top: top - 11 }} onMouseDown={startOrdDrag}
+              title={canEdit ? 'Drag to move the order to a new price; click its lots to edit' : 'Placed elsewhere: it can be cancelled (after a confirmation), not edited here'}
+              className={cn('absolute right-[84px] z-[55] flex items-center gap-1.5 pl-2 pr-1 h-[22px] rounded border text-[11px] font-mono bg-zinc-900 shadow select-none',
+                isBuy ? 'border-sky-500/60' : 'border-rose-500/60', canEdit && 'cursor-grab active:cursor-grabbing')}>
+              <span className={cn('font-bold', isBuy ? 'text-sky-400' : 'text-rose-400')}>{ord.side}</span>
+              {canEdit ? (
+                <button type="button" aria-label={`Edit order ${ord.id}`} aria-expanded={ordEdit?.id === ord.id}
+                  onClick={e => { e.stopPropagation(); setOrdEdit(ordEdit?.id === ord.id ? null : { id: ord.id, lots: ordLots ?? 1, price: (ord.rawType === 'STOP_LOSS_MARKET' ? ord.trigger ?? p : ord.price ?? p).toFixed(2) }); }}
+                  className="h-[16px] px-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border border-zinc-700">{ordLots ?? ord.qty} lot{ordLots === 1 ? '' : 's'}</button>
+              ) : <span className="text-zinc-200">{ord.qty}</span>}
+              <span className="text-zinc-400">{ord.orderType}</span>
+              <span className="text-zinc-300 font-semibold">@ {fmt(p)}</span>
+              {ord.cancellable && (
+                <button type="button" aria-label={`Cancel order ${ord.id}`} onClick={e => { e.stopPropagation(); onCancelOrder?.(ord.id); }}
+                  className="ml-1 h-[18px] px-1 rounded bg-zinc-800 hover:bg-rose-600 text-zinc-400 hover:text-white text-[10px] font-bold transition-colors">
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+            {ordEdit?.id === ord.id && (
+              <OrderEditPopover top={top + 14} ord={ord} draft={ordEdit} onDraft={setOrdEdit} maxLots={MAX_LOTS}
+                onClose={() => setOrdEdit(null)}
+                onSave={async (lots, level) => {
+                  const req = { orderId: ord.id, ...(lots !== ordLots ? { lots } : {}), ...(level !== null ? { level } : {}) };
+                  if (req.lots === undefined && req.level === undefined) { setOrdEdit(null); return; } // nothing changed: nothing sent
+                  if (await onModifyOrder!(req)) setOrdEdit(null);
+                }} />
+            )}
+          </Fragment>
         );
       })}
 
