@@ -9,7 +9,7 @@ import type { Underlying } from './indexScalperInstrument.ts';
 /** `v` = traded volume in the bar, when the instrument has one (a future, an option); an index has none. */
 export interface Bar { t: number; o: number; h: number; l: number; c: number; v?: number }
 
-export type IndicatorKind = 'ema' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'rsi' | 'stochrsi' | 'macd' | 'adx';
+export type IndicatorKind = 'ema' | 'emacross' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'rsi' | 'stochrsi' | 'macd' | 'adx';
 
 export interface IndicatorInstance {
   id: string;
@@ -54,6 +54,11 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
   // Standard", Traditional; the CPR is the same pivot with its BC / TC).
   { kind: 'cpr', label: 'CPR (central pivot range)', pane: 'price', color: '#a855f7', params: [] },
   { kind: 'pivots', label: 'Pivot S / R (S1-S4, R1-R4)', pane: 'price', color: '#f59e0b', params: [{ key: 'levels', label: 'Levels (1-4)', def: 4, min: 1, max: 4 }] },
+  // Two EMAs (TradingView ta.ema) with a small circle where they cross: green when the fast crosses above, red below.
+  {
+    kind: 'emacross', label: 'EMA Cross', pane: 'price', color: '#22d3ee',
+    params: [{ key: 'fast', label: 'Fast EMA', def: 9, min: 2, max: 200 }, { key: 'slow', label: 'Slow EMA', def: 20, min: 3, max: 400 }],
+  },
   { kind: 'rsi', label: 'RSI', pane: 'sub', color: '#8b5cf6', params: [{ key: 'period', label: 'Length', def: 14, min: 2, max: 100 }] },
   // TradingView "Stoch RSI" defaults and order: K 3, D 3, RSI length 14, Stochastic length 14 (lib/indicators.ts stochRsiArray).
   {
@@ -69,6 +74,19 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
   },
   { kind: 'adx', label: 'ADX / DMI', pane: 'sub', color: '#eab308', params: [{ key: 'period', label: 'Length', def: 14, min: 2, max: 100 }] },
 ];
+
+/** Pine `ta.crossover` / `ta.crossunder` of `a` over `b`: bar i is a cross up when a > b now and a <= b on the bar
+ *  before (down: a < b now, a >= b before). Bars where either value is missing are skipped. */
+export function crosses(a: (number | null)[], b: (number | null)[]): { i: number; up: boolean }[] {
+  const out: { i: number; up: boolean }[] = [];
+  for (let i = 1; i < a.length; i++) {
+    const a0 = a[i - 1], b0 = b[i - 1], a1 = a[i], b1 = b[i];
+    if (a0 === null || b0 === null || a1 === null || b1 === null) continue;
+    if (a1 > b1 && a0 <= b0) out.push({ i, up: true });
+    else if (a1 < b1 && a0 >= b0) out.push({ i, up: false });
+  }
+  return out;
+}
 
 export function catalogEntry(kind: IndicatorKind): CatalogEntry {
   return INDICATOR_CATALOG.find(c => c.kind === kind)!;
@@ -116,6 +134,8 @@ export interface OutSeries {
   breaks?: boolean[];
   /** Line width on the price pane (default 2; daily levels are drawn at 1). */
   lineWidth?: LineWidth;
+  /** Small circles drawn on this line at bar `i` (EMA crosses), at `price`, in `color`. */
+  markers?: { i: number; price: number; color: string; up: boolean }[];
 }
 
 export interface IndicatorOutput {
@@ -195,6 +215,8 @@ export function dayBreaks(bars: Bar[]): boolean[] {
 
 /** Bollinger basis colour (TradingView's default orange); the bands take the indicator's own colour. */
 const BB_BASIS = '#f97316';
+/** EMA Cross: the slow EMA's colour (the fast one takes the indicator's own). */
+const EMA_CROSS_SLOW = '#f59e0b';
 
 /** TradingView `ta.bb`: basis = SMA(close, period); bands = basis +/- mult x the POPULATION standard deviation (divides by
  *  N, as Pine's `ta.stdev`). Matches a pandas population-stdev reference to 1e-9 on 5,772 NIFTY points (2026-11-25);
@@ -288,6 +310,19 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
     }
     case 'rsi':
       return { pane: 'sub', series: [{ key: 'v', label, axisLabel: `RSI(${p('period')})`, color: ind.color, style: 'line', values: rsiArray(closes, p('period')), guides: [30, 70] }] };
+    case 'emacross': {
+      const fast = emaSmaSeeded(closes, p('fast'));
+      const slow = emaSmaSeeded(closes, p('slow'));
+      // The circle sits where the lines meet: between the two EMAs on the crossing bar.
+      const markers = crosses(fast, slow).map(c => ({ i: c.i, up: c.up, color: c.up ? UP : DOWN, price: ((fast[c.i] as number) + (slow[c.i] as number)) / 2 }));
+      return {
+        pane: 'price',
+        series: [
+          { key: 'fast', label: `${label} fast`, axisLabel: `EMA(${p('fast')})`, color: ind.color, style: 'line', values: fast, markers },
+          { key: 'slow', label: `${label} slow`, axisLabel: `EMA(${p('slow')})`, color: EMA_CROSS_SLOW, style: 'line', values: slow },
+        ],
+      };
+    }
     case 'stochrsi': {
       const s = stochRsiArray(closes, p('rsi'), p('stoch'), p('k'), p('d'));
       return {

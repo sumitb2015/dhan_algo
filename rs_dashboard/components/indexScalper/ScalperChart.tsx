@@ -6,8 +6,9 @@
 
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import {
-  createChart, CandlestickSeries, LineSeries, HistogramSeries, ColorType, CrosshairMode, LineStyle, PriceScaleMode,
+  createChart, createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, ColorType, CrosshairMode, LineStyle, PriceScaleMode,
   type IChartApi, type ISeriesApi, type IPriceLine, type UTCTimestamp, type SeriesType, type MouseEventParams, type Time,
+  type ISeriesMarkersPluginApi,
   type AutoscaleInfo,
 } from 'lightweight-charts';
 import { Eye, EyeOff, Settings2, X, Plus, ArrowDown, ArrowUp, ArrowUpDown, Bell, FileText, Minus } from 'lucide-react';
@@ -169,6 +170,10 @@ function ScalperChart(props: Props) {
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const indSeriesRef = useRef<ISeriesApi<SeriesType>[]>([]);
+  // Markers (EMA-cross circles) per indicator series index, and what each last drew, so a tick re-sends them only when
+  // a cross appears / disappears on the forming bar.
+  const markerApisRef = useRef<Map<number, ISeriesMarkersPluginApi<Time>>>(new Map());
+  const markerSigRef = useRef<Map<number, string>>(new Map());
   const sigRef = useRef('');
   // What the last pass drew: length, first bar time, and the last two bars (to spot a refresh that rewrote history).
   const prevRef = useRef<{ n: number; first: number; tail: Bar[]; flip: boolean } | null>(null);
@@ -253,6 +258,8 @@ function ScalperChart(props: Props) {
     chartRef.current = chart;
     candleRef.current = candles;
     const orderLines = orderLinesRef.current;
+    const markerApis = markerApisRef.current;
+    const markerSigs = markerSigRef.current;
 
     chart.subscribeCrosshairMove((p: MouseEventParams<Time>) => {
       const d = p.seriesData.get(candles) as { open: number; high: number; low: number; close: number } | undefined;
@@ -305,6 +312,7 @@ function ScalperChart(props: Props) {
       chart.remove();
       chartRef.current = null; candleRef.current = null;
       indSeriesRef.current = []; legLines.clear();
+      markerApis.clear(); markerSigs.clear();
       for (const [, l] of bracketLinesRef.current) { try { candles.removePriceLine(l); } catch { /* gone */ } }
       bracketLinesRef.current.clear();
       if (dragPriceLineRef.current) {
@@ -408,6 +416,19 @@ function ScalperChart(props: Props) {
     // bar stayed flipped redrew all 13k bars on every tick for the rest of the bar.)
     const recolor = !!prev && (bars.length === prev.n ? flip !== prev.flip : flip);
     const lastBar = bars[bars.length - 1];
+    // Cross circles for series index `idx`: sent only when the list changed (a cross on the forming bar comes and goes
+    // with the price, as on TradingView, until the bar closes).
+    const syncMarkers = (idx: number, s: OutSeries, api: ISeriesApi<SeriesType>) => {
+      if (!s.markers) return;
+      const sigM = s.markers.map(m => `${bars[m.i]?.t}:${m.up ? 1 : 0}:${m.price.toFixed(2)}`).join(',');
+      if (markerSigRef.current.get(idx) === sigM) return;
+      markerSigRef.current.set(idx, sigM);
+      let plugin = markerApisRef.current.get(idx);
+      if (!plugin) { plugin = createSeriesMarkers(api, []); markerApisRef.current.set(idx, plugin); }
+      plugin.setMarkers(s.markers.filter(m => bars[m.i]).map(m => ({
+        time: toTime(bars[m.i].t), position: 'atPriceMiddle' as const, price: m.price, shape: 'circle' as const, color: m.color, size: 1,
+      })));
+    };
 
     if (tail) {
       try {
@@ -422,6 +443,7 @@ function ScalperChart(props: Props) {
             if (v === null) continue;
             const color = pointColor(s, s.values.length - 1);
             api.update((color ? { time: toTime(lastBar.t), value: v, color } : { time: toTime(lastBar.t), value: v }) as never);
+            syncMarkers(k - 1, s, api);
           }
         }
       } catch { /* "Cannot update oldest data": next full pass repairs it */ prevRef.current = null; }
@@ -434,6 +456,9 @@ function ScalperChart(props: Props) {
     if (sig !== sigRef.current) {
       for (const s of indSeriesRef.current) { try { chart.removeSeries(s); } catch { /* gone */ } }
       indSeriesRef.current = [];
+      // their marker plugins went with the series
+      markerApisRef.current.clear();
+      markerSigRef.current.clear();
       for (let i = chart.panes().length - 1; i > 0; i--) { try { chart.removePane(i); } catch { /* gone */ } }
       let pane = 0;
       for (const { out } of outputs) {
@@ -471,6 +496,7 @@ function ScalperChart(props: Props) {
         const api = indSeriesRef.current[k++];
         if (!api) continue;
         api.setData(seriesData(s, bars) as never);
+        syncMarkers(k - 1, s, api);
       }
     }
     prevRef.current = { n: bars.length, first: bars[0].t, tail: bars.slice(-2), flip };

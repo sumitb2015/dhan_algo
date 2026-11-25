@@ -172,6 +172,20 @@ test.describe('Index Scalper', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('EMA Cross is in the Indicators menu with EMA 9 / 20 by default', async ({ page, context }) => {
+    const state = { calls: [] as Call[], blocked: [] as Call[], positions: [] as Record<string, unknown>[] };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: /Indicators/ }).click();
+    await page.getByRole('button', { name: /^EMA Cross/ }).click();
+    await page.keyboard.press('Escape');
+    await expect(page.getByText('EMA Cross (9, 20)')).toBeVisible();
+    if (process.env.ISX_SHOT) { await page.waitForTimeout(800); await page.locator('canvas').first().locator('..').locator('..').screenshot({ path: process.env.ISX_SHOT }); }
+    expect(state.blocked).toEqual([]);
+  });
+
   test('Stochastic RSI is in the Indicators menu with TradingView defaults and draws K / D in its own pane', async ({ page, context }) => {
     const state = { calls: [] as Call[], blocked: [] as Call[], positions: [] as Record<string, unknown>[] };
     await signIn(context);

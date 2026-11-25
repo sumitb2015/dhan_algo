@@ -4,7 +4,7 @@ import {
   applyFill, tickError, legAnchor, legPnl, legsFromDhanPositions, orderUnits, brokerCloseOrder, legsOpenedElsewhere, pageFilledQty, parseNiftyOption, pnlSummary, totalPnl,
   type ScalperLeg,
 } from './indexScalperPositions.ts';
-import { applyTick, computeIndicator, flipsAtLast, mergeHistory, migrateIndicatorsV1, pointColor, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
+import { applyTick, computeIndicator, crosses, flipsAtLast, mergeHistory, migrateIndicatorsV1, pointColor, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
 import { emaSmaSeeded, stochRsiArray, supertrendSeries } from './indicators.ts';
 import { readFileSync } from 'node:fs';
 
@@ -96,6 +96,36 @@ test('an indicator\'s line width setting applies to all its lines, never to a hi
   // no width / an invalid saved width: each line's own default (Bollinger 1, EMA unset = the chart's 2)
   assert.deepEqual(computeIndicator(bars, newIndicator('bbands', 'b')).series.map(x => x.lineWidth), [1, 1, 1]);
   assert.equal(computeIndicator(bars, { ...newIndicator('ema', 'e'), width: 9 }).series[0].lineWidth, undefined);
+});
+
+test('crosses follow Pine ta.crossover / ta.crossunder (x > y and x[1] <= y[1]); missing values never cross', () => {
+  // a crosses above b at 2; touches it at 4 (a = b) and moves above at 5, which Pine also counts as a crossover;
+  // crosses below at 6
+  const a = [1, 2, 5, 6, 5, 6, 3];
+  const b = [3, 3, 4, 4, 5, 5, 4];
+  assert.deepEqual(crosses(a, b), [{ i: 2, up: true }, { i: 5, up: true }, { i: 6, up: false }]);
+  // equal then above IS a crossover (a[1] <= b[1]); equal then equal is not
+  assert.deepEqual(crosses([4, 5], [4, 4]), [{ i: 1, up: true }]);
+  assert.deepEqual(crosses([4, 4], [4, 4]), []);
+  assert.deepEqual(crosses([null, 5, 3], [4, 4, 4]), [{ i: 2, up: false }]); // bar 1 has no previous value
+});
+
+test('EMA Cross: EMA 9 / 20 by default (TradingView ema), a green circle on a cross up, red on a cross down, between the lines', () => {
+  const closes = [...Array.from({ length: 30 }, () => 100), ...Array.from({ length: 15 }, (_, i) => 100 + (i + 1) * 2), ...Array.from({ length: 25 }, (_, i) => 130 - (i + 1) * 3)];
+  const bars = closes.map((c, i) => bar(1_790_000_000 + i * 300, c));
+  const ind = newIndicator('emacross', 'x');
+  assert.deepEqual(ind.params, { fast: 9, slow: 20 });
+  const out = computeIndicator(bars, ind);
+  assert.deepEqual(out.series.map(x => x.axisLabel), ['EMA(9)', 'EMA(20)']);
+  assert.deepEqual(out.series[0].values, emaSmaSeeded(closes, 9));
+  assert.deepEqual(out.series[1].values, emaSmaSeeded(closes, 20));
+  const m = out.series[0].markers!;
+  assert.deepEqual(m.map(x => x.up), [true, false]); // the rally crosses up, the fall crosses down
+  assert.equal(m[0].color, '#22c55e');
+  assert.equal(m[1].color, '#ef4444');
+  const f = out.series[0].values as number[], sl = out.series[1].values as number[];
+  for (const x of m) assert.equal(x.price, (f[x.i] + sl[x.i]) / 2);
+  assert.equal(out.series[1].markers, undefined); // one set of circles, on the fast line
 });
 
 test('applyFill blends adds, keeps avg on reduce, resets on flip and flat', () => {
