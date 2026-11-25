@@ -33,10 +33,13 @@ Column names in: `Open High Low Close Volume` (the helper lower-cases copies for
 | `scripts/tools/level_chart_fetch._supertrend` | Level Chart | Wilder (`_wilder_atr`), deliberately not `pandas_ta` |
 | `pandas_ta.supertrend` via `calculate_ta_indicators` | `st_oi_bearcall`, `nifty_vix_straddle` (`_resample_and_supertrend`), `options_chart_fetch`, and `crudeoilm_supertrend`/`crudeoilm_ema_supertrend`/`crudeoilm_vwap_supertrend` (all read `SUPERT_`/`SUPERTd_` columns off `helper.get_indicators_ta()`) | RMA by default |
 | `scripts/analysis/backtest_ema_breakout.compute_supertrend` | that backtest only | `ewm(span=period)`, i.e. alpha 2/(n+1), **not Wilder** |
+| `rs_dashboard/lib/indicators.ts` `supertrendSeries(..., { pine: true })` (+ `emaSmaSeeded` for EMA) | dashboard trading charts (Index Scalper via `lib/indexScalperIndicators.ts`) | Pine `ta.supertrend` / `ta.ema` (SMA-seeded); matches TradingView and Dhan's chart, default (10, 2) |
 Measured on this repo's data (period 10, multiplier 3): the `lib` version and `pandas_ta` agree on direction for 99.93 %
 (NIFTY daily), 100 % (RELIANCE daily) and 99.80 % (NIFTY 15 m) of bars, but their band *levels* differ by up to 526 points
 on NIFTY daily around flips, so use one implementation for direction *and* stop level. The `ewm(span)` variant agrees on direction
 for only 96.1 % of NIFTY daily bars (its ATR(10) is 2.2 % higher), so any conclusion from that backtest does not transfer to the strategies.
+Without `pine: true` the TypeScript version flipped on different bars from TradingView on NIFTY's flat 15:15-15:27 bars
+(18 of 750 bars, lines up to 266 points apart; `0d22e884`); chart rules are in `dhan-trading-chart`.
 Rule: new code calls `lib/intraday_signals.supertrend` or the `pandas_ta` path the strategy already uses; do not add a
 seventh. If you consolidate, replace one at a time and add a test that pins the old output, because a "cleanup" changes
 historical backtest numbers.

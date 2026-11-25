@@ -1,6 +1,6 @@
 ---
 name: dhan-trading-chart
-description: Use when building or changing a TradingView-style trading chart in rs_dashboard (lightweight-charts candles with orders and positions drawn on it) - the Index Scalper's ScalperChart, or a new page that wants one - or when a chart's position line, TP / SL line, working-order chip, drag-to-move bracket, price-scale "+" menu, chart hotkeys, indicator values (EMA, Supertrend, VWAP vs TradingView / Dhan's chart), tick-built live candles, session gating, autoscale, or the last-price label looks or behaves wrong. Symptoms: a stop shown as a target, a TP / SL off-screen, a position with no line after reload, a 10x estimated P&L, an off-tick price from the chart, "NIFTY" on another instrument, Supertrend diagonals across the chart, indicator values that differ from TradingView.
+description: Use when building or changing a TradingView-style trading chart in rs_dashboard (lightweight-charts candles with orders and positions drawn on it) - the Index Scalper's ScalperChart, or a new page that wants one - or when a chart's position line, TP / SL line, working-order chip, drag-to-move bracket, price-scale "+" menu, chart hotkeys, indicator values (EMA, Supertrend, VWAP vs TradingView / Dhan's chart), tick-built live candles, session gating, autoscale, or the last-price label looks or behaves wrong. Symptoms: a stop shown as a target, a TP / SL off-screen, a position with no line after reload, a 10x estimated P&L, an off-tick price from the chart, "NIFTY" on another instrument, Supertrend diagonals across the chart, indicator values that differ from TradingView, OI bars or labels piling up, a change-in-OI bar of zero where there is no baseline, Quick Trade chips out of line or showing a dash on an untraded strike.
 ---
 
 # Dhan Trading Chart (lightweight-charts + order overlays)
@@ -21,7 +21,8 @@ Related skills:
 - `dhan-live-chart`: polled series, `update()` throwing, IST time axis, canvas theme hook.
 - `dhan-indicators`: the six Supertrend copies.
 - `dhan-floating-scalper-window`: one-click panels.
-- `dhan-broker-positions` and `dhan-terminal-position-ownership`: exit sizing and ownership.
+- `dhan-index-scalper`: the terminal around this chart (SIM/REAL, Dhan/Kotak order paths, exits, account panel).
+- `dhan-broker-positions`: broker payloads and exit sizing.
 - `dhan-crudeoil-trading`: MCX units.
 
 ## Where each feature lives
@@ -45,6 +46,7 @@ Related skills:
 | 1 / 2 chart layout, per-pane instrument + timeframe | `ChartPane.tsx` (pane header, filters, contract binding); layout + panes in `indexScalper.layout.v1` |
 | What a pane plots; which legs / orders / TP-SL belong on it | `lib/indexScalperChartSource.ts`: `resolveSource` (strike pinned once resolved, ATM fallback), `legOnChart`, `bracketsOnChart`, `orderOnChart` (by `OrderRowView.securityId`, `isOption`) |
 | Quick Trade (live C / P chips on every strike in view, Buy / Sell in one click) | `QuickStrikeOverlay.tsx` over underlying panes; pure rules `lib/indexScalperQuickTrade.ts` (`visibleStrikeRows`, `clampQuickSettings`); header switch, off by default |
+| Call / Put OI profile (Total or Chg) | `lib/indexScalperOiProfile.ts` (`oiProfileKey`, label placement, `fmtOI`); one overlay canvas in `ScalperChart.tsx`; header OI switch + Total / Chg |
 | Per-pane candles (underlying or one option's premium) | `useChartBars.ts`; route `candles?kind=option&securityId=` (NSE_FNO/OPTIDX, MCX_COMM/OPTFUT) |
 | Placing / moving brackets (SIM and REAL) | `IndexScalperTerminal.tsx`: `onSetBracket`, `onCancelBracket`, `onReversePosition`, `onPlaceChartOrder` |
 
@@ -171,18 +173,27 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
 - **Overlays read the chart's geometry, they do not re-render it.** `ScalperChart` fills `viewportRef`
   (`priceToY`, `plotWidth`, `plotHeight`); the overlay polls it every 150 ms and re-renders itself on price pushes.
   Passing live premiums as chart props would re-render the memoised chart on every tick.
-- **Live prices only** on a chip (`ltpById`); no live tick (outside the bridge window, stale feed, closed market) shows
-  `—` and the popup's Buy / Sell are disabled with the reason. Never a snapshot or `prev_close`.
-- **Every strike in view**, thinned by doubling steps from ATM when they are closer than 24 px (ATM always kept), so
-  chips never overlap.
+- **Live prices trade; previous close only displays** (`47cbbaa6`): a chip prices from `ltpById`. A strike with no
+  trade on the live feed (LTP 0, common on deep-ITM CRUDEOILM) shows the chain's last price, else its previous
+  close, **dimmed and marked not live**, and its
+  Buy / Sell stay disabled with the reason until a live tick arrives. No price at all shows `—`.
+- **Strikes shown:** only ATM ± n (setting "Strikes around ATM (±)", 1..50, default 10; `clampQuickSettings`), and of
+  those every strike in view, thinned by doubling steps from ATM when closer than 24 px (ATM always kept).
+- **Fixed-width columns** (`908a8e17`): strike label, C/P badge and premium have fixed widths (premium right-aligned) and
+  all rows share ONE right edge, so a wide position chip moves the whole ladder instead of knocking one row out of line.
 - **Orders** go through the terminal's `onTradeContract` -> `placeContract` (lot cap, session, live price, broker routing,
   `isx`), market, at once; one order per click (overlay latch + `oneClickBusyRef`). Lots per click come from a select
   (Buy and Sell separately), never a typed box (`dhan-commit-on-blur`).
 - **Placement**: chips sit `CHIPS_RIGHT` (430 px) from the right, clear of the OI bars and a plain position chip, pulled
   right on a narrow pane so they never leave the plot. A row holding a position measures that chip (it grows with TP /
   SL badges) and sits just left of it.
-- **Trade control**: a click on a chip shows two small B / S buttons beside it (lots and any refusal reason in the
-  tooltip), not a panel.
+- **Trade control**: a click on a chip shows two small B / S buttons, opening to the LEFT of the chip (on the right a
+  strike's position chip covered them, so a straddle's second leg could not be traded), lots and any refusal reason in
+  the tooltip, not a panel.
+- **Per-leg chips** (`b752a099`): each leg is independent, even CE and PE on one strike, labelled "S CE 25350" /
+  "B PE 25350" with - / + around its lot count. "+" = one lot more through the one-click path; "-" = one lot off
+  through the exit path (fresh broker read, any owner, Kotak freeze slices / unknown hold; see `dhan-index-scalper`);
+  "-" is disabled at one lot (Exit closes the leg). SIM fills one lot the other way.
 - **Target / stop on a strike position** (`PremiumBracketControls.tsx`, rules `lib/indexScalperPremiumBrackets.ts`):
   typed as a PREMIUM on the position chip, never dragged on the index axis. Validated against the LIVE premium (a long's
   target above it, stop below; a short's the other way; none without a live premium) and the option tick
@@ -191,6 +202,19 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
   × cancels. Those orders are not drawn as lines on the index axis.
 - **Option P&L on the index chart** comes from premiums (`legPremiumPnl`), "—" without a live premium. It used to fall
   back to index points x units, and its % was an index-point ratio.
+
+### OI profile (Call / Put OI at each strike)
+- **Display only**, on the index / future pane, never on an option premium pane. Calls red above the strike level,
+  Puts green below, one shared scale, the largest of each side highlighted. Source: the live chain, else Dhan's
+  snapshot.
+- **One overlay canvas, repainted only when OI or the view geometry changes**; the chart re-renders only when
+  `oiProfileKey` changes. Ticks that move no OI cost nothing (`f2c35c97`).
+- **Change mode is exact from the previous-day OI** (`62a52113`): the bridge emits `prev_oi` (additive field) and the
+  REST snapshot passes `previous_oi`. `oi_chg_pct` 0.0 cannot tell "no change" from "no baseline", so a strike with no
+  baseline gets **no bar, never a zero**; a bridge started before `prev_oi` existed is read from a non-zero
+  `oi_chg_pct` only, and the pane says when no previous-day OI exists. Added OI = filled bar, shed OI = outline.
+- **Labels by priority** (`b752a099`): largest Call / Put first, then by OI; a label that would touch another is
+  dropped, so zoomed out they do not pile up.
 
 ### Price-scale "+" menu and hotkeys
 - **Hover:** within the price axis band, show a "+" at the snapped price (use the instrument's tick, never a
@@ -233,8 +257,8 @@ so the page itself re-renders on every frame that has a push. Everything below k
   `useState({ day: istDayKey() })` builds an `Intl` formatter on every render.
 - **Costs measured on 13k one-minute bars:** default EMA + Supertrend recompute ≈3.4 ms; all eight indicators ≈16 ms.
   They recompute only when `bars` changes, and `applyTick` returns the same array when a tick doesn't move the bar.
-- **Order latency:** click to `fetch` is ≈1-2 ms. Nothing may be awaited before the send. Fresh reads (positions +
-  order book, in parallel) belong only to exits, where the ownership rules need them.
+- **Order latency:** click to `fetch` is ≈1-2 ms. Nothing may be awaited before the send. A fresh read belongs only to exits
+  (positions; plus Kotak's order book for the unknown-outcome hold).
 - **How to measure:**
   - Run a throwaway Playwright spec on the dev server: mock prices moving every 100 ms, 13k bars, a REAL position
     with a TP and an SL.
@@ -286,5 +310,7 @@ so the page itself re-renders on every frame that has a push. Everything below k
 | NSE-only session check | Crude evening candles frozen | `inMarketSession(underlying, …)` |
 | Fill from a snapshot or `prev_close` | Paper fills at stale prices | live-only `ltpById` + `feedAgeSec` |
 | e2e against `next start` | "Unchanged" results after edits | dev server on :3100 |
+| OI change drawn from `oi_chg_pct` alone | Zero bars on strikes with no baseline | `prev_oi`; no baseline -> no bar |
+| Quick Trade row widths vary with content | One strike's chips out of line | fixed-width columns, one shared right edge |
 | Inline arrow / price-bearing object as a chart prop | Chart re-renders on every feed push | `useCallback`, identity-only memo, `legsKey` |
 | Full redraw while the forming bar stays flipped | Long tasks on every tick after a Supertrend flip | `recolor`: re-send only the coloured series |

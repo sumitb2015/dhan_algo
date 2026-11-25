@@ -91,6 +91,12 @@ all). If a new OI panel is built against a data source that doesn't populate one
 fields, check which of the two documented behaviors it should replicate rather than inventing
 a third.
 
+**The live options bridge** (`live_options_ws.py`, `debug/live_options_quotes_*.json` and its WS push) carries
+`prev_oi` per side since `62a52113` (0 = no baseline). Its `oi_chg_pct` reads 0.0 both for "no change" and for "no
+baseline", so take the change as `oi - prev_oi` only when `prev_oi > 0`, and show no value (never 0) otherwise. A
+bridge started before that commit sends no `prev_oi`: trust only a non-zero `oi_chg_pct` there. The Index Scalper's
+OI profile (`lib/indexScalperOiProfile.ts`, see `dhan-trading-chart`) is the reference reader.
+
 ## `get_ohlc_data()` never returns OI — use `get_quote_data()`
 
 `DhanHelper.get_ohlc_data()` (`lib/dhan_helper.py:3222-3226`) returns only `last_price` and
