@@ -492,6 +492,63 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('Quick Trade REAL: a stop placed elsewhere shows as the leg\'s SL, and its x asks before cancelling it', async ({ page, context }) => {
+    const state = newState();
+    state.positions = [{
+      tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY',
+      netQty: 65, buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG',
+    }];
+    state.orders = [{
+      orderId: 'STG1', correlationId: 'stg01', securityId: '302', tradingSymbol: 'NIFTY-Dec2026-25350-CE', productType: 'INTRADAY',
+      transactionType: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 185, price: 0, quantity: 65, filledQty: 0, orderStatus: 'PENDING',
+      drvOptionType: 'CALL', drvStrikePrice: 25350, drvExpiryDate: '2026-12-01', exchangeSegment: 'NSE_FNO',
+    }];
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
+    // the strategy's stop shows as the leg's SL
+    await expect(chip.getByTestId('premium-sl')).toContainText('SL 185.00', { timeout: 15_000 });
+    await chip.getByRole('button', { name: 'Cancel SL CE 25350' }).click();
+    // its x asks first (not this page's order); keep it
+    const ask = page.getByRole('alertdialog', { name: 'Cancel an order placed elsewhere' });
+    await expect(ask).toContainText('order STG1');
+    await ask.getByRole('button', { name: 'Keep it' }).click();
+    expect(state.calls.filter(c => c.path === '/api/scalper/orders')).toEqual([]);
+    expect(state.calls.filter(c => c.path === '/api/scalper/fast-order')).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('Quick Trade REAL "-": sized off the fresh broker row, so a position reduced elsewhere still keeps one lot', async ({ page, context }) => {
+    const state = newState();
+    const row = { tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY', buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG' };
+    state.positions = [{ ...row, netQty: 195 }];
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    await page.getByRole('button', { name: 'Quick Trade settings' }).click();
+    await page.getByRole('combobox', { name: 'Lots per plus or minus' }).selectOption('2');
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
+    await expect(chip.getByTestId('position-lots')).toHaveText('3', { timeout: 15_000 });
+    // the mobile app sold one lot: the broker now holds 2; the chip may still say 3
+    state.positions = [{ ...row, netQty: 130 }];
+    await chip.getByRole('button', { name: 'Fewer lots CE 25350' }).click();
+    await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/fast-order').length, { timeout: 15_000 }).toBe(1);
+    // step 2 on a fresh 2-lot row takes 1 lot (one stays), never the whole 130
+    expect(state.calls.find(c => c.path === '/api/scalper/fast-order')!.body).toMatchObject({ securityId: '302', side: 'SELL', quantity: 65 });
+    await expect(page.getByRole('status').filter({ hasText: 'taken off' })).toContainText('1 lot taken off');
+    expect(state.blocked).toEqual([]);
+  });
+
   test('Quick Trade straddle: CE and PE sold on one strike are independent legs, each labelled, with its own +/- lots', async ({ page, context }) => {
     const state = newState();
     await signIn(context);

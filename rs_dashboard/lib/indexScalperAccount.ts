@@ -80,6 +80,9 @@ export interface OrderRowView {
   /** Still working at the exchange: the panel and chart may cancel it, whoever placed it (this page, the mobile app,
    *  another terminal or a strategy). */
   cancellable: boolean;
+  /** Placed by this page (`isx` correlationId; Kotak: a recorded order ID, mapped to `isx-kotak`). Cancelling any
+   *  other order asks first, and a TP / SL from this page never replaces it. */
+  own: boolean;
 }
 
 function isOptionOrder(o: Row): boolean {
@@ -118,6 +121,7 @@ export function orderRows(orders: Row[]): OrderRowView[] {
       bucket,
       reason: String(o.omsErrorDescription ?? '').trim(),
       cancellable: bucket === 'open',
+      own: String(o.correlationId ?? '').startsWith('isx'),
     };
   }).sort((a, b) => (a.sortKey < b.sortKey ? 1 : a.sortKey > b.sortKey ? -1 : 0));
 }

@@ -216,6 +216,12 @@ test.describe('Index Scalper', () => {
     await expect(page.getByTestId('position-chip')).toHaveCount(2, { timeout: 15_000 });
 
     await page.getByRole('button', { name: 'Exit All' }).click();
+    // the MARGIN row was not opened from this page: Exit All lists it and asks first; nothing is sent yet
+    const ask = page.getByRole('alertdialog', { name: 'Exit all including positions opened elsewhere' });
+    await expect(ask.getByTestId('exit-all-elsewhere')).toHaveText(/PE 25350 MARGIN · -65/);
+    await expect(ask.getByTestId('exit-all-elsewhere').locator('li')).toHaveCount(1);
+    expect(state.calls.length).toBe(0);
+    await ask.getByRole('button', { name: /^Close all/ }).click();
     await expect(page.getByRole('status').filter({ hasText: 'Exit All' })).toContainText('Exit All sent for 2 leg(s)', { timeout: 15_000 });
     expect(state.calls.length).toBe(2);
     expect(state.calls.map(c => c.body?.productType).sort()).toEqual(['INTRADAY', 'MARGIN']);
@@ -417,6 +423,13 @@ test.describe('Index Scalper', () => {
     for (const t of ['NSE', 'Sell', 'Limit', 'Normal', '65', '180.00', 'CANCELLED', '2152611247467']) await expect(row).toContainText(t);
     await panel.getByRole('button', { name: 'All 3' }).click();
     await expect(panel.getByRole('button', { name: 'Cancel order 888' })).toHaveCount(1); // a strategy's order: cancellable too
+    // ...but only after a confirmation; "Keep it" sends nothing
+    await panel.getByRole('button', { name: 'Cancel order 888' }).click();
+    const ask = page.getByRole('alertdialog', { name: 'Cancel an order placed elsewhere' });
+    await expect(ask).toContainText('order 888');
+    await ask.getByRole('button', { name: 'Keep it' }).click();
+    await expect(ask).toHaveCount(0);
+    expect(state.cancels ?? []).toEqual([]);
     await expect(panel.getByRole('button', { name: 'Cancel order 2152611247467' })).toHaveCount(0); // cancelled already
     await panel.getByRole('button', { name: 'Cancel order 777' }).click();
     await expect.poll(() => state.cancels ?? []).toEqual(['777']);

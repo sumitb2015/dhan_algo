@@ -74,3 +74,15 @@ test('TP / SL box: a premium, or a % of the entry premium (ending in %) on the s
   assert.equal(parseBracketInput('150%', 'SL', false, 200, 0.05).price, 500); // a short's stop above entry has no cap
   assert.notEqual(parseBracketInput('20%', 'TP', true, 0, 0.05).error, null);
 });
+
+test('TP / SL box: plain decimals only, and a % never rounds onto (or past) the entry', () => {
+  // Number() would read these as 1000 and 16
+  for (const t of ['1e3', '0x10', '1e1%', '12abc', '1,5']) assert.notEqual(parseBracketInput(t, 'TP', true, 200, 0.05).error, null, t);
+  assert.equal(parseBracketInput('.5', 'TP', true, 0.2, 0.05).price, 0.5);
+  // cheap premium, entry 0.20, tick 0.05: 10% = 0.22 / 0.18 -> rounded AWAY from entry (0.25 / 0.15), never 0.20
+  assert.equal(parseBracketInput('10%', 'TP', true, 0.2, 0.05).price, 0.25);
+  assert.equal(parseBracketInput('10%', 'SL', true, 0.2, 0.05).price, 0.15);
+  assert.equal(parseBracketInput('10%', 'TP', false, 0.2, 0.05).price, 0.15);
+  // exact tick multiples stay put (no float drift up a tick)
+  assert.equal(parseBracketInput('50%', 'TP', true, 0.2, 0.1).price, 0.3);
+});

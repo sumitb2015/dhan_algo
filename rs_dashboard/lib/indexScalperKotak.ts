@@ -88,7 +88,8 @@ export function withResolvedUnknowns(records: KotakRecord[], book: Record<string
 }
 
 /** Signed filled units per `symbol|product` over the orders this page recorded, from Kotak's shaped order book
- *  (lib/kotakShape.ts shapeKotakOrder rows). A fill with no filled quantity on a TRADED order counts its quantity;
+ *  (lib/kotakShape.ts shapeKotakOrder rows). It does not gate exits (any position may be closed): it tells which rows
+ *  hold quantity opened elsewhere, for Exit All's confirmation (`legsOpenedElsewhere`). A fill with no filled quantity on a TRADED order counts its quantity;
  *  a row whose fill is unknown counts nothing. The page's own exits are recorded too, so they net ownership down. */
 export function ownedQtyFromKotakOrders(book: Record<string, unknown>[], recordsIn: KotakRecord[]): Map<string, number> {
   // An unknown outcome whose order has since shown up in the book is this page's order like any other.

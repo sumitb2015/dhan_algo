@@ -485,8 +485,11 @@ function ScalperChart(props: Props) {
   useEffect(() => {
     const chart = chartRef.current;
     const b = barsRef.current;
-    if (!chart || resetDoneRef.current === resetSeq) return;
+    if (resetDoneRef.current === resetSeq) return;
+    // Consumed even when there is no chart yet (a pane still mounting starts auto-scaled anyway): otherwise a pending
+    // click would fire later on an unrelated range change and undo a zoom made since.
     resetDoneRef.current = resetSeq;
+    if (!chart) return;
     chart.priceScale('right').applyOptions({ autoScale: true });
     if (b.length === 0) return;
     const ts = chart.timeScale();

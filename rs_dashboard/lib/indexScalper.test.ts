@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyFill, tickError, legAnchor, legPnl, legsFromDhanPositions, orderUnits, brokerCloseOrder, parseNiftyOption, pnlSummary, totalPnl,
+  applyFill, tickError, legAnchor, legPnl, legsFromDhanPositions, orderUnits, brokerCloseOrder, legsOpenedElsewhere, pageFilledQty, parseNiftyOption, pnlSummary, totalPnl,
   type ScalperLeg,
 } from './indexScalperPositions.ts';
 import { applyTick, computeIndicator, flipsAtLast, mergeHistory, migrateIndicatorsV1, pointColor, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
@@ -56,6 +56,21 @@ test('close order takes the whole broker row whoever opened it, opposite side, n
   assert.deepEqual(brokerCloseOrder(130), { side: 'SELL', units: 130 });
   assert.equal(brokerCloseOrder(0), null);
   assert.equal(brokerCloseOrder(Number.NaN), null);
+});
+
+test('legs opened elsewhere: more than this page\'s isx fills in the leg\'s direction (Exit All asks before closing them)', () => {
+  const orders = [
+    { correlationId: 'isxk1', securityId: '111', productType: 'INTRADAY', transactionType: 'SELL', filledQty: 65 },
+    { correlationId: 'mlfxyz', securityId: '111', productType: 'INTRADAY', transactionType: 'SELL', filledQty: 650 }, // another terminal
+    { correlationId: 'isxk2', securityId: '222', productType: 'MARGIN', transactionType: 'BUY', filledQty: 130 },
+  ];
+  const opened = pageFilledQty(orders);
+  assert.equal(opened.get('111|INTRADAY'), -65);
+  assert.equal(opened.has('111|MARGIN'), false);
+  const L = (id: string, netQty: number, sim = false) => ({ id, securityId: id.split('|')[0], product: id.split('|')[1], symbol: '', strike: 25000, type: 'CE' as const, netQty, avg: 100, ltp: 100, sim, mult: 1 });
+  const legs = [L('111|INTRADAY', -715), L('222|MARGIN', 130), L('333|INTRADAY', 65), L('444|INTRADAY', 65, true)];
+  assert.deepEqual(legsOpenedElsewhere(legs, opened).map(l => l.id), ['111|INTRADAY', '333|INTRADAY']); // 222 fully ours; SIM ignored
+  assert.deepEqual(legsOpenedElsewhere([L('222|MARGIN', -130)], opened).map(l => l.id), ['222|MARGIN']); // opposite side: not ours
 });
 
 test('applyFill blends adds, keeps avg on reduce, resets on flip and flat', () => {

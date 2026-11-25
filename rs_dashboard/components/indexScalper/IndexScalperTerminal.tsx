@@ -24,7 +24,7 @@ import OrderTicket, { type TicketRequest, type TicketOrderType } from './OrderTi
 import DhanScalperWidget from './DhanScalperWidget';
 import AccountPanel from './AccountPanel';
 import {
-  fundsView, holdingRows, orderRows, positionRows, symbolLabel, type FundsView, type PositionRowView,
+  fundsView, holdingRows, orderRows, positionRows, symbolLabel, type FundsView, type OrderRowView, type PositionRowView,
 } from '@/lib/indexScalperAccount';
 import IndicatorPicker from './IndicatorPicker';
 import { useIndexScalperFeed } from './useIndexScalperFeed';
@@ -36,11 +36,11 @@ import {
   INSTRUMENTS, dhanOrderQty, kotakOrderQty, pnlMultiplier, lotUnits, qtyLots, nrmlOnly, openingProduct, type Underlying,
 } from '@/lib/indexScalperInstrument';
 import {
-  MAX_LOTS, applyFill, brokerCloseOrder, legsFromDhanPositions, legsKey, orderUnits, type ScalperLeg,
+  MAX_LOTS, applyFill, brokerCloseOrder, legsFromDhanPositions, legsKey, legsOpenedElsewhere, orderUnits, pageFilledQty, type ScalperLeg,
 } from '@/lib/indexScalperPositions';
 import { closeOrderProduct } from '@/lib/positionProduct';
 import {
-  dashProduct, freezeSlices, heldByUnknown, kotakOrdersAsDhan, legsFromKotakPositions, recordedIds,
+  dashProduct, freezeSlices, heldByUnknown, kotakOrdersAsDhan, legsFromKotakPositions, ownedQtyFromKotakOrders, recordedIds,
   withResolvedUnknowns, type KotakRecord, type KotakSymbolInfo,
 } from '@/lib/indexScalperKotak';
 import { readPref, savePref } from '@/lib/localPref';
@@ -176,6 +176,9 @@ export default function IndexScalperTerminal() {
 
   const [real, setReal] = useState(false);
   const [armOpen, setArmOpen] = useState(false);
+  // Confirmations for touching what this page did not open: Exit All over such legs, a Cancel on another placer's order.
+  const [exitAllAsk, setExitAllAsk] = useState<ScalperLeg[] | null>(null);
+  const [cancelAsk, setCancelAsk] = useState<OrderRowView | null>(null);
   const [sim, setSim] = useState<SimState>(() => ({ day: istDayKey(), legs: {}, realized: 0 }));
   const [simReady, setSimReady] = useState(false);
   const [simBrackets, setSimBrackets] = useState<Record<string, { tp?: number; sl?: number }>>({});
@@ -720,8 +723,19 @@ export default function IndexScalperTerminal() {
     } finally { setExitingId(null); }
   }, [exitingId, real, exitSimLeg, readExitState, exitRealRow, loadPositions, flash]);
 
-  const exitAll = useCallback(async () => {
+  // Quantity this page's own orders filled today, per leg id: only to say which legs Exit All would close that were opened
+  // elsewhere (exits themselves close any position). Read from the polled order book (at most one poll old).
+  const openedHere = useMemo(
+    () => (broker === 'kotak' ? ownedQtyFromKotakOrders(orderBook, kotakRecords) : pageFilledQty(orderBook)),
+    [broker, orderBook, kotakRecords],
+  );
+  const exitAll = useCallback(async (confirmed = false) => {
     if (exitingId || legs.length === 0) return;
+    if (real && !confirmed) {
+      const elsewhere = legsOpenedElsewhere(legs, openedHere);
+      if (elsewhere.length) { setExitAllAsk(elsewhere); return; }
+    }
+    setExitAllAsk(null);
     setExitingId('all');
     try {
       if (!real) {
@@ -748,7 +762,7 @@ export default function IndexScalperTerminal() {
       });
       loadPositions();
     } finally { setExitingId(null); }
-  }, [exitingId, legs, real, exitSimLeg, readExitState, exitRealRow, loadPositions, flash]);
+  }, [exitingId, legs, real, openedHere, exitSimLeg, readExitState, exitRealRow, loadPositions, flash]);
 
   // ── one-click scalper (buy ATM CE / PE) ────────────────────────────
   const atmContract = useCallback((type: 'CE' | 'PE'): PickedContract | null => {
@@ -772,7 +786,7 @@ export default function IndexScalperTerminal() {
   }, [feed.quotes, feed.strikeIds, feed.kotak, feed.expiry]);
 
   /** Cancel any working order on the broker's book (this page's, the mobile app's, another terminal's). */
-  const cancelOrder = useCallback(async (orderId: string) => {
+  const sendCancel = useCallback(async (orderId: string) => {
     if (cancellingId) return;
     setCancellingId(orderId);
     try {
@@ -788,6 +802,15 @@ export default function IndexScalperTerminal() {
       void loadOrders();
     }
   }, [cancellingId, flash, loadOrders]);
+  /** Cancel from the panel / chart: this page's own order at once; any other placer's (a strategy's stop, the mobile
+   *  app, another terminal) only after a confirmation, since on the chart it looks just like this page's own. */
+  const panelOrdersRef = useRef(panelOrders);
+  useEffect(() => { panelOrdersRef.current = panelOrders; });
+  const cancelOrder = useCallback(async (orderId: string) => {
+    const row = panelOrdersRef.current.find(o => o.id === orderId);
+    if (row && !row.own) { setCancelAsk(row); return; }
+    await sendCancel(orderId);
+  }, [sendCancel]);
 
   // One click, one order: a ref (not state) so a fast double click cannot send twice before React re-renders.
   const oneClickBusyRef = useRef(false);
@@ -954,16 +977,23 @@ export default function IndexScalperTerminal() {
     const oppSide: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
     const targetType: TicketOrderType = req.kind === 'TP' ? 'LIMIT' : 'STOP_LOSS_MARKET';
 
-    // Cancel any existing bracket order of this kind on THIS contract (never another contract's order of the underlying)
-    const existing = chartOpenOrders.find(o => {
+    // Replace this page's own bracket order of this kind on THIS contract (never another contract's). Another placer's
+    // order of the same kind (a strategy's resting stop) is never cancelled from here: two would both close the leg.
+    const sameKind = chartOpenOrders.filter(o => {
       if (o.side !== oppSide || !o.securityId || o.securityId !== req.leg.securityId) return false;
       const ot = (o.orderType || '').toUpperCase();
       const isLimit = ot.includes('LIMIT');
       const isStop = ot.includes('SL') || ot.includes('STOP');
       return req.kind === 'TP' ? isLimit : isStop;
     });
+    const foreign = sameKind.find(o => !o.own);
+    if (foreign) {
+      flash({ ok: false, text: `A ${req.kind === 'TP' ? 'target' : 'stop'} placed elsewhere (order ${foreign.id}) already works on ${req.leg.type} ${req.leg.strike}: cancel it first (Orders), nothing sent` });
+      return;
+    }
+    const existing = sameKind.find(o => o.own);
     if (existing) {
-      await cancelOrder(existing.id);
+      await sendCancel(existing.id);
     }
 
     const c: PickedContract = (req.leg.type === 'FUT' && chartContract)
@@ -997,7 +1027,7 @@ export default function IndexScalperTerminal() {
     });
     flash({ ok: out.ok, text: out.text });
     void loadOrders();
-  }, [real, chartOpenOrders, chartContract, cancelOrder, feed.expiry, feed.lotSize, underlying, placeContract, flash, loadOrders]);
+  }, [real, chartOpenOrders, chartContract, sendCancel, feed.expiry, feed.lotSize, underlying, placeContract, flash, loadOrders]);
 
   const onCancelBracket = useCallback(async (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => {
     if (req.orderId) {
@@ -1128,20 +1158,25 @@ export default function IndexScalperTerminal() {
     }
     // One lot in the leg's own quantity unit (Dhan MCX counts lots, Kotak / SIM / NSE count contract units).
     const brokerUnitsPerLot = contractUnits / (leg.mult && leg.mult > 0 ? leg.mult : 1);
-    const n = lotsToRemove(step, Math.abs(leg.netQty) / brokerUnitsPerLot);
-    if (n === 0) { flash({ ok: false, text: 'One lot left: use Exit (x) to close the leg' }); return; }
+    const oneLeft = 'One lot left: use Exit (x) to close the leg';
+    if (lotsToRemove(step, Math.abs(leg.netQty) / brokerUnitsPerLot) === 0) { flash({ ok: false, text: oneLeft }); return; }
     setExitingId(leg.id);
     try {
       let out: Outcome;
+      let n = 0;
       if (!real || leg.sim) {
+        n = lotsToRemove(step, Math.abs(leg.netQty) / brokerUnitsPerLot);
         out = await placeContract({ contract: c, side: isLong ? 'SELL' : 'BUY', orderType: 'MARKET', price: null, trigger: null, product, lots: n, closesLeg: true });
       } else {
+        // Sized off the FRESH broker row, not the chip: if the mobile app / a strategy reduced the position since, the
+        // step is re-cut so one lot still stays (sizing off the chip could close the whole leg).
         const st = await readExitState();
+        const row = typeof st === 'string' ? undefined : st.live.find(l => l.id === leg.id);
+        n = row ? lotsToRemove(step, Math.abs(row.netQty) / brokerUnitsPerLot) : 0;
         if (typeof st === 'string') out = { ok: false, text: st };
-        else {
-          const row = st.live.find(l => l.id === leg.id);
-          out = row ? await exitRealRow(row, st.records, st.book, n * brokerUnitsPerLot) : { ok: false, text: 'Position not found at the broker' };
-        }
+        else if (!row) out = { ok: false, text: 'Position not found at the broker' };
+        else if (n === 0) out = { ok: false, text: oneLeft };
+        else out = await exitRealRow(row, st.records, st.book, n * brokerUnitsPerLot);
         loadPositions();
       }
       flash({ ok: out.ok, text: out.ok ? `${leg.type} ${leg.strike}: ${n} lot${n === 1 ? '' : 's'} taken off` : out.text });
@@ -1311,7 +1346,7 @@ export default function IndexScalperTerminal() {
           <button type="button" aria-label="Reset scale" title="Reset scale: auto-scale the price axis and fit the time axis (undo a manual zoom)"
             onClick={() => { setAutoScale(true); setResetSeq(n => n + 1); }} className={btn}><Scaling className="w-4 h-4" /></button>
           <button type="button" aria-label="Refresh candles" title="Refresh candles" onClick={() => setRefreshTick(n => n + 1)} className={btn}><RefreshCw className={cn('w-4 h-4', loadingBars && 'animate-spin')} /></button>
-          <button type="button" disabled={legs.length === 0 || exitingId !== null} onClick={exitAll}
+          <button type="button" disabled={legs.length === 0 || exitingId !== null} onClick={() => void exitAll()}
             className="h-7 px-2 rounded border border-rose-500/70 text-rose-300 hover:bg-rose-500/10 text-xs font-bold disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400">
             Exit All
           </button>
@@ -1471,6 +1506,34 @@ export default function IndexScalperTerminal() {
       <IndicatorPicker open={pickerOpen} indicators={indicators} editId={editId} onAdd={addIndicator} onChange={patchIndicator}
         onRemove={removeIndicator} onEdit={setEditId} onClose={() => { setPickerOpen(false); setEditId(null); }} />
 
+      {exitAllAsk && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-oncolor-dark/70">
+          <div role="alertdialog" aria-label="Exit all including positions opened elsewhere" className="w-[420px] rounded-lg border border-rose-500/70 bg-zinc-900 p-5 shadow-2xl">
+            <h2 className="text-sm font-bold text-rose-300 mb-2">Exit All will also close positions not opened from this page</h2>
+            <p className="text-xs text-zinc-300 mb-2">These were opened elsewhere (a strategy, another terminal, the mobile app) or before today. A running strategy is not told and will still think it holds them.</p>
+            <ul data-testid="exit-all-elsewhere" className="mb-4 max-h-40 overflow-auto text-xs font-mono text-zinc-200">
+              {exitAllAsk.map(l => <li key={l.id}>{l.type} {l.strike} {l.product || ''} · {l.netQty > 0 ? '+' : ''}{l.netQty}</li>)}
+            </ul>
+            <div className="flex justify-end gap-2">
+              <button type="button" autoFocus onClick={() => setExitAllAsk(null)} className="h-8 px-3 rounded text-xs font-semibold text-zinc-300 hover:bg-zinc-800">Cancel</button>
+              <button type="button" onClick={() => void exitAll(true)} className="h-8 px-3 rounded bg-rose-600 hover:bg-rose-500 text-oncolor text-xs font-bold">Close all {legs.length} leg{legs.length === 1 ? '' : 's'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {cancelAsk && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-oncolor-dark/70">
+          <div role="alertdialog" aria-label="Cancel an order placed elsewhere" className="w-[400px] rounded-lg border border-amber-500/70 bg-zinc-900 p-5 shadow-2xl">
+            <h2 className="text-sm font-bold text-amber-300 mb-2">Cancel an order this page did not place?</h2>
+            <p className="text-xs text-zinc-300 mb-2">It may be a strategy&apos;s or another terminal&apos;s stop protecting a position: cancelling it leaves that position without it.</p>
+            <p className="mb-4 text-xs font-mono text-zinc-200">{cancelAsk.symbol} · {cancelAsk.side} {cancelAsk.qty ?? ''} {cancelAsk.orderType} {cancelAsk.price ?? cancelAsk.trigger ?? ''} · order {cancelAsk.id}</p>
+            <div className="flex justify-end gap-2">
+              <button type="button" autoFocus onClick={() => setCancelAsk(null)} className="h-8 px-3 rounded text-xs font-semibold text-zinc-300 hover:bg-zinc-800">Keep it</button>
+              <button type="button" onClick={() => { const id = cancelAsk.id; setCancelAsk(null); void sendCancel(id); }} className="h-8 px-3 rounded bg-amber-600 hover:bg-amber-500 text-oncolor text-xs font-bold">Cancel order {cancelAsk.id}</button>
+            </div>
+          </div>
+        </div>
+      )}
       {armOpen && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-oncolor-dark/70">
           <div role="alertdialog" aria-label="Arm real orders" className="w-[380px] rounded-lg border border-rose-500/70 bg-zinc-900 p-5 shadow-2xl">

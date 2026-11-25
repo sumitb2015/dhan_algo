@@ -101,6 +101,37 @@ export const ISX_SOURCE = 'isx';
 
 export const ownKey = (securityId: string, product: string) => `${securityId}|${product.toUpperCase()}`;
 
+/** Signed units this page's own (`isx`-tagged) orders FILLED today per `ownKey(securityId, product)`, from Dhan's order
+ *  book, net of its own exits. Exits do NOT depend on it (any position may be closed); it only tells which rows hold
+ *  quantity opened elsewhere, so Exit All can say so before it closes them (`legsOpenedElsewhere`). */
+export function pageFilledQty(orders: Record<string, unknown>[], source = ISX_SOURCE): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const o of orders) {
+    if (!String(o.correlationId ?? '').startsWith(source)) continue;
+    const filled = Number(o.filledQty);
+    if (!Number.isFinite(filled) || filled <= 0) continue;
+    const side = String(o.transactionType ?? '').toUpperCase();
+    if (side !== 'BUY' && side !== 'SELL') continue;
+    const securityId = String(o.securityId ?? '');
+    if (!securityId) continue;
+    const k = ownKey(securityId, String(o.productType ?? ''));
+    out.set(k, (out.get(k) ?? 0) + (side === 'BUY' ? filled : -filled));
+  }
+  return out;
+}
+
+/** Legs holding quantity this page did not open (a strategy, another terminal, the mobile app): more than this page's
+ *  own filled quantity in the leg's direction. `opened` is `pageFilledQty` (Dhan) or `ownedQtyFromKotakOrders`, keyed
+ *  like `leg.id`. Display / confirmation only. */
+export function legsOpenedElsewhere(legs: ScalperLeg[], opened: Map<string, number>): ScalperLeg[] {
+  return legs.filter(l => {
+    if (l.sim || !Number.isFinite(l.netQty) || l.netQty === 0) return false;
+    const mine = opened.get(l.id) ?? 0;
+    const sameSide = Math.sign(mine) === Math.sign(l.netQty) ? Math.abs(mine) : 0;
+    return Math.abs(l.netQty) > sameSide;
+  });
+}
+
 /** Close order for one broker row: its whole open quantity, side opposite to it. The page closes any position on its
  *  underlying, whoever opened it (this page, the mobile app, another terminal or a strategy); sizing off the broker's
  *  own row read right before the exit means the order can never flip the position. null when the row is flat. */

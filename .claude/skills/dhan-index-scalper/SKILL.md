@@ -52,11 +52,20 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
   another terminal, a strategy). The earlier `isx`-only ownership rule (`32b5bda2`) was removed at the owner's request
   ("there should not be any restrictions"). Do not reintroduce it without asking.
 - Size from a **fresh positions read** taken right before the exit (`readExitState` -> `brokerCloseOrder(netQty)`),
-  per security + product, so an exit can never flip a position. "-" caps that at one lot.
+  per security + product, so an exit can never flip a position.
+- The chip's "-" re-cuts its step from that FRESH row (`lotsToRemove(step, freshLots)`), never from the chip: sized off
+  the chip, a position the mobile app reduced since was closed in full (review 2026-11-25).
+- **Exit All asks first when it would close legs this page did not open** (`legsOpenedElsewhere` over `pageFilledQty`
+  / `ownedQtyFromKotakOrders` from the polled order book; carried-over legs count as elsewhere) and lists them. Legs
+  all opened here close at once. × on a single leg never asks.
 - Exit All: shorts first, then longs (a hedge is never gone while its short is open); stops at an unknown outcome.
 - Kotak keeps one guard: an order on the contract with an **unknown outcome holds its exit up to 60 s** until Kotak's
   order book shows it (`heldByUnknown`); closes above the freeze quantity go in whole-lot slices (`freezeSlices`).
-- Cancel is offered on **every** working order (panel and chart chips), not only `isx` ones.
+- Cancel is offered on **every** working order (panel and chart chips), but another placer's order (`OrderRowView.own`
+  false: not `isx`, not a recorded Kotak ID) asks first: on the chart a strategy's stop looks like the page's own.
+- A TP / SL set from this page replaces only **its own** order of that kind on the contract. If another placer's order
+  of that kind works there, it is refused with a message (two stops would both close the leg; cancelling theirs
+  silently left a short with no stop if the replacement was rejected).
 - Trade-off to state when asked: a running strategy's leg on the same contract can now be closed from here, and the
   strategy will not know.
 

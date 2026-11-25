@@ -29,6 +29,15 @@ export function premiumBracketsFor(leg: ScalperLeg, orders: OrderLike[], sim?: {
   return out;
 }
 
+const DECIMAL = /^(\d+(\.\d*)?|\.\d+)$/;
+
+/** Snap to the tick in one direction (`up` = ceil, else floor), tolerant of float noise (0.1 * 3 = 0.30000000000000004). */
+function snapAway(price: number, tick: number, up: boolean): number {
+  const steps = price / tick;
+  const n = up ? Math.ceil(steps - 1e-9) : Math.floor(steps + 1e-9);
+  return Number((n * tick).toFixed(2));
+}
+
 /** Snap to the premium tick (NSE options 0.05, MCX crude options 0.10). */
 export function snapPremium(price: number, tick: number): number {
   return Number((Math.round(price / tick) * tick).toFixed(2));
@@ -61,17 +70,22 @@ export function premiumBracketError(kind: 'TP' | 'SL', price: number, isLong: bo
  */
 export function parseBracketInput(text: string, kind: 'TP' | 'SL', isLong: boolean, avg: number, tick: number): { price: number | null; pct: number | null; error: string | null } {
   const t = text.trim();
+  // Plain decimals only: Number() would also read "1e3" as 1000 and "0x10" as 16, and send that as a real price.
   if (!t.endsWith('%')) {
-    const price = t === '' ? Number.NaN : Number(t);
-    return { price: Number.isFinite(price) ? price : null, pct: null, error: Number.isFinite(price) ? null : 'Enter a premium (245.50) or a % of entry (20%)' };
+    if (!DECIMAL.test(t)) return { price: null, pct: null, error: 'Enter a premium (245.50) or a % of entry (20%)' };
+    return { price: Number(t), pct: null, error: null };
   }
-  const pct = Number(t.slice(0, -1).trim());
-  if (t.slice(0, -1).trim() === '' || !Number.isFinite(pct) || pct <= 0) return { price: null, pct: null, error: 'Enter a percentage above 0, like 20%' };
+  const body = t.slice(0, -1).trim();
+  const pct = DECIMAL.test(body) ? Number(body) : Number.NaN;
+  if (!Number.isFinite(pct) || pct <= 0) return { price: null, pct: null, error: 'Enter a percentage above 0, like 20%' };
   if (!(avg > 0)) return { price: null, pct, error: 'No entry premium: type the premium instead' };
   const up = (kind === 'TP') === isLong;
   if (!up && pct >= 100) return { price: null, pct, error: 'Below entry by 100 % or more is a premium of 0 or less' };
-  const price = snapPremium(avg * (1 + (up ? pct : -pct) / 100), tick);
+  // Snap AWAY from entry (up for a level above it, down for one below): nearest-tick rounding could land a small
+  // percentage of a cheap premium on the entry itself (10% of 0.20 -> 0.20).
+  const price = snapAway(avg * (1 + (up ? pct : -pct) / 100), tick, up);
   if (!(price > 0)) return { price: null, pct, error: 'That percentage leaves no premium' };
+  if (Math.abs(price - avg) < 1e-9) return { price: null, pct, error: `${pct}% of ${avg.toFixed(2)} is under one tick: type the premium instead` };
   return { price, pct, error: null };
 }
 

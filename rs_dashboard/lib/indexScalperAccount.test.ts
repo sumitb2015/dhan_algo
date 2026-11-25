@@ -50,6 +50,7 @@ test('every working order can be cancelled from the panel, whoever placed it; ne
   ]);
   assert.deepEqual(rows.map(r => r.id), ['B', 'A', 'C']);
   assert.deepEqual(rows.map(r => r.cancellable), [true, true, false]);
+  assert.deepEqual(rows.map(r => r.own), [false, true, true]); // B is a strategy's (sgx), A and C this page's (isx)
   assert.deepEqual(orderCounts(rows).map(c => `${c.label} ${c.n}`), ['All 3', 'Open 2', 'Executed 1']);
 });
 
