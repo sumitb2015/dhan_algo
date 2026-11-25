@@ -425,6 +425,11 @@ export default function IndexScalperTerminal() {
     return id ? feed.ltpById.get(id) ?? null : null;
   }, [feed.expiry, feed.future, feed.strikeIds, feed.ltpById]);
   const kotakSymbols = feed.kotak?.symbols;
+  // For callbacks handed to the memoised chart: kotakPrice is rebuilt on every feed push (ltpById), so a callback that
+  // listed it as a dependency gave the chart a new prop 20-40 times a second (full chart re-render on every push).
+  const kotakPriceRef = useRef(kotakPrice);
+  const kotakSymbolsRef = useRef(kotakSymbols);
+  useEffect(() => { kotakPriceRef.current = kotakPrice; kotakSymbolsRef.current = kotakSymbols; });
 
   const legsRaw: ScalperLeg[] = useMemo(() => {
     if (real && broker === 'kotak') return legsFromKotakPositions(realRows, kotakSymbols ?? {}, kotakPrice, underlying);
@@ -1047,8 +1052,8 @@ export default function IndexScalperTerminal() {
     // The contract's live price: an option from the chain, the future from the feed; Kotak rows by their trading symbol.
     let ltp: number | null = null;
     if (kotak) {
-      const info = kotakSymbols?.[row.securityId];
-      ltp = info ? kotakPrice(info) : null;
+      const info = kotakSymbolsRef.current?.[row.securityId];
+      ltp = info ? kotakPriceRef.current(info) : null;
     } else if (f.future && f.future.dhanId === row.securityId) ltp = f.future.ltp ?? null;
     else ltp = f.ltpById.get(row.securityId) ?? null;
     const side = row.side as 'BUY' | 'SELL';
@@ -1087,7 +1092,7 @@ export default function IndexScalperTerminal() {
       modifyBusyRef.current = false;
       void loadOrders();
     }
-  }, [real, underlying, kotakSymbols, kotakPrice, flash, loadOrders]);
+  }, [real, underlying, flash, loadOrders]);
 
   const onCancelBracket = useCallback(async (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => {
     if (req.orderId) {

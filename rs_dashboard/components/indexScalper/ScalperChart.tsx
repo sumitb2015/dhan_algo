@@ -188,7 +188,13 @@ function ScalperChart(props: Props) {
   // A working order being dragged to a new price (chip or line), and the order whose edit popover is open.
   const [ordDrag, setOrdDrag] = useState<{ id: string; price: number; startPrice: number; side: string } | null>(null);
   const [ordEdit, setOrdEdit] = useState<OrderEditDraft | null>(null);
+  // A working order selected by a click on its line or chip: its line thickens and a round grip appears on it; only then
+  // does a drag move it (a stray click on the plot can no longer start one, and a near miss no longer pans the chart).
+  const [ordActive, setOrdActive] = useState<string | null>(null);
   const ordDragLineRef = useRef<IPriceLine | null>(null);
+  // The dragged-to price lives in a ref: the drag effect may re-run mid-drag, and a local would reset to the start, so
+  // a release then sent nothing ("sometimes it does not drag").
+  const ordDragPriceRef = useRef(0);
   const [hoverScale, setHoverScale] = useState<{ y: number; price: number } | null>(null);
   const plusRef = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<{ y: number; price: number } | null>(null);
@@ -244,6 +250,7 @@ function ScalperChart(props: Props) {
     });
     chartRef.current = chart;
     candleRef.current = candles;
+    const orderLines = orderLinesRef.current;
 
     chart.subscribeCrosshairMove((p: MouseEventParams<Time>) => {
       const d = p.seriesData.get(candles) as { open: number; high: number; low: number; close: number } | undefined;
@@ -304,6 +311,10 @@ function ScalperChart(props: Props) {
       }
       drawLinesRef.current = []; drawSeriesRef.current = [];
       sigRef.current = ''; prevRef.current = null;
+      // The order lines belong to this chart: forget them, or a re-created chart keeps "updating" the dead ones and never
+      // draws its own (no line under a working order's chip).
+      orderLines.clear();
+      ordDragLineRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -769,17 +780,18 @@ function ScalperChart(props: Props) {
     }
     const color = ordDrag.side === 'BUY' ? '#0ea5e9' : '#f43f5e';
     if (!ordDragLineRef.current) {
-      ordDragLineRef.current = candles.createPriceLine({ price: ordDrag.price, color, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'Move' });
+      ordDragLineRef.current = candles.createPriceLine({ price: ordDragPriceRef.current, color, lineWidth: 2, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'Move' });
     }
-    let price = ordDrag.price;
     const onMove = (e: MouseEvent) => {
       const raw = candles.coordinateToPrice(e.clientY - box.getBoundingClientRect().top);
       if (raw === null || !(raw > 0)) return;
-      price = Number((Math.round(raw / tickSize) * tickSize).toFixed(2));
+      const price = Number((Math.round(raw / tickSize) * tickSize).toFixed(2));
+      ordDragPriceRef.current = price;
       ordDragLineRef.current?.applyOptions({ price });
     };
     const finish = (send: boolean) => {
       const { id, startPrice } = ordDrag;
+      const price = ordDragPriceRef.current;
       setOrdDrag(null);
       if (send && Math.abs(price - startPrice) > 1e-9) void onModifyOrder?.({ orderId: id, level: price });
     };
@@ -795,6 +807,23 @@ function ScalperChart(props: Props) {
     };
   }, [ordDrag, onModifyOrder, tickSize]);
 
+  // A selected order is deselected by a click anywhere but on its own line, grip or chip, by Esc, or when it leaves the
+  // book (filled / cancelled).
+  // (derived: an order that left the book is simply no longer selected)
+  const activeOrd = ordActive !== null && regularOrders.some(o => o.id === ordActive) ? ordActive : null;
+  useEffect(() => {
+    if (!activeOrd) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Element | null;
+      if (t?.closest?.(`[data-order-id="${activeOrd}"]`)) return;
+      setOrdActive(null);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOrdActive(null); };
+    document.addEventListener('mousedown', onDown, true);
+    window.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown, true); window.removeEventListener('keydown', onKey); };
+  }, [activeOrd]);
+
   useEffect(() => {
     const candles = candleRef.current;
     if (!candles) return;
@@ -806,12 +835,12 @@ function ScalperChart(props: Props) {
       seen.add(ord.id);
       const color = ord.side === 'BUY' ? '#0ea5e9' : '#f43f5e';
       const title = `${ord.qty ?? ''} ${ord.side} ${ord.orderType}`;
-      const opts = { price: p, color, lineWidth: 1 as const, lineStyle: LineStyle.Solid, axisLabelVisible: true, title };
+      const opts = { price: p, color, lineWidth: (ord.id === activeOrd ? 2 : 1) as 1 | 2, lineStyle: LineStyle.Solid, axisLabelVisible: true, title };
       const ex = lines.get(ord.id);
       if (ex) ex.applyOptions(opts); else lines.set(ord.id, candles.createPriceLine(opts));
     }
     for (const [id, l] of lines) if (!seen.has(id)) { try { candles.removePriceLine(l); } catch { /* gone */ } lines.delete(id); }
-  }, [regularOrders]);
+  }, [regularOrders, activeOrd]);
 
   // Chip y-positions follow the price scale (zoom / pan / autoscale move it with no event), so re-read them on a short timer.
   useEffect(() => {
@@ -1218,24 +1247,38 @@ function ScalperChart(props: Props) {
         const lotSize = displayLotUnits(underlying, feedLotSize);
         const ordLots = ord.qty ? Math.max(1, Math.round(qtyUnits(ord.qty, orderQtyMult) / lotSize)) : null;
         const lineY = chipTops[`oline_${ord.id}`];
-        const startOrdDrag = (e: React.MouseEvent) => {
-          if (!canEdit || (e.target as HTMLElement).closest('button')) return;
+        const active = activeOrd === ord.id;
+        const startDragNow = (e: React.MouseEvent) => {
           e.stopPropagation();
           e.preventDefault();
           setOrdEdit(null);
+          ordDragPriceRef.current = p;
           setOrdDrag({ id: ord.id, price: p, startPrice: p, side: ord.side });
+        };
+        // First click selects the order (grip shown); on a selected order a press starts the drag.
+        const onLineDown = (e: React.MouseEvent) => {
+          if (!canEdit || (e.target as HTMLElement).closest('button')) return;
+          if (!active) { e.stopPropagation(); e.preventDefault(); setOrdActive(ord.id); return; }
+          startDragNow(e);
         };
         return (
           <Fragment key={ord.id}>
             {canEdit && lineY !== undefined && (
-              <div data-testid="order-line-handle" aria-hidden title="Drag to move the order to a new price"
-                onMouseDown={startOrdDrag} style={{ top: lineY - 4 }}
-                className="absolute left-0 right-[64px] h-2 z-[50] cursor-ns-resize" />
+              <div data-testid="order-line-handle" data-order-id={ord.id} aria-hidden
+                title={active ? 'Drag to move the order to a new price (Esc or a click elsewhere deselects)' : 'Click to select this order, then drag it to a new price'}
+                onMouseDown={onLineDown} style={{ top: lineY - 6 }}
+                className={cn('absolute left-0 right-[64px] h-3 z-[50]', active ? 'cursor-ns-resize' : 'cursor-pointer')} />
             )}
-            <div data-testid="order-chip" style={{ top: top - 11 }} onMouseDown={startOrdDrag}
-              title={canEdit ? 'Drag to move the order to a new price; click its lots to edit' : 'Placed elsewhere: it can be cancelled (after a confirmation), not edited here'}
+            {canEdit && active && lineY !== undefined && (
+              <div data-testid="order-line-grip" data-order-id={ord.id} role="button" aria-label={`Drag order ${ord.id}`} tabIndex={-1}
+                onMouseDown={startDragNow} style={{ top: lineY - 7, left: '50%' }}
+                className={cn('absolute z-[56] -ml-[7px] w-[14px] h-[14px] rounded-full border-2 bg-zinc-950 cursor-grab active:cursor-grabbing shadow',
+                  isBuy ? 'border-sky-400' : 'border-rose-400')} />
+            )}
+            <div data-testid="order-chip" data-order-id={ord.id} style={{ top: top - 11 }} onMouseDown={onLineDown}
+              title={canEdit ? (active ? 'Drag to move the order to a new price; click its lots to edit' : 'Click to select, then drag to a new price; click its lots to edit') : 'Placed elsewhere: it can be cancelled (after a confirmation), not edited here'}
               className={cn('absolute right-[84px] z-[55] flex items-center gap-1.5 pl-2 pr-1 h-[22px] rounded border text-[11px] font-mono bg-zinc-900 shadow select-none',
-                isBuy ? 'border-sky-500/60' : 'border-rose-500/60', canEdit && 'cursor-grab active:cursor-grabbing')}>
+                isBuy ? 'border-sky-500/60' : 'border-rose-500/60', canEdit && (active ? 'cursor-grab active:cursor-grabbing ring-1 ring-sky-400' : 'cursor-pointer'))}>
               <span className={cn('font-bold', isBuy ? 'text-sky-400' : 'text-rose-400')}>{ord.side}</span>
               {canEdit ? (
                 <button type="button" aria-label={`Edit order ${ord.id}`} aria-expanded={ordEdit?.id === ord.id}

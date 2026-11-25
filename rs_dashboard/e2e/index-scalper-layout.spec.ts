@@ -289,7 +289,7 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(patches()).toHaveLength(1);
     await ed.getByRole('button', { name: 'Close' }).click();
 
-    // drag the order's line down: one modify at a lower price on the 0.05 tick, same quantity (65)
+    // pressing and dragging an UNSELECTED line only selects it: nothing moves, nothing is sent
     const handle = right.getByTestId('order-line-handle');
     const box = (await handle.boundingBox())!;
     const x = box.x + 40;
@@ -297,6 +297,24 @@ test.describe('Index Scalper layout + option charts', () => {
     await page.mouse.move(x, y);
     await page.mouse.down();
     for (let i = 1; i <= 8; i++) await page.mouse.move(x, y + i * 6);
+    await page.mouse.up();
+    const grip = right.getByTestId('order-line-grip');
+    await expect(grip).toBeVisible();
+    expect(patches()).toHaveLength(1);
+    // Esc deselects (grip gone); a click selects again
+    await page.keyboard.press('Escape');
+    await expect(grip).toHaveCount(0);
+    await page.mouse.click(x, y);
+    await expect(grip).toBeVisible();
+
+    if (process.env.ISX_SHOT2) await right.screenshot({ path: process.env.ISX_SHOT2 });
+    // drag the grip down: one modify at a lower price on the 0.05 tick, same quantity (65)
+    const g = (await grip.boundingBox())!;
+    const gx = g.x + g.width / 2;
+    const gy = g.y + g.height / 2;
+    await page.mouse.move(gx, gy);
+    await page.mouse.down();
+    for (let i = 1; i <= 8; i++) await page.mouse.move(gx, gy + i * 6);
     await page.mouse.up();
     await expect.poll(patches, { timeout: 15_000 }).toHaveLength(2);
     const moved = patches()[1] as { price: number; quantity: number; orderId: string };

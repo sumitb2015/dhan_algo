@@ -135,7 +135,8 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
   (`activeBrackets`). A symbol-text match made an entry Buy Limit beside a long read as its TP, and dragging it re-placed
   the entry as an exit sized to the position (fixed 2026-11-25). Every other order is a plain chip.
 - **Editing a working order** (plain chip): only this page's own (`isEditable`: `own`, open, LIMIT / STOP_LOSS /
-  STOP_LOSS_MARKET). Drag the chip or its line: a Limit moves its price, an SL-M its trigger, an SL-limit both by the
+  STOP_LOSS_MARKET). **Click to select first** (line thickens, a round grip appears; Esc / a click elsewhere
+  deselects), then drag the grip or the line (12 px hit strip): a Limit moves its price, an SL-M its trigger, an SL-limit both by the
   same amount (`movedLevels`); Esc cancels a drag. The lots / price popover commits only on Modify / Enter. Checked
   against the live price like a new order (`orderEditError`: a Buy Limit above it fills at once, a stop on the wrong
   side triggers at once), lots 1..20 and none on a part-filled order (`editLotsError`). REAL only.
@@ -344,5 +345,7 @@ so the page itself re-renders on every frame that has a push. Everything below k
 | e2e against `next start` | "Unchanged" results after edits | dev server on :3100 |
 | OI change drawn from `oi_chg_pct` alone | Zero bars on strikes with no baseline | `prev_oi`; no baseline -> no bar |
 | Quick Trade row widths vary with content | One strike's chips out of line | fixed-width columns, one shared right edge |
+| A chart callback depending on a feed-built function (`kotakPrice` rebuilds with `ltpById`) | Drag handler restarted on every push; a drag released after a tick sent nothing | read such values through refs; keep a drag's price in a ref, not an effect local |
+| A price-line map not cleared on chart teardown | No line under an order chip after the chart is re-created (every dev mount) | clear it (and any drag line ref) in the chart effect's cleanup |
 | Inline arrow / price-bearing object as a chart prop | Chart re-renders on every feed push | `useCallback`, identity-only memo, `legsKey` |
 | Full redraw while the forming bar stays flipped | Long tasks on every tick after a Supertrend flip | `recolor`: re-send only the coloured series |
