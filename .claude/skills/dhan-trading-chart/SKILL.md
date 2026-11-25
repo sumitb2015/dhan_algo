@@ -191,9 +191,11 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
   strike's position chip covered them, so a straddle's second leg could not be traded), lots and any refusal reason in
   the tooltip, not a panel.
 - **Per-leg chips** (`b752a099`): each leg is independent, even CE and PE on one strike, labelled "S CE 25350" /
-  "B PE 25350" with - / + around its lot count. "+" = one lot more through the one-click path; "-" = one lot off
-  through the exit path (fresh broker read, any owner, Kotak freeze slices / unknown hold; see `dhan-index-scalper`);
-  "-" is disabled at one lot (Exit closes the leg). SIM fills one lot the other way.
+  "B PE 25350" with - / + around its lot count. The step is the Quick Trade setting "Lots per + / −" (`stepLots`,
+  1..20, default 1, read through a ref at click time). "+" = step lots more through the one-click path; "-" =
+  `lotsToRemove(step, held)` off through the exit path (fresh broker read, any owner, Kotak freeze slices / unknown
+  hold; see `dhan-index-scalper`): never the last lot, so it is disabled at one lot (Exit closes the leg). SIM fills
+  the same lots the other way. Buttons are named "More lots CE 25350" / "Fewer lots CE 25350" (e2e relies on them).
 - **Target / stop on a strike position** (`PremiumBracketControls.tsx`, rules `lib/indexScalperPremiumBrackets.ts`):
   typed as a PREMIUM on the position chip, never dragged on the index axis. Validated against the LIVE premium (a long's
   target above it, stop below; a short's the other way; none without a live premium) and the option tick

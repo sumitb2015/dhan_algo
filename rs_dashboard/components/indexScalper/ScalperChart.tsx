@@ -69,6 +69,8 @@ interface Props {
   onExitLeg: (leg: ScalperLeg) => void;
   /** Quick Trade: "+" adds one lot in the leg's direction, "-" takes one lot off (absent = no +/- on the chip). */
   onAdjustLeg?: (leg: ScalperLeg, delta: 1 | -1) => void;
+  /** Lots the chip's + adds / - takes off (Quick Trade setting); only labels here, the terminal sizes the order. */
+  adjustLots?: number;
   exitingId: string | null;
   onToggleIndicator: (id: string) => void;
   onRemoveIndicator: (id: string) => void;
@@ -143,7 +145,7 @@ function seriesData(s: OutSeries, bars: Bar[]) {
 function ScalperChart(props: Props) {
   const {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, legs, entrySpots,
-    onExitLeg, onAdjustLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
+    onExitLeg, onAdjustLeg, adjustLots = 1, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
     premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false, premiumOrders,
@@ -1493,8 +1495,8 @@ function ScalperChart(props: Props) {
 
             {/* Lots quantity; Quick Trade adds - / + around it on an option leg */}
             {onAdjustLeg && optOnIndex && (
-              <button type="button" aria-label={`One lot less ${p.leg.type} ${p.leg.strike}`} disabled={lots <= 1 || exitingId !== null}
-                title={lots <= 1 ? 'One lot left: use Exit (x) to close the leg' : `Take one lot off (${isLong ? 'sell' : 'buy'} 1 lot at market)`}
+              <button type="button" aria-label={`Fewer lots ${p.leg.type} ${p.leg.strike}`} disabled={lots <= 1 || exitingId !== null}
+                title={lots <= 1 ? 'One lot left: use Exit (x) to close the leg' : `Take ${Math.min(adjustLots, lots - 1)} lot${Math.min(adjustLots, lots - 1) === 1 ? '' : 's'} off (${isLong ? 'sell' : 'buy'} at market; one lot always stays, Exit closes the leg)`}
                 onClick={e => { e.stopPropagation(); onAdjustLeg(p.leg, -1); }}
                 className="h-[18px] w-[18px] flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold leading-none disabled:opacity-35 disabled:cursor-not-allowed">−</button>
             )}
@@ -1502,8 +1504,8 @@ function ScalperChart(props: Props) {
               {lots}
             </span>
             {onAdjustLeg && optOnIndex && (
-              <button type="button" aria-label={`One lot more ${p.leg.type} ${p.leg.strike}`} disabled={exitingId !== null}
-                title={`Add one lot (${isLong ? 'buy' : 'sell'} 1 lot ${p.leg.type} ${p.leg.strike} at market)`}
+              <button type="button" aria-label={`More lots ${p.leg.type} ${p.leg.strike}`} disabled={exitingId !== null}
+                title={`Add ${adjustLots} lot${adjustLots === 1 ? '' : 's'} (${isLong ? 'buy' : 'sell'} ${adjustLots} lot${adjustLots === 1 ? '' : 's'} ${p.leg.type} ${p.leg.strike} at market)`}
                 onClick={e => { e.stopPropagation(); onAdjustLeg(p.leg, 1); }}
                 className="h-[18px] w-[18px] flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold leading-none disabled:opacity-35 disabled:cursor-not-allowed">+</button>
             )}

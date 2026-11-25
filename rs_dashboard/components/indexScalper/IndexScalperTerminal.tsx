@@ -46,7 +46,7 @@ import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
 import { Switch } from '@/components/ui/switch';
 import type { OiMode } from '@/lib/indexScalperOiProfile';
-import { QUICK_ON_KEY, QUICK_SETTINGS_KEY, DEFAULT_QUICK, MAX_QUICK_RANGE, clampQuickSettings, type QuickSettings } from '@/lib/indexScalperQuickTrade';
+import { QUICK_ON_KEY, QUICK_SETTINGS_KEY, DEFAULT_QUICK, MAX_QUICK_RANGE, clampQuickSettings, lotsToRemove, type QuickSettings } from '@/lib/indexScalperQuickTrade';
 
 // v2: v1 could hold an ATM pin taken before any spot was known (the middle of the strike list, e.g. 24200). v1 is
 // read for the layout, instruments and timeframes only; its option strikes go back to ATM.
@@ -246,6 +246,9 @@ export default function IndexScalperTerminal() {
   });
   // The pane prop: null when off, else the settings (identity changes only when a setting does).
   const quickProp = useMemo(() => (quickOn ? quickSettings : null), [quickOn, quickSettings]);
+  // The chip's + / - step, read at click time (a settings change must not rebuild the order callbacks).
+  const stepLotsRef = useRef(quickSettings.stepLots);
+  useEffect(() => { stepLotsRef.current = quickSettings.stepLots; }, [quickSettings.stepLots]);
   // An ATM pin the pane made itself is saved as ATM (0), so the next session resolves today's ATM; a picked strike is kept.
   useEffect(() => {
     if (!layoutReady) return;
@@ -1109,9 +1112,10 @@ export default function IndexScalperTerminal() {
       setTicketBusy(false);
     }
   }, [ticketBusy, placeContract, flash]);
-  // Quick Trade chip +/-: one lot more in the leg's own direction, or one lot taken off. "+" is an opening order
-  // (placeContract: lot cap, live price, session, isx). "-" closes through the exit path (fresh broker read, Kotak
-  // freeze slices, unknown-outcome hold), capped at one lot; SIM fills one lot the other way.
+  // Quick Trade chip +/-: the Quick Trade "Lots per + / -" step more in the leg's own direction, or that many taken off
+  // (never the last lot: Exit closes a leg). "+" is an opening order (placeContract: lot cap, live price, session, isx).
+  // "-" closes through the exit path (fresh broker read, Kotak freeze slices, unknown-outcome hold), capped at the
+  // step; SIM fills the step the other way.
   const adjustLeg = useCallback(async (leg: ScalperLeg, delta: 1 | -1) => {
     if (exitingId || ticketBusy) return;
     const f = feedRef.current;
@@ -1121,28 +1125,30 @@ export default function IndexScalperTerminal() {
     if (contractUnits === null) { flash({ ok: false, text: 'Lot size not known yet: nothing sent' }); return; }
     const c: PickedContract = { strike: leg.strike, type: leg.type, securityId: leg.securityId, tradingSymbol: leg.symbol, ltp: leg.ltp, expiry: f.expiry };
     const product = (leg.product as 'INTRADAY' | 'MARGIN') || 'INTRADAY';
+    const step = stepLotsRef.current;
     if (delta === 1) {
-      await onTradeContract(c, isLong ? 'BUY' : 'SELL', 1, product);
+      await onTradeContract(c, isLong ? 'BUY' : 'SELL', step, product);
       return;
     }
     // One lot in the leg's own quantity unit (Dhan MCX counts lots, Kotak / SIM / NSE count contract units).
     const brokerUnitsPerLot = contractUnits / (leg.mult && leg.mult > 0 ? leg.mult : 1);
-    if (Math.abs(leg.netQty) <= brokerUnitsPerLot) { flash({ ok: false, text: 'One lot left: use Exit (x) to close the leg' }); return; }
+    const n = lotsToRemove(step, Math.abs(leg.netQty) / brokerUnitsPerLot);
+    if (n === 0) { flash({ ok: false, text: 'One lot left: use Exit (x) to close the leg' }); return; }
     setExitingId(leg.id);
     try {
       let out: Outcome;
       if (!real || leg.sim) {
-        out = await placeContract({ contract: c, side: isLong ? 'SELL' : 'BUY', orderType: 'MARKET', price: null, trigger: null, product, lots: 1, closesLeg: true });
+        out = await placeContract({ contract: c, side: isLong ? 'SELL' : 'BUY', orderType: 'MARKET', price: null, trigger: null, product, lots: n, closesLeg: true });
       } else {
         const st = await readExitState();
         if (typeof st === 'string') out = { ok: false, text: st };
         else {
           const row = st.live.find(l => l.id === leg.id);
-          out = row ? await exitRealRow(row, st.records, st.book, brokerUnitsPerLot) : { ok: false, text: 'Position not found at the broker' };
+          out = row ? await exitRealRow(row, st.records, st.book, n * brokerUnitsPerLot) : { ok: false, text: 'Position not found at the broker' };
         }
         loadPositions();
       }
-      flash({ ok: out.ok, text: out.ok ? `${leg.type} ${leg.strike}: one lot taken off` : out.text });
+      flash({ ok: out.ok, text: out.ok ? `${leg.type} ${leg.strike}: ${n} lot${n === 1 ? '' : 's'} taken off` : out.text });
     } finally { setExitingId(null); }
   }, [exitingId, ticketBusy, real, underlying, placeContract, onTradeContract, readExitState, exitRealRow, loadPositions, flash]);
 
@@ -1516,6 +1522,12 @@ function QuickSettingsMenu({ settings, onPatch, nrmlLocked, maxLots, onClose }: 
       <label className="flex items-center justify-between gap-2 text-zinc-300">
         <span>Sell lots per click</span>
         <select aria-label="Sell lots per click" value={settings.sellLots} onChange={e => onPatch({ sellLots: Number(e.target.value) })} className={sel}>
+          {opts.map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
+      </label>
+      <label className="flex items-center justify-between gap-2 text-zinc-300" title="Lots one click of a position chip's + adds or − takes off (− always leaves one lot; Exit closes the leg)">
+        <span>Lots per + / −</span>
+        <select aria-label="Lots per plus or minus" value={settings.stepLots} onChange={e => onPatch({ stepLots: Number(e.target.value) })} className={sel}>
           {opts.map(n => <option key={n} value={n}>{n}</option>)}
         </select>
       </label>

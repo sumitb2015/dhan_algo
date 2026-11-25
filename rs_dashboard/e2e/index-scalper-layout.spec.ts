@@ -429,13 +429,13 @@ test.describe('Index Scalper layout + option charts', () => {
     const pe = chips.filter({ has: page.getByRole('button', { name: 'Exit PE 25350' }) });
 
     // "-" is off at one lot (Exit closes the last one); "+" adds a lot in the leg's own direction (another sell)
-    await expect(ce.getByRole('button', { name: 'One lot less CE 25350' })).toBeDisabled();
-    await ce.getByRole('button', { name: 'One lot more CE 25350' }).click();
+    await expect(ce.getByRole('button', { name: 'Fewer lots CE 25350' })).toBeDisabled();
+    await ce.getByRole('button', { name: 'More lots CE 25350' }).click();
     await expect(ce.getByTestId('position-lots')).toHaveAttribute('title', 'Short 2 lots (130 units)', { timeout: 15_000 });
     await expect(ce.getByTestId('position-lots')).toHaveText('2');
     await expect(pe.getByTestId('position-lots')).toHaveAttribute('title', 'Short 1 lot (65 units)'); // the PE is untouched
     // "-" takes one lot off again
-    await ce.getByRole('button', { name: 'One lot less CE 25350' }).click();
+    await ce.getByRole('button', { name: 'Fewer lots CE 25350' }).click();
     await expect(ce.getByTestId('position-lots')).toHaveAttribute('title', 'Short 1 lot (65 units)', { timeout: 15_000 });
     await expect(chips).toHaveCount(2);
     // the two chips never overlap
@@ -445,7 +445,7 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
-  test('Quick Trade REAL +/-: + sends one more lot in the leg\'s direction, - closes one lot of what this page opened', async ({ page, context }) => {
+  test('Quick Trade REAL +/-: + sends one more lot in the leg\'s direction, - closes one lot', async ({ page, context }) => {
     const state = newState();
     state.positions = [{
       tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY',
@@ -462,17 +462,47 @@ test.describe('Index Scalper layout + option charts', () => {
     const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
     await expect(chip.getByTestId('position-lots')).toHaveText('2', { timeout: 15_000 });
 
-    await chip.getByRole('button', { name: 'One lot more CE 25350' }).click();
+    await chip.getByRole('button', { name: 'More lots CE 25350' }).click();
     await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/fast-order').length, { timeout: 15_000 }).toBe(1);
     expect(state.calls.filter(c => c.path === '/api/scalper/fast-order')[0].body).toMatchObject({
       securityId: '302', side: 'BUY', orderType: 'MARKET', quantity: 65, productType: 'INTRADAY', source: 'isx',
     });
 
-    await chip.getByRole('button', { name: 'One lot less CE 25350' }).click();
+    await chip.getByRole('button', { name: 'Fewer lots CE 25350' }).click();
     await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/fast-order').length, { timeout: 15_000 }).toBe(2);
     expect(state.calls.filter(c => c.path === '/api/scalper/fast-order')[1].body).toMatchObject({
       securityId: '302', side: 'SELL', orderType: 'MARKET', quantity: 65, source: 'isx',
     });
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('Quick Trade REAL +/- step: "Lots per + / -" = 3 sends 3 lots on +, and - never takes the last lot', async ({ page, context }) => {
+    const state = newState();
+    state.positions = [{
+      tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY',
+      netQty: 130, buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG',
+    }];
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    await page.getByRole('button', { name: 'Quick Trade settings' }).click();
+    await page.getByRole('combobox', { name: 'Lots per plus or minus' }).selectOption('3');
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
+    await expect(chip.getByTestId('position-lots')).toHaveText('2', { timeout: 15_000 });
+
+    await chip.getByRole('button', { name: 'More lots CE 25350' }).click();
+    await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/fast-order').length, { timeout: 15_000 }).toBe(1);
+    expect(state.calls.filter(c => c.path === '/api/scalper/fast-order')[0].body).toMatchObject({ securityId: '302', side: 'BUY', quantity: 195 });
+
+    // the broker still shows 2 lots: "-" with a step of 3 takes off 1 (one lot always stays)
+    await chip.getByRole('button', { name: 'Fewer lots CE 25350' }).click();
+    await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/fast-order').length, { timeout: 15_000 }).toBe(2);
+    expect(state.calls.filter(c => c.path === '/api/scalper/fast-order')[1].body).toMatchObject({ securityId: '302', side: 'SELL', quantity: 65 });
     expect(state.blocked).toEqual([]);
   });
 

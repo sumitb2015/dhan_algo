@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clampQuickSettings, DEFAULT_QUICK, strikesAroundAtm, visibleStrikeRows } from './indexScalperQuickTrade.ts';
+import { clampQuickSettings, DEFAULT_QUICK, lotsToRemove, strikesAroundAtm, visibleStrikeRows } from './indexScalperQuickTrade.ts';
 
 const STRIKES = Array.from({ length: 41 }, (_, i) => 24500 + i * 50); // 24500..26500
 
 test('settings: whole lots within 1..20, fractions round down, junk falls back to defaults', () => {
-  assert.deepEqual(clampQuickSettings({ buyLots: 2, sellLots: 5, product: 'MARGIN', range: 4 }), { buyLots: 2, sellLots: 5, product: 'MARGIN', range: 4 });
-  assert.deepEqual(clampQuickSettings({ buyLots: 99, sellLots: 0 }), { buyLots: 20, sellLots: 1, product: 'INTRADAY', range: 10 });
+  assert.deepEqual(clampQuickSettings({ buyLots: 2, sellLots: 5, product: 'MARGIN', range: 4, stepLots: 3 }), { buyLots: 2, sellLots: 5, product: 'MARGIN', range: 4, stepLots: 3 });
+  assert.deepEqual(clampQuickSettings({ buyLots: 99, sellLots: 0 }), { buyLots: 20, sellLots: 1, product: 'INTRADAY', range: 10, stepLots: 1 });
+  assert.equal(clampQuickSettings({ stepLots: 99 }).stepLots, 20);
+  assert.equal(clampQuickSettings({ stepLots: 2.7 }).stepLots, 2);
+  assert.equal(clampQuickSettings({ range: 5 }).stepLots, 1); // saved before the setting existed
   assert.equal(clampQuickSettings({ buyLots: 2.9 }).buyLots, 2); // never a bigger order than asked
   assert.equal(clampQuickSettings({ sellLots: '3' }).sellLots, 3);
   assert.deepEqual(clampQuickSettings(null), DEFAULT_QUICK);
@@ -51,4 +54,12 @@ test('Quick Trade range: clamped to 1..50, default 10; ATM ± n listed strikes',
   assert.deepEqual(strikesAroundAtm(s, 25350, 1), [25300, 25350, 25400]);
   assert.deepEqual(strikesAroundAtm(s, 25250, 2), [25200, 25250, 25300, 25350]); // clipped at the low end
   assert.deepEqual(strikesAroundAtm(s, null, 1), [...s].sort((a, b) => a - b));
+});
+
+test('the chip\'s "-" takes off the step but never the last lot', () => {
+  assert.equal(lotsToRemove(2, 5), 2);
+  assert.equal(lotsToRemove(5, 3), 2); // step larger than the leg: leaves one lot
+  assert.equal(lotsToRemove(3, 1), 0); // one lot: Exit closes it
+  assert.equal(lotsToRemove(1, 0), 0);
+  assert.equal(lotsToRemove(Number.NaN, 4), 0);
 });

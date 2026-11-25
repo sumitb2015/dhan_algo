@@ -11,11 +11,13 @@ export interface QuickSettings {
   product: 'INTRADAY' | 'MARGIN';
   /** Chips only on ATM ± this many listed strikes (the far ones are illiquid and clutter the chart). */
   range: number;
+  /** Lots one click of a position chip's + adds, or its - takes off. */
+  stepLots: number;
 }
 
 export const QUICK_SETTINGS_KEY = 'indexScalper.quick.v1';
 export const QUICK_ON_KEY = 'indexScalper.quickTrade';
-export const DEFAULT_QUICK: QuickSettings = { buyLots: 1, sellLots: 1, product: 'INTRADAY', range: 10 };
+export const DEFAULT_QUICK: QuickSettings = { buyLots: 1, sellLots: 1, product: 'INTRADAY', range: 10, stepLots: 1 };
 export const MAX_QUICK_RANGE = 50;
 
 const lots = (v: unknown, d: number): number => {
@@ -35,7 +37,15 @@ export function clampQuickSettings(x: unknown): QuickSettings {
       const n = typeof o.range === 'string' ? Number(o.range) : o.range;
       return typeof n === 'number' && Number.isFinite(n) ? Math.min(MAX_QUICK_RANGE, Math.max(1, Math.floor(n))) : DEFAULT_QUICK.range;
     })(),
+    stepLots: lots(o.stepLots, DEFAULT_QUICK.stepLots),
   };
+}
+
+/** Lots a position chip's "-" takes off: the step, but never the last lot (Exit closes a leg), so at most held - 1.
+ *  0 = nothing to take off (one lot or less held, or an unknown size). */
+export function lotsToRemove(step: number, heldLots: number): number {
+  if (!Number.isFinite(step) || !Number.isFinite(heldLots)) return 0;
+  return Math.max(0, Math.min(Math.floor(step), Math.floor(heldLots) - 1));
 }
 
 /** The listed strikes from `n` below ATM to `n` above it (counted in listed strikes, not points), sorted. No ATM: all. */
