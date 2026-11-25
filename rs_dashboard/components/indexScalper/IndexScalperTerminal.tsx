@@ -10,10 +10,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BarChart3, CandlestickChart, Columns2, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Scaling, Trash2, TrendingUp, Zap,
+  BarChart3, Building2, CandlestickChart, Columns2, Gauge, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Scaling, Trash2, TrendingUp, Zap,
 } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import DataChip from '@/components/DataChip';
+import MarketWatchWindow from './MarketWatchWindow';
+import { useMarketWatch } from './useMarketWatch';
+import { indexRows, stockRows } from '@/lib/indexScalperMarketWatch';
 import IstClock from './IstClock';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import { scalperRoute } from '@/hooks/useBrokerSelector';
@@ -173,6 +176,14 @@ export default function IndexScalperTerminal() {
 
   // The chain and scalper widget are floating windows opened from toolbar buttons, not shown on load.
   const [chainOpen, setChainOpen] = useState(false);
+  // Watch-only market windows (Top Indices / Top 10 Stocks), fed by the Dhan WebSocket hub over SSE while open.
+  const [watchIdx, setWatchIdx] = useState(false);
+  const [watchStk, setWatchStk] = useState(false);
+  const watch = useMarketWatch(watchIdx, watchStk);
+  const watchIdxRows = useMemo(() => indexRows(watch.data.indices?.quotes), [watch.data.indices]);
+  const watchStkRows = useMemo(() => stockRows(watch.data.stocks?.quotes), [watch.data.stocks]);
+  const watchIdxFlash = useMemo(() => prefixFlash(watch.flash, 'i:'), [watch.flash]);
+  const watchStkFlash = useMemo(() => prefixFlash(watch.flash, 's:'), [watch.flash]);
   // One switch: the Scalper widget is open <=> one-click is armed (Buy CE / Buy PE and the chain's B / S trade at once).
   // Two flags drifted apart: closing the widget with its X left one-click armed with nothing on screen saying so.
   const [scalperOn, setScalperOn] = useState(false);
@@ -1453,6 +1464,15 @@ export default function IndexScalperTerminal() {
             <Zap className="w-3.5 h-3.5" />Scalper
           </button>
           {sep}
+          <button type="button" aria-pressed={watchIdx} aria-label="Top indices" title="Top indices: live Nifty, Bank Nifty, sectors and India VIX (watch only)"
+            onClick={() => setWatchIdx(v => !v)} className={cn(btn, 'flex items-center gap-1', watchIdx && 'bg-zinc-800 text-white')}>
+            <Gauge className="w-4 h-4" aria-hidden />Indices
+          </button>
+          <button type="button" aria-pressed={watchStk} aria-label="Top 10 stocks" title="Top 10 stocks: the heaviest Nifty 50 weights, live (watch only)"
+            onClick={() => setWatchStk(v => !v)} className={cn(btn, 'flex items-center gap-1', watchStk && 'bg-zinc-800 text-white')}>
+            <Building2 className="w-4 h-4" aria-hidden />Top 10
+          </button>
+          {sep}
           <button type="button" aria-pressed={chainOpen} aria-label="Option chain" title="Option chain" onClick={() => setChainOpen(v => !v)} className={cn(btn, chainOpen && 'bg-zinc-800 text-white')}><LayoutList className="w-4 h-4" /></button>
           <button type="button" aria-label="Reset scale" title="Reset scale: auto-scale the price axis and fit the time axis (undo a manual zoom)"
             onClick={() => { setAutoScale(true); setResetSeq(n => n + 1); }} className={btn}><Scaling className="w-4 h-4" /></button>
@@ -1591,6 +1611,14 @@ export default function IndexScalperTerminal() {
           onClose={() => setScalperOn(false)}
         />
       )}
+      {watchIdx && (
+        <MarketWatchWindow kind="indices" rows={watchIdxRows} updatedAt={watch.data.indices?.updated_at ?? null}
+          flash={watchIdxFlash} now={watch.now} initial={{ x: 16, y: 64 }} onClose={() => setWatchIdx(false)} />
+      )}
+      {watchStk && (
+        <MarketWatchWindow kind="stocks" rows={watchStkRows} updatedAt={watch.data.stocks?.updated_at ?? null}
+          flash={watchStkFlash} now={watch.now} initial={{ x: 392, y: 64 }} onClose={() => setWatchStk(false)} />
+      )}
       {chainOpen && (
         <OptionChainPanel feed={feed} onClose={() => setChainOpen(false)} onPick={c => { setTicket(c); setTicketMsg(null); }}
           onTrade={(c, side) => void tradeNow(c, side)} oneClick={scalperOn} />
@@ -1725,4 +1753,11 @@ function QuickSettingsMenu({ settings, onPatch, nrmlLocked, maxLots, onClose }: 
       <p className="text-[10px] leading-snug text-zinc-500">One click on Buy / Sell sends a market order at once (REAL only when armed). Max {maxLots} lots per order.</p>
     </div>
   );
+}
+
+/** The market-watch hook keys flashes 'i:NIFTY' / 's:HDFCBANK'; each window wants its own, unprefixed. */
+function prefixFlash(all: Record<string, 'up' | 'down'>, prefix: string): Record<string, 'up' | 'down'> {
+  const out: Record<string, 'up' | 'down'> = {};
+  for (const [k, v] of Object.entries(all)) if (k.startsWith(prefix)) out[k.slice(prefix.length)] = v;
+  return out;
 }

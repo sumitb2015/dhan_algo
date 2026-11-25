@@ -27,6 +27,7 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
 | Broker rows -> legs | `legsFromDhanPositions` (`lib/indexScalperPositions.ts`), `legsFromKotakPositions` (`lib/indexScalperKotak.ts`) |
 | Kotak orders | `api/index-scalper/kotak-order/` -> `lib/kotakPlaceOrder.ts`; records in `debug/index_scalper_kotak_orders.json` |
 | Account panel (summary, Positions, Closed, Orders, Portfolio, Funds) | `AccountPanel.tsx`; pure mappers `lib/indexScalperAccount.ts` |
+| Market watch (header "Indices" / "Top 10", watch-only) | `MarketWatchWindow.tsx` + `useMarketWatch.ts` (one EventSource while a window is open; starts `/api/live-indices` / `/api/live-equity` idempotently, never stops them) over SSE `api/index-scalper/market-watch/stream/` (watches `debug/live_indices_quotes.json` + `debug/live_equity_quotes.json`, both off the Dhan WebSocket hub; no REST); rows / pull / staleness pure in `lib/indexScalperMarketWatch.ts` |
 | Floating one-click widget | `DhanScalperWidget.tsx` (see `dhan-floating-scalper-window`) |
 | e2e | `e2e/index-scalper{,-crude,-feed,-kotak,-layout}.spec.ts` (all broker calls mocked; non-GET unmocked = 599) |
 

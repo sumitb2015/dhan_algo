@@ -20,7 +20,7 @@ function bars(level: number, swing: number) {
   });
 }
 
-interface State { calls: Call[]; blocked: Call[]; candleReqs: string[]; positions: Record<string, unknown>[]; orders: Record<string, unknown>[]; noSpot?: boolean; noPrevOi?: boolean; noLtpStrike?: number; snapChain?: boolean; ce25350?: number; optVolume?: boolean }
+interface State { calls: Call[]; blocked: Call[]; bridgeStarts: string[]; candleReqs: string[]; positions: Record<string, unknown>[]; orders: Record<string, unknown>[]; noSpot?: boolean; noPrevOi?: boolean; noLtpStrike?: number; snapChain?: boolean; ce25350?: number; optVolume?: boolean }
 
 async function mockApi(page: Page, state: State) {
   await page.route('**/api/**', async (route: Route) => {
@@ -84,7 +84,22 @@ async function mockApi(page: Page, state: State) {
     if (p === '/api/index-scalper/tick') return json(route, { success: true, tick: 0.05 });
     if (p === '/api/index-scalper/holdings') return json(route, { success: true, data: [] });
     if (p === '/api/scalper/fast-order') { state.calls.push({ path: p, body }); return json(route, { success: true, order_id: '7001' }); }
-    if (method === 'POST' && (p === '/api/live-indices' || p === '/api/live-equity')) return json(route, { success: true });
+    if (method === 'POST' && (p === '/api/live-indices' || p === '/api/live-equity')) { state.bridgeStarts.push(p); return json(route, { success: true }); }
+    if (p === '/api/index-scalper/market-watch/stream') {
+      // one SSE frame per connection (EventSource reconnects on its own); stamped with the page's session clock
+      const want = (u.searchParams.get('want') ?? '').split(',');
+      const frame: Record<string, unknown> = {};
+      if (want.includes('indices')) frame.indices = { updated_at: sessionIso(), quotes: {
+        NIFTY: { ltp: 25500, prev_close: 25000, high: 25600, low: 24900 },
+        BANKNIFTY: { ltp: 55440, prev_close: 56000 },
+        VIX: { ltp: 12, prev_close: 0 }, // no genuine previous close: the move is unknown
+      } };
+      if (want.includes('stocks')) frame.stocks = { updated_at: sessionIso(), quotes: {
+        HDFCBANK: { ltp: 1010, prev_close: 1000 },
+        RELIANCE: { ltp: 1485, prev_close: 1500 },
+      } };
+      return route.fulfill({ status: 200, contentType: 'text/event-stream', body: `data: ${JSON.stringify(frame)}\n\n` });
+    }
     if (method !== 'GET') {
       state.blocked.push({ path: p, body });
       return route.fulfill({ status: 599, contentType: 'application/json', body: '{"success":false,"error":"blocked by e2e safety net"}' });
@@ -93,7 +108,7 @@ async function mockApi(page: Page, state: State) {
   });
 }
 
-const newState = (): State => ({ calls: [], blocked: [], candleReqs: [], positions: [], orders: [] });
+const newState = (): State => ({ calls: [], blocked: [], bridgeStarts: [], candleReqs: [], positions: [], orders: [] });
 
 async function dragFrom(page: Page, locator: ReturnType<Page['locator']>, dy: number) {
   const box = await locator.boundingBox();
@@ -1047,6 +1062,40 @@ test.describe('Index Scalper layout + option charts', () => {
     const trig = Number(sent.triggerPrice ?? sent.trigger);
     expect(trig).toBeGreaterThan(100);
     expect(trig).toBeLessThan(200);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('Top indices / Top 10 stocks: header buttons open live watch windows over the stream, start the bridges, place nothing', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+
+    await page.getByRole('button', { name: 'Top indices', exact: true }).click();
+    const idx = page.getByTestId('market-watch-indices');
+    await expect(idx).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId('market-watch-indices-state')).toHaveText('LIVE');
+    await expect(idx.getByRole('row', { name: /Nifty 50/ })).toContainText('25,500.00');
+    await expect(idx.getByRole('row', { name: /Nifty 50/ })).toContainText('+2.00%');
+    await expect(idx.getByRole('row', { name: /Bank Nifty/ })).toContainText('-1.00%');
+    await expect(idx.getByRole('row', { name: /India VIX/ })).not.toContainText('%'); // unknown move, not 0.00%
+    // sorted by change, highest first; unpriced rows last
+    await expect(idx.locator('tbody tr').first()).toContainText('Nifty 50');
+
+    await page.getByRole('button', { name: 'Top 10 stocks', exact: true }).click();
+    const stk = page.getByTestId('market-watch-stocks');
+    await expect(stk.locator('tbody tr')).toHaveCount(10);
+    await expect(stk.getByRole('row', { name: /HDFC Bank/ })).toContainText('+1.00%');
+    // weighted pull: 11.18 x 1% + 8.00 x -1% = +0.03%
+    await expect(stk).toContainText('Weighted pull on NIFTY (2/10 priced)');
+    await expect(stk).toContainText('+0.03%');
+
+    expect([...new Set(state.bridgeStarts)].sort()).toEqual(['/api/live-equity', '/api/live-indices']);
+    expect(state.calls).toEqual([]); // watch-only: no order route touched
+    await stk.getByRole('button', { name: 'Close Top 10 Stocks' }).click();
+    await expect(stk).toHaveCount(0);
+    await page.getByRole('button', { name: 'Top indices', exact: true }).click();
+    await expect(idx).toHaveCount(0);
     expect(state.blocked).toEqual([]);
   });
 });
