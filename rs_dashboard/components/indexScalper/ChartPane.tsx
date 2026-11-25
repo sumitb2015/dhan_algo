@@ -24,6 +24,7 @@ import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { isMcx, type Underlying } from '@/lib/indexScalperInstrument';
 import { toIsoDate } from '@/components/DataChip';
 import { cn } from '@/lib/utils';
+import type { TrailState } from '@/lib/indexScalperTrail';
 
 export interface PaneCfg { source: ChartSource; interval: Interval }
 
@@ -80,6 +81,9 @@ interface Props {
   onSetBracket: (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }) => void;
   onCancelBracket: (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => void;
   onReversePosition: (leg: ScalperLeg) => void;
+  trails: Record<string, TrailState>;
+  onSetTrail: (leg: ScalperLeg, pts: number, tick: number) => void;
+  onCancelTrail: (legId: string) => void;
   feedLotSize: number | null;
   orderQtyMult: number;
   /** Draw the Call / Put OI profile (underlying panes only: strikes are underlying levels, not premiums). */
@@ -260,6 +264,7 @@ function ChartPane(p: Props) {
           onSetBracket={p.onSetBracket}
           onCancelBracket={p.onCancelBracket}
           onReversePosition={p.onReversePosition}
+          trails={p.trails} onSetTrail={p.onSetTrail} onCancelTrail={p.onCancelTrail}
           underlying={underlying}
           feedLotSize={p.feedLotSize}
           orderQtyMult={p.orderQtyMult}

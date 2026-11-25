@@ -258,6 +258,9 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
   isx; SIM: the paper watcher on `leg.ltp`). Badges read SIM levels or this contract's working orders by security id;
   × cancels; a click on the badge re-opens the editor prefilled with that level (Set replaces this page's order:
   cancel + place; the same level sends nothing). Those orders are not drawn as lines on the index axis.
+- **TSL** (`TrailControl.tsx`) sits after SL on both the strike chip (`PremiumBracketControls`) and the draggable
+  chip (FUT legs, an option on its premium pane); on those same-axis panes the trailed stop is a dashed amber "TSL"
+  price line. Browser-only; rules in `dhan-index-scalper` "Trailing stop loss".
 - **Option P&L on the index chart** comes from premiums (`legPremiumPnl`), "—" without a live premium. It used to fall
   back to index points x units, and its % was an index-point ratio.
 

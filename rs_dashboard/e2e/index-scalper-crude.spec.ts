@@ -34,6 +34,8 @@ type MockState = {
   candleCalls: string[];
   positions: Record<string, unknown>[];
   orders?: Record<string, unknown>[];
+  /** Live future / spot price (default CRUDE_SPOT). */
+  spot?: number;
 };
 
 async function mockCrudeApi(page: Page, state: MockState) {
@@ -92,7 +94,7 @@ async function mockCrudeApi(page: Page, state: MockState) {
         quotes: {
           underlying: und,
           expiry: isCrude(und) ? '2026-12-15' : '2026-12-01',
-          spot: CRUDE_SPOT,
+          spot: state.spot ?? CRUDE_SPOT,
           atm: 6100,
           updated_at: sessionIso(),
           strikes,
@@ -286,6 +288,47 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
     await chip.getByRole('button', { name: /^Exit / }).click(); // the chip's own x, not Exit All
     await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
     expect(state.calls[0].body).toMatchObject({ securityId: '9101', side: 'SELL', quantity: 10, source: 'isxx' });
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('futures TSL: the trailing stop follows the high in futures points and sends one market close when crossed', async ({ page, context }) => {
+    test.setTimeout(90_000);
+    const state: MockState = {
+      calls: [], blocked: [], underlyingCalls: [], candleCalls: [],
+      positions: [{ tradingSymbol: 'CRUDEOIL-18Dec2026-FUT', securityId: '9101', exchangeSegment: 'MCX_COMM', productType: 'MARGIN', netQty: 2, buyAvg: CRUDE_SPOT - 10, costPrice: CRUDE_SPOT - 10, sellAvg: 0, positionType: 'LONG' }],
+    };
+    await signIn(context);
+    await mockCrudeApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByLabel('Broker for new orders')).toBeEnabled({ timeout: 30_000 });
+    await page.getByRole('button', { name: 'CRUDEOIL', exact: true }).click();
+    await expect(page.getByTestId('chart-pane-0')).toContainText('CRUDEOIL FUT', { timeout: 30_000 });
+    await page.getByRole('button', { name: 'REAL' }).click();
+    await page.getByRole('button', { name: /Arm REAL on Dhan/i }).click();
+    const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
+    await expect(chip.getByTestId('position-lots')).toHaveText('2', { timeout: 15_000 });
+
+    // futures tick is 1: a fractional distance is refused; 5 points from 6120 = stop 6115
+    await chip.getByRole('button', { name: 'Trailing stop for FUT' }).click();
+    const dlg = page.getByRole('dialog', { name: 'Trailing stop for FUT' });
+    await dlg.getByLabel('Trail points').fill('2.5');
+    await expect(dlg).toContainText('Use the 1.00 tick');
+    await dlg.getByLabel('Trail points').fill('5');
+    await expect(dlg).toContainText('Stop starts at 6115.00');
+    await dlg.getByRole('button', { name: 'Set' }).click();
+    await expect(chip.getByTestId('trail-badge')).toContainText('TSL 6115.00', { timeout: 10_000 });
+
+    state.spot = 6130; // new high: the stop follows to 6125
+    await expect(chip.getByTestId('trail-badge')).toContainText('TSL 6125.00', { timeout: 15_000 });
+    state.spot = 6127; // a pullback above the stop: nothing happens
+    await page.waitForTimeout(3_000);
+    expect(state.calls).toEqual([]);
+    state.spot = 6124; // through the stop: one market close of the whole row, uncapped close tag
+    await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
+    expect(state.calls[0].body).toMatchObject({ securityId: '9101', side: 'SELL', quantity: 2, orderType: 'MARKET', source: 'isxx' });
+    await page.waitForTimeout(5_000);
+    expect(state.calls.length).toBe(1); // never a second exit
+    await expect(chip.getByTestId('trail-badge')).toHaveCount(0);
     expect(state.blocked).toEqual([]);
   });
 

@@ -15,6 +15,7 @@ import {
 import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { qtyBook, tradeChimeFor } from '@/lib/indexScalperChime';
+import { armTrail, retrail, stepTrail, trailStillValid, validTrails, type TrailState } from '@/lib/indexScalperTrail';
 import NavBar from '@/components/NavBar';
 import DataChip from '@/components/DataChip';
 import MarketWatchWindow from './MarketWatchWindow';
@@ -97,6 +98,8 @@ const IND_KEY_V1 = 'indexScalper.indicators.v1';
 const SIM_KEY = 'indexScalper.sim.v1';
 /** Trade chimes (entry / exit / order problem) on or off: '1' / '0', default on. */
 const SOUND_KEY = 'indexScalper.tradeSound';
+/** SIM trailing stops (REAL ones live in memory only: REAL is armed per page load). */
+const TRAIL_KEY = 'indexScalper.trail.v1';
 const SPOT_KEY = 'indexScalper.entrySpots.v1';
 
 interface SimLeg { securityId: string; symbol: string; strike: number; type: 'CE' | 'PE' | 'FUT'; netQty: number; avg: number; /** realized P&L of this leg today */ realized?: number }
@@ -860,6 +863,135 @@ export default function IndexScalperTerminal() {
     } finally { setExitingId(null); }
   }, [exitingId, legs, real, openedHere, exitSimLeg, readExitState, exitRealRow, loadPositions, flash]);
 
+  // ── trailing stop loss (TSL) ───────────────────────────────────────
+  // Browser-only (owner's choice, 2026-11-25): no broker order. The stop follows the best price of the leg's own
+  // instrument (lib/indexScalperTrail.ts = the XY ladder's continuous trail) and this tab sends a market exit through the
+  // normal exit path (fresh broker read, any owner) when it is crossed. Each tab runs the trails it holds; a REAL trail
+  // exit takes a per-contract Web Lock, so a second tab's exit re-reads the book after the first and finds it flat.
+  // SIM trails are saved with the paper book; REAL trails end when REAL is disarmed or the page reloads.
+  const [trails, setTrailsState] = useState<Record<string, TrailState>>({});
+  const trailsRef = useRef(trails);
+  const saveTrails = useCallback((next: Record<string, TrailState>) => {
+    trailsRef.current = next;
+    setTrailsState(next);
+    const sim = Object.fromEntries(Object.entries(next).filter(([, t]) => t.mode === 'SIM'));
+    savePref(TRAIL_KEY, JSON.stringify(sim));
+  }, []);
+  useEffect(() => {
+    let saved: Record<string, TrailState> = {};
+    try { saved = validTrails(JSON.parse(readPref(TRAIL_KEY) ?? '{}')); } catch { saved = {}; }
+    const sim = Object.fromEntries(Object.entries(saved).filter(([, t]) => t.mode === 'SIM'));
+    trailsRef.current = sim;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTrailsState(sim);
+  }, []);
+  // Leaving REAL (or switching broker) ends its trails: they would otherwise wake up on a book they no longer watch.
+  useEffect(() => {
+    const cur = trailsRef.current;
+    const keep = Object.fromEntries(Object.entries(cur).filter(([, t]) => t.mode === 'SIM' || (real && t.broker === broker)));
+    if (Object.keys(keep).length !== Object.keys(cur).length) saveTrails(keep);
+  }, [real, broker, saveTrails]);
+  const trailTick = useCallback((leg: ScalperLeg) => (leg.type === 'FUT' ? INSTRUMENTS[underlying].futTick : INSTRUMENTS[underlying].optTick), [underlying]);
+
+  const onSetTrail = useCallback((leg: ScalperLeg, pts: number, tick: number) => {
+    const f = feedRef.current;
+    const cur = trailsRef.current[leg.id];
+    let t: TrailState | string;
+    if (cur) t = retrail(cur, pts, tick);
+    else if (f.stale || f.feedAgeSec === null) t = 'Live prices are stale: not starting a trailing stop on an old price';
+    else t = armTrail(leg, leg.ltp, pts, tick, real ? 'REAL' : 'SIM', brokerRef.current);
+    if (typeof t === 'string') { flash({ ok: false, text: t }); return; }
+    saveTrails({ ...trailsRef.current, [leg.id]: t });
+    flash({ ok: true, text: `${real ? '' : 'SIM '}TSL ${leg.type}${leg.type === 'FUT' ? '' : ` ${leg.strike}`}: stop ${t.sl.toFixed(2)}, ${pts} pts behind the best price (runs in this tab)` });
+  }, [real, saveTrails, flash]);
+  const onCancelTrail = useCallback((legId: string) => {
+    if (!trailsRef.current[legId]) return;
+    const next = { ...trailsRef.current };
+    delete next[legId];
+    saveTrails(next);
+    flash({ ok: true, text: 'Trailing stop removed' });
+  }, [saveTrails, flash]);
+
+  // Retry gate and failure count per leg: an exit that was refused before sending is retried after 3 s, three times.
+  const trailRetryRef = useRef<Record<string, { at: number; fails: number }>>({});
+  const exitingIdRef = useRef(exitingId);
+  useEffect(() => { exitingIdRef.current = exitingId; });
+  const dropTrail = useCallback((legId: string) => {
+    if (!trailsRef.current[legId]) return;
+    const next = { ...trailsRef.current };
+    delete next[legId];
+    saveTrails(next);
+  }, [saveTrails]);
+  const fireTrail = useCallback(async (leg: ScalperLeg, t: TrailState) => {
+    const name = `${leg.type}${leg.type === 'FUT' ? '' : ` ${leg.strike}`}`;
+    const gate = trailRetryRef.current[leg.id] ?? { at: 0, fails: 0 };
+    trailRetryRef.current[leg.id] = { at: Date.now() + 3000, fails: gate.fails };
+    const failed = (text: string) => {
+      const fails = gate.fails + 1;
+      if (fails >= 3) { dropTrail(leg.id); delete trailRetryRef.current[leg.id]; flash({ ok: false, text: `TSL ${name}: exit failed 3 times, trailing stop removed: ${text}` }); return; }
+      trailRetryRef.current[leg.id] = { at: Date.now() + 3000, fails };
+      flash({ ok: false, text: `TSL ${name}: ${text} (retrying)` });
+    };
+    if (t.mode === 'SIM') {
+      const o = exitSimLeg(leg);
+      if (!o.ok) { failed(o.text); return; }
+      dropTrail(leg.id); delete trailRetryRef.current[leg.id];
+      flash({ ok: false, text: `Trailing SL hit: SIM ${name} closed @ ${leg.ltp?.toFixed(2) ?? '—'} (stop ${t.sl.toFixed(2)})` });
+      return;
+    }
+    const run = async () => {
+      if (exitingIdRef.current) { trailRetryRef.current[leg.id] = { at: Date.now() + 1000, fails: gate.fails }; return; }
+      setExitingId(leg.id);
+      try {
+        const st = await readExitState();
+        if (typeof st === 'string') { failed(st); return; }
+        const row = st.live.find(l => l.id === leg.id);
+        // Gone or flipped since: nothing of this trail is left to close.
+        if (!row || (row.netQty > 0) !== t.isLong) { dropTrail(leg.id); delete trailRetryRef.current[leg.id]; return; }
+        const o = await exitRealRow(row, st.records, st.book);
+        loadPositions();
+        if (o.ok || o.unknown) {
+          // An unknown outcome is never resent (the page rule): the trail ends and the warning is shown.
+          dropTrail(leg.id); delete trailRetryRef.current[leg.id];
+          flash({ ok: o.ok, text: o.ok ? `Trailing SL hit: ${name} exit sent (stop ${t.sl.toFixed(2)}): ${o.text}` : `TSL ${name}: ${o.text}` });
+          return;
+        }
+        failed(o.text);
+      } finally { setExitingId(null); }
+    };
+    const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+    if (locks?.request) await locks.request(`index-scalper-exit:${leg.securityId}`, run);
+    else await run();
+  }, [exitSimLeg, readExitState, exitRealRow, loadPositions, dropTrail, flash]);
+
+  // The watcher: every book / price change steps each trail of the current mode; stale or closed-market prices pause it.
+  useEffect(() => {
+    if (!bookReady) return;
+    const cur = trailsRef.current;
+    const ids = Object.keys(cur);
+    if (ids.length === 0) return;
+    const mode = real ? 'REAL' : 'SIM';
+    const f = feedRef.current;
+    const priceOk = !f.stale && f.feedAgeSec !== null && f.marketOpen;
+    let next = cur;
+    const fire: [ScalperLeg, TrailState][] = [];
+    for (const id of ids) {
+      const t = cur[id];
+      if (t.mode !== mode) continue;
+      const leg = legs.find(l => l.id === id);
+      if (!trailStillValid(t, leg, mode, broker)) {
+        next = { ...next }; delete next[id]; delete trailRetryRef.current[id];
+        continue;
+      }
+      if (!priceOk || !leg || leg.ltp === null || !(leg.ltp > 0)) continue;
+      const r = stepTrail(t, leg.ltp, trailTick(leg));
+      if (r.state !== t) next = { ...next, [id]: r.state };
+      if (r.hit && (trailRetryRef.current[id]?.at ?? 0) <= Date.now()) fire.push([leg, r.state]);
+    }
+    if (next !== cur) saveTrails(next);
+    for (const [leg, t] of fire) void fireTrail(leg, t);
+  }, [legs, real, broker, bookReady, trailTick, saveTrails, fireTrail]);
+
   // ── one-click scalper (buy ATM CE / PE) ────────────────────────────
   const atmContract = useCallback((type: 'CE' | 'PE'): PickedContract | null => {
     const q = feed.quotes;
@@ -1588,7 +1720,7 @@ export default function IndexScalperTerminal() {
               focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder} onModifyOrder={onModifyOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
-              onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
+              onReversePosition={onReversePosition} trails={trails} onSetTrail={onSetTrail} onCancelTrail={onCancelTrail} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
               quick={quickProp} real={real} onQuickTrade={onTradeContract}
             />
               {layout === 2 && <div className="w-px bg-zinc-800 shrink-0" />}
@@ -1604,7 +1736,7 @@ export default function IndexScalperTerminal() {
               focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder} onModifyOrder={onModifyOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
-              onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
+              onReversePosition={onReversePosition} trails={trails} onSetTrail={onSetTrail} onCancelTrail={onCancelTrail} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
               quick={quickProp} real={real} onQuickTrade={onTradeContract}
             />
               )}

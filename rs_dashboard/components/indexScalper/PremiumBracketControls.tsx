@@ -13,6 +13,8 @@ import {
   defaultPremiumLevel, parseBracketInput, premiumBracketError, premiumPnlAt, snapPremium, type PremiumBrackets,
 } from '@/lib/indexScalperPremiumBrackets';
 import { cn } from '@/lib/utils';
+import type { TrailState } from '@/lib/indexScalperTrail';
+import TrailControl from './TrailControl';
 
 const inr = (n: number) => `${n >= 0 ? '+' : '-'}${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 const fmtPct = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
@@ -24,9 +26,13 @@ interface Props {
   brackets: PremiumBrackets;
   onSet: (kind: 'TP' | 'SL', price: number) => void;
   onCancel: (kind: 'TP' | 'SL', orderId?: string) => void;
+  /** Trailing stop on this leg (browser-only; see TrailControl). Omitted = no TSL control. */
+  trail?: TrailState;
+  onSetTrail?: (pts: number) => void;
+  onCancelTrail?: () => void;
 }
 
-export default function PremiumBracketControls({ leg, units, tick, brackets, onSet, onCancel }: Props) {
+export default function PremiumBracketControls({ leg, units, tick, brackets, onSet, onCancel, trail, onSetTrail, onCancelTrail }: Props) {
   const isLong = leg.netQty > 0;
   const [edit, setEdit] = useState<'TP' | 'SL' | null>(null);
   const [draft, setDraft] = useState('');
@@ -98,6 +104,9 @@ export default function PremiumBracketControls({ leg, units, tick, brackets, onS
       </span>
       {brackets.tp ? badge('TP') : btn('TP')}
       {brackets.sl ? badge('SL') : btn('SL')}
+      {onSetTrail && onCancelTrail && (
+        <TrailControl leg={leg} units={units} tick={tick} trail={trail} onSet={onSetTrail} onCancel={onCancelTrail} />
+      )}
       {edit && (
         <div role="dialog" aria-label={`${edit === 'TP' ? 'Target' : 'Stop loss'} premium for ${leg.type} ${leg.strike}`}
           className="absolute right-0 top-[22px] z-[70] w-[240px] rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl p-2 flex flex-col gap-1.5 font-sans">

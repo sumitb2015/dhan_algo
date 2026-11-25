@@ -29,6 +29,7 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
 | Account panel (summary, Positions, Closed, Orders, Portfolio, Funds) | `AccountPanel.tsx`; pure mappers `lib/indexScalperAccount.ts` |
 | Market watch (header "Indices" / "Top 10", watch-only) | `MarketWatchWindow.tsx` + `useMarketWatch.ts` (one EventSource while a window is open; starts `/api/live-indices` / `/api/live-equity` idempotently, never stops them) over SSE `api/index-scalper/market-watch/stream/` (watches `debug/live_indices_quotes.json` + `debug/live_equity_quotes.json`, both off the Dhan WebSocket hub; no REST); rows / pull / staleness pure in `lib/indexScalperMarketWatch.ts` |
 | Trade chimes (entry / exit / warn, mute `indexScalper.tradeSound`) | `lib/indexScalperChime.ts` `tradeChimeFor` diffs the position book (exit beats entry; first book after a mode / broker / instrument change is only the baseline); warn on a REAL `sendReal` not ok; REAL book changes ring in the `useTabLeader('index-scalper-sound')` tab or the tab that sent within 15 s. See `dhan-alert-sound` |
+| Trailing SL (TSL) beside TP / SL, options strike chip + futures / premium chip | `components/indexScalper/TrailControl.tsx`; rules `lib/indexScalperTrail.ts` (reuses the XY ladder's `bracketStep`, `trailMode: 'distance'`); watcher + exit `fireTrail` in `IndexScalperTerminal.tsx` |
 | Floating one-click widget | `DhanScalperWidget.tsx` (see `dhan-floating-scalper-window`) |
 | e2e | `e2e/index-scalper{,-crude,-feed,-kotak,-layout}.spec.ts` (all broker calls mocked; non-GET unmocked = 599) |
 
@@ -96,6 +97,17 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
   silently left a short with no stop if the replacement was rejected).
 - Trade-off to state when asked: a running strategy's leg on the same contract can now be closed from here, and the
   strategy will not know.
+
+### Trailing stop loss (TSL, added 2026-11-25)
+- **Browser-only, by the owner's choice**: no order rests at the broker. The stop follows the best price of the leg's own
+  instrument (option premium / future) `pts` behind it and never loosens; when crossed, the tab that holds it sends a
+  market close through the normal exit path (`readExitState` -> `exitRealRow`: fresh read, any owner, `isxx`). Closing
+  the tab or the dashboard stops it; the UI says so. Distance is typed in **points only** (on the instrument's tick).
+- Each tab runs its own trails. A REAL trail exit takes the Web Lock `index-scalper-exit:<securityId>`, so a second
+  tab's exit re-reads the book after the first and finds it flat (no leader election: REAL is armed per tab).
+- REAL trails are memory-only and end on disarm / broker switch / reload; SIM trails persist in `indexScalper.trail.v1`.
+- Paused (no peak update, no exit) while prices are stale or the market is closed. A refused exit retries every 3 s,
+  up to 3 times; an unknown outcome ends the trail (never resent). Independent of the TP / SL orders.
 
 ### Account panel
 - Dhan-style day summary + Positions / Closed Positions / Orders (status chips) / Portfolio (Dhan

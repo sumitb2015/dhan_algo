@@ -22,6 +22,8 @@ import { cn } from '@/lib/utils';
 import { fmtOI, fmtOIChange, oiBars, placeOiLabels, type OiMode, type OiProfile } from '@/lib/indexScalperOiProfile';
 import { legPremiumPnl, premiumBracketsFor } from '@/lib/indexScalperPremiumBrackets';
 import PremiumBracketControls from './PremiumBracketControls';
+import TrailControl from './TrailControl';
+import type { TrailState } from '@/lib/indexScalperTrail';
 import OrderEditPopover, { type OrderEditDraft } from './OrderEditPopover';
 import { isEditable } from '@/lib/indexScalperOrderEdit';
 
@@ -110,6 +112,10 @@ interface Props {
   onSetBracket?: (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }) => void;
   onCancelBracket?: (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => void;
   onReversePosition?: (leg: ScalperLeg) => void;
+  /** Trailing stops by leg id (browser-only, run by the tab that holds them) and their controls. */
+  trails?: Record<string, TrailState>;
+  onSetTrail?: (leg: ScalperLeg, pts: number, tick: number) => void;
+  onCancelTrail?: (legId: string) => void;
   underlying?: Underlying;
   feedLotSize?: number | null;
   /** Contract units per order-book quantity unit: Dhan MCX orders count lots (10), everything else units (1). */
@@ -170,7 +176,7 @@ function ScalperChart(props: Props) {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, showGrid = true, showVolume = true, volumeMaLen = 20, legs, entrySpots,
     onExitLeg, onAdjustLeg, adjustLots = 1, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, ordersEnabled = true, onPlaceLimitOrder, onOpenTicket, onAlert,
-    simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
+    simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, trails, onSetTrail, onCancelTrail, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
     premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, resetSeq = 0, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false, premiumOrders,
   } = props;
   const drawKeyRef = useRef(drawKeyProp);
@@ -711,6 +717,15 @@ function ScalperChart(props: Props) {
     const seen = new Set<string>();
 
     for (const p of placed) {
+      // The trailing stop is on this pane's axis only where TP / SL are (a FUT leg, an option on its own premium chart).
+      const tr = trails?.[p.leg.id];
+      if (tr && canBracket(p.leg)) {
+        const key = `tsl_${p.leg.id}`;
+        seen.add(key);
+        const opts = { price: tr.sl, color: '#f59e0b', lineWidth: 1 as const, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'TSL' };
+        const ex = lines.get(key);
+        if (ex) ex.applyOptions(opts); else lines.set(key, candles.createPriceLine(opts));
+      }
       const b = activeBrackets[p.leg.id];
       if (!b) continue;
       if (b.tp) {
@@ -735,7 +750,7 @@ function ScalperChart(props: Props) {
         lines.delete(key);
       }
     }
-  }, [placed, activeBrackets]);
+  }, [placed, activeBrackets, trails, canBracket]);
 
   // ── dragging logic for TP & SL ──────────────────────────────────────
   const startDrag = useCallback((
@@ -1619,11 +1634,20 @@ function ScalperChart(props: Props) {
             >
               SL
             </button>
+            {onSetTrail && onCancelTrail && (
+              <TrailControl leg={p.leg} units={totalUnits} tick={p.leg.type === 'FUT' ? INSTRUMENTS[underlying].futTick : INSTRUMENTS[underlying].optTick}
+                trail={trails?.[p.leg.id]}
+                onSet={pts => onSetTrail(p.leg, pts, p.leg.type === 'FUT' ? INSTRUMENTS[underlying].futTick : INSTRUMENTS[underlying].optTick)}
+                onCancel={() => onCancelTrail(p.leg.id)} />
+            )}
             </>) : strikeAnchor && optOnIndex ? (
               <PremiumBracketControls leg={p.leg} units={totalUnits} tick={INSTRUMENTS[underlying].optTick}
                 brackets={premiumBracketsFor(p.leg, premiumOrders ?? [], simBrackets?.[p.leg.id])}
                 onSet={(kind, price) => onSetBracket?.({ leg: p.leg, kind, price })}
-                onCancel={(kind, orderId) => onCancelBracket?.({ legId: p.leg.id, kind, orderId })} />
+                onCancel={(kind, orderId) => onCancelBracket?.({ legId: p.leg.id, kind, orderId })}
+                trail={trails?.[p.leg.id]}
+                onSetTrail={onSetTrail ? pts => onSetTrail(p.leg, pts, INSTRUMENTS[underlying].optTick) : undefined}
+                onCancelTrail={onCancelTrail ? () => onCancelTrail(p.leg.id) : undefined} />
             ) : (
               <span title="Set TP / SL on this option's own chart: its levels are premiums" className="text-[10px] text-zinc-500">
                 <span className={isLong ? 'text-emerald-400' : 'text-rose-400'}>{isLong ? 'B' : 'S'}</span> {p.leg.type} {p.leg.strike}

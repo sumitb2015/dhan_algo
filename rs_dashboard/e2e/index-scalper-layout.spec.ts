@@ -677,6 +677,86 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('Quick Trade SIM TSL on a strike: follows the premium high, survives a reload, closes the paper leg when crossed', async ({ page, context }) => {
+    test.setTimeout(120_000);
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    const pane = page.getByTestId('chart-pane-0');
+    const overlay = pane.getByTestId('quick-overlay');
+    await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
+    await overlay.getByRole('button', { name: 'Quick buy 25350 CE 1 lot' }).click();
+    const chip = pane.getByTestId('position-chip');
+    await expect(chip).toContainText('+0 INR (+0.00%)', { timeout: 15_000 });
+
+    // points only: a % is refused; 10 points behind the live 210.50 = 200.50
+    await chip.getByRole('button', { name: 'Trailing stop for CE 25350' }).click();
+    const dlg = page.getByRole('dialog', { name: 'Trailing stop for CE 25350' });
+    await dlg.getByLabel('Trail points').fill('10%');
+    await expect(dlg).toContainText('Enter the trail distance in points');
+    await dlg.getByLabel('Trail points').fill('10');
+    await expect(dlg).toContainText('Stop starts at 200.50');
+    await dlg.getByLabel('Trail points').press('Enter');
+    const badge = chip.getByTestId('trail-badge');
+    await expect(badge).toContainText('TSL 200.50');
+
+    state.ce25350 = 230; // new high -> 220.00
+    await expect(badge).toContainText('TSL 220.00', { timeout: 15_000 });
+    state.ce25350 = 225; // pullback above the stop: kept, never loosened
+    await page.waitForTimeout(3_000);
+    await expect(badge).toContainText('TSL 220.00');
+
+    // SIM trails are saved with the paper book
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(pane.getByTestId('trail-badge')).toContainText('TSL 220.00', { timeout: 60_000 });
+
+    state.ce25350 = 219; // through the stop: the paper leg closes
+    await expect(pane.getByTestId('position-chip')).toHaveCount(0, { timeout: 15_000 });
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('Quick Trade REAL TSL on a strike: one market close when the premium crosses the stop, x removes a trail', async ({ page, context }) => {
+    test.setTimeout(90_000);
+    const state = newState();
+    state.positions = [{
+      tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY',
+      netQty: 65, buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG',
+    }];
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
+    await expect(chip).toContainText('+683 INR', { timeout: 15_000 });
+    const orders = () => state.calls.filter(c => c.path === '/api/scalper/fast-order');
+
+    // set, then x: removed, nothing sent
+    await chip.getByRole('button', { name: 'Trailing stop for CE 25350' }).click();
+    await page.getByRole('dialog', { name: 'Trailing stop for CE 25350' }).getByLabel('Trail points').fill('20');
+    await page.getByRole('dialog', { name: 'Trailing stop for CE 25350' }).getByRole('button', { name: 'Set' }).click();
+    await expect(chip.getByTestId('trail-badge')).toContainText('TSL 190.50');
+    await chip.getByRole('button', { name: 'Cancel TSL CE 25350' }).click();
+    await expect(chip.getByTestId('trail-badge')).toHaveCount(0);
+
+    await chip.getByRole('button', { name: 'Trailing stop for CE 25350' }).click();
+    await page.getByRole('dialog', { name: 'Trailing stop for CE 25350' }).getByLabel('Trail points').fill('5');
+    await page.getByRole('dialog', { name: 'Trailing stop for CE 25350' }).getByRole('button', { name: 'Set' }).click();
+    await expect(chip.getByTestId('trail-badge')).toContainText('TSL 205.50');
+    state.ce25350 = 205; // through the stop
+    await expect.poll(() => orders().length, { timeout: 15_000 }).toBe(1);
+    expect(orders()[0].body).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'MARKET', quantity: 65, productType: 'INTRADAY', source: 'isxx' });
+    await page.waitForTimeout(5_000);
+    expect(orders().length).toBe(1); // the broker still shows the row (mock): never a second exit
+    expect(state.blocked).toEqual([]);
+  });
+
   test('Quick Trade REAL position: TP / SL typed as a % of entry ("10%") send the premium that percentage gives', async ({ page, context }) => {
     const state = newState();
     state.positions = [{
