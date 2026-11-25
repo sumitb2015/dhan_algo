@@ -15,6 +15,8 @@ import {
 import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { qtyBook, tradeChimeFor } from '@/lib/indexScalperChime';
+import { reverseBlockers, reverseLotsError } from '@/lib/indexScalperReverse';
+import { netBySecurity, ocoActions, ocoEvents, type OcoEvent } from '@/lib/indexScalperOco';
 import { armTrail, retrail, stepTrail, trailStillValid, validTrails, type TrailState } from '@/lib/indexScalperTrail';
 import NavBar from '@/components/NavBar';
 import DataChip from '@/components/DataChip';
@@ -654,7 +656,7 @@ export default function IndexScalperTerminal() {
     // keeps that leg's own product: a MARGIN order against an MIS leg would open a second position, not reduce it.
     const product = req.closesLeg ? req.product : openingProduct(underlying, req.product);
     // The security id was picked for one expiry; never send it under a ticket that now shows another (except futures).
-    if (!isFut && c.expiry !== f.expiry) return { ok: false, text: `This ticket was opened for the ${c.expiry || 'previous'} expiry: reopen it from the chain` };
+    if (!isFut && !req.exactContract && c.expiry !== f.expiry) return { ok: false, text: `This ticket was opened for the ${c.expiry || 'previous'} expiry: reopen it from the chain` };
     // Live tick only (ltpById is built from the bridge's live chain): never the ticket's display price, which can be a
     // REST snapshot or the previous close.
     const live = c.securityId ? f.ltpById.get(c.securityId) ?? null : null;
@@ -686,8 +688,10 @@ export default function IndexScalperTerminal() {
       // Kotak: its own trading symbol and lot size for the contract on screen, never the Dhan security id.
       const k = f.kotak;
       if (!k) return { ok: false, text: f.kotakError ?? 'Kotak contracts are still loading' };
-      if (!isFut && k.expiry !== c.expiry) return { ok: false, text: 'Kotak contracts are for another expiry: wait for them to load' };
-      const sym = isFut
+      if (!isFut && !req.exactContract && k.expiry !== c.expiry) return { ok: false, text: 'Kotak contracts are for another expiry: wait for them to load' };
+      // An existing position's own trading symbol (Reverse) is sent as is: a lookup by strike in the expiry on screen
+      // would pick another contract when the position is in another expiry or futures month.
+      const sym = req.exactContract ? c.tradingSymbol : isFut
         ? (f.future?.kotakSymbol ?? c.tradingSymbol)
         : (c.type === 'CE' ? k.strikes.get(c.strike)?.ceSymbol : k.strikes.get(c.strike)?.peSymbol);
       if (!sym) return { ok: false, text: `No Kotak contract for ${isFut ? 'FUT' : `${c.strike} ${c.type}`} on ${c.expiry}` };
@@ -1330,76 +1334,231 @@ export default function IndexScalperTerminal() {
     });
   }, [cancelOrder]);
 
-  const onReversePosition = useCallback(async (leg: ScalperLeg) => {
-    if (ticketBusy || exitingId) return;
-    const isLong = leg.netQty > 0;
-    const revSide: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
-    // netQty is in the broker's own unit (Dhan MCX: lots; Kotak / SIM / NSE: units): leg.mult converts it.
-    const curLots = qtyLots(underlying, leg.netQty, leg.mult ?? 1, feed.lotSize);
-    if (curLots === null) {
-      flash({ ok: false, text: `Cannot reverse: ${Math.abs(leg.netQty)} is not a whole number of lots (or the lot size is unknown)` });
-      return;
-    }
-    const revLots = curLots * 2;
+  // ── reverse ────────────────────────────────────────────────────────
+  // Close the position in full, then open the same lots on the other side of THE SAME contract. REAL asks first, re-reads
+  // the broker (never the 3 s-old chip), cancels this page's working orders on the closing side of that contract (after
+  // the flip they would add to the new position), refuses while another placer's order works there, and opens only once
+  // the close was placed. Rules in lib/indexScalperReverse.ts.
+  const [reverseAsk, setReverseAsk] = useState<ScalperLeg | null>(null);
+  const legName = (l: ScalperLeg) => `${l.type}${l.type === 'FUT' ? '' : ` ${l.strike}`}`;
+  const ownContract = (l: ScalperLeg): PickedContract => ({
+    strike: l.strike, type: l.type, expiry: feedRef.current.expiry ?? '', securityId: l.securityId, tradingSymbol: l.symbol, ltp: l.ltp ?? l.avg,
+  });
 
-    // Clear any active brackets for this leg
-    setSimBrackets(prev => {
-      const next = { ...prev };
-      delete next[leg.id];
-      return next;
-    });
+  const reverseSimBusyRef = useRef(false);
+  const reverseSim = useCallback(async (leg: ScalperLeg) => {
+    if (reverseSimBusyRef.current) return;
+    reverseSimBusyRef.current = true;
+    try { await reverseSimOnce(leg); } finally { reverseSimBusyRef.current = false; }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [underlying, exitSimLeg, placeContract, dropTrail, flash]);
+  const reverseSimOnce = async (leg: ScalperLeg) => {
+    const lots = qtyLots(underlying, leg.netQty, leg.mult ?? 1, feedRef.current.lotSize);
+    const lotsErr = reverseLotsError(lots, INSTRUMENTS[underlying].maxLots);
+    if (lotsErr) { flash({ ok: false, text: `Cannot reverse ${legName(leg)}: ${lotsErr}` }); return; }
+    const revSide: 'BUY' | 'SELL' = leg.netQty > 0 ? 'SELL' : 'BUY';
+    setSimBrackets(prev => { if (!prev[leg.id]) return prev; const next = { ...prev }; delete next[leg.id]; return next; });
+    dropTrail(leg.id);
+    // Only open the other side once the close went through: otherwise "reverse" would double the position.
+    const closed = exitSimLeg(leg);
+    if (!closed.ok) { flash({ ok: false, text: `Reverse ${legName(leg)}: not closed: ${closed.text}` }); return; }
+    const out = await placeContract({ contract: ownContract(leg), side: revSide, orderType: 'MARKET', price: null, trigger: null, product: 'INTRADAY', lots: lots!, exactContract: true });
+    flash(out.ok
+      ? { ok: true, text: `SIM reversed ${legName(leg)}: ${revSide} ${lots} lot${lots === 1 ? '' : 's'}` }
+      : { ok: false, text: `SIM ${legName(leg)} closed, but the other side was not opened: ${out.text}` });
+  };
 
-    const c: PickedContract = {
-      strike: leg.strike,
-      type: leg.type,
-      expiry: feed.expiry ?? '',
-      securityId: leg.securityId,
-      tradingSymbol: leg.symbol,
-      ltp: leg.ltp ?? leg.avg,
-    };
-
-    if (!real || leg.sim) {
-      // Only open the other side once the close went through: otherwise "reverse" would double the position.
-      const closed = exitSimLeg(leg);
-      if (!closed.ok) { flash(closed); return; }
-      const out = await placeContract({
-        contract: c,
-        side: revSide,
-        orderType: 'MARKET',
-        price: null,
-        trigger: null,
-        product: 'INTRADAY',
-        lots: curLots,
-      });
-      flash({ ok: out.ok, text: `Reversed position to ${revSide} ${curLots} lot${curLots > 1 ? 's' : ''}` });
-      return;
-    }
-
-    // A REAL reverse is one 2x order in the leg's own product. On MCX crude that product must be MARGIN: reversing an
-    // MIS crude leg would open a fresh MIS position (refused: crude is NRML only), so exit it and re-enter instead.
-    if (nrmlOnly(underlying) && leg.product !== 'MARGIN') {
-      flash({ ok: false, text: `${underlying} is NRML-only: Exit this ${leg.product || 'intraday'} position, then open the other side (it goes as NRML)` });
-      return;
-    }
-
-    setTicketBusy(true);
+  /** A cancel whose outcome the caller needs (Reverse); sendCancel is the panel's, with its own toast. */
+  const cancelQuiet = useCallback(async (orderId: string): Promise<string | null> => {
     try {
-      const out = await placeContract({
-        contract: c,
-        side: revSide,
-        orderType: 'MARKET',
-        price: null,
-        trigger: null,
-        product: (leg.product as 'INTRADAY' | 'MARGIN') || 'INTRADAY',
-        lots: revLots,
-      });
-      flash({ ok: out.ok, text: `Reversed position: ${out.text}` });
+      const r = brokerRef.current === 'kotak'
+        ? await fetch('/api/scalper/kotak/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId }) })
+        : await fetch('/api/scalper/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId, broker: 'dhan' }) });
+      const j = await r.json() as { success: boolean; error?: string };
+      return j.success ? null : (j.error ?? 'cancel failed');
+    } catch (e) { return `no reply (${String((e as Error).message ?? e)})`; }
+  }, []);
+
+  /** This broker's order book read now, in panel rows (own / cancellable / raw type). Kotak needs the page's order
+   *  records to tell its own orders; pass them when already read (readExitState), else they are read here. */
+  const freshOrderRows = useCallback(async (kotakRecords?: KotakRecord[]): Promise<OrderRowView[] | null> => {
+    try {
+      if (brokerRef.current === 'kotak') {
+        const records = kotakRecords ?? await loadKotakRecords();
+        const r = await fetch(scalperRoute('kotak', 'orders'));
+        const j = await r.json() as { success: boolean; data?: Record<string, unknown>[] };
+        if (!records || !j.success || !Array.isArray(j.data)) return null;
+        return orderRows(kotakOrdersAsDhan(j.data, kotakSymbolsRef.current ?? {}, recordedIds(withResolvedUnknowns(records, j.data))));
+      }
+      const r = await fetch(scalperRoute('dhan', 'orders'));
+      const j = await r.json() as { success: boolean; data?: Record<string, unknown>[] };
+      return j.success && Array.isArray(j.data) ? orderRows(j.data) : null;
+    } catch { return null; }
+  }, [loadKotakRecords]);
+
+  // While a REAL reverse runs, the flat moment between its close and its open is not a "position closed" event.
+  const reverseBusyRef = useRef(false);
+  const reverseReal = useCallback(async (leg: ScalperLeg) => {
+    const f = feedRef.current;
+    const kotak = brokerRef.current === 'kotak';
+    const name = legName(leg);
+    const st = await readExitState();
+    if (typeof st === 'string') return { ok: false, text: `Reverse ${name}: ${st}` };
+    const row = st.live.find(l => l.id === leg.id);
+    if (!row) return { ok: false, text: `Reverse ${name}: the position is no longer at the broker` };
+    // MCX crude opens NRML only: an MIS crude leg cannot reopen as MIS (refused at the broker), nor flip into NRML here.
+    if (nrmlOnly(underlying) && row.product !== 'MARGIN') return { ok: false, text: `${underlying} is NRML-only: Exit this ${row.product || 'intraday'} position, then open the other side (it goes as NRML)` };
+    const lots = qtyLots(underlying, row.netQty, row.mult ?? 1, kotak ? f.kotak?.lotSize ?? null : f.lotSize);
+    const lotsErr = reverseLotsError(lots, INSTRUMENTS[underlying].maxLots);
+    if (lotsErr) return { ok: false, text: `Cannot reverse ${name}: ${lotsErr}` };
+    // A fresh order book: another placer's order on the closing side refuses (nothing sent); this page's own are
+    // cancelled AFTER the close is placed, so a rejected close never leaves the position without its stop.
+    const rows = await freshOrderRows(st.records);
+    if (!rows) return { ok: false, text: `Reverse ${name}: could not read the order book: nothing was sent` };
+    const isLong = row.netQty > 0;
+    const blk = reverseBlockers(rows, row.securityId, isLong);
+    if (blk.foreign.length) return { ok: false, text: `Reverse ${name}: order ${blk.foreign.join(', ')} placed elsewhere works on the closing side of this contract (after the flip it would add to the new position). Cancel it first (Orders): nothing was sent` };
+    dropTrail(leg.id);
+    // 1. Close in full: the exit path (uncapped isxx, Kotak freeze slices, unknown-outcome hold).
+    const closed = await exitRealRow(row, st.records, st.book);
+    if (!closed.ok) {
+      loadPositions(); void loadOrders();
+      return { ok: false, text: `Reverse ${name}: ${closed.unknown ? 'the close has an unknown outcome, so the other side was NOT opened' : 'not closed (its target / stop orders are untouched)'}: ${closed.text}` };
+    }
+    // 2. Cancel this page's target / stop on the old closing side: after the flip they would add to the new position.
+    for (const id of blk.own) {
+      const err = await cancelQuiet(id);
+      if (err) { loadPositions(); void loadOrders(); return { ok: false, text: `Reverse ${name}: closed, but this page's order ${id} could not be cancelled (${err}), so the other side was NOT opened. Cancel it in Orders` }; }
+    }
+    // 3. The position must not have flipped meanwhile (a stop that fired between the close and its cancel): opening
+    //    then would double the new side. Still open the old way (close not filled yet) or flat is fine.
+    const after = await loadPositions(true);
+    if (!after) return { ok: false, text: `Reverse ${name}: closed, but positions could not be re-read, so the other side was NOT opened` };
+    const afterLegs = kotak ? legsFromKotakPositions(after, kotakSymbolsRef.current ?? {}, () => null, underlying) : legsFromDhanPositions(after, f.ltpById, underlying);
+    const nowQty = netBySecurity(afterLegs).get(row.securityId) ?? 0;
+    if (nowQty !== 0 && Math.sign(nowQty) !== Math.sign(row.netQty)) {
+      return { ok: false, text: `Reverse ${name}: the position already shows the other side (${nowQty}), so nothing more was opened. Check Positions / Orders` };
+    }
+    // 2. Open the same lots on the other side of the same contract, in the row's own product.
+    const opened = await placeContract({
+      contract: { ...ownContract(row), expiry: f.expiry ?? '' }, side: isLong ? 'SELL' : 'BUY', orderType: 'MARKET', price: null, trigger: null,
+      product: (row.product as 'INTRADAY' | 'MARGIN') || 'INTRADAY', lots: lots!, exactContract: true,
+    });
+    const cancelled = blk.own.length ? ` (cancelled this page's order${blk.own.length === 1 ? '' : 's'} ${blk.own.join(', ')})` : '';
+    return opened.ok
+      ? { ok: true, text: `Reversed ${name}: closed, then ${isLong ? 'SELL' : 'BUY'} ${lots} lot${lots === 1 ? '' : 's'}${cancelled}: ${opened.text}` }
+      : { ok: false, text: `${name} closed${cancelled}, but the other side was not opened: ${opened.text}` };
+  }, [underlying, readExitState, freshOrderRows, exitRealRow, placeContract, cancelQuiet, dropTrail, loadPositions, loadOrders]);
+
+  const onReversePosition = useCallback(async (leg: ScalperLeg, confirmed = false) => {
+    if (ticketBusy || exitingId) return;
+    if (!real || leg.sim) { await reverseSim(leg); return; }
+    if (!confirmed) { setReverseAsk(leg); return; }
+    setReverseAsk(null);
+    setTicketBusy(true);
+    setExitingId(leg.id);
+    reverseBusyRef.current = true;
+    try {
+      flash(await reverseReal(leg));
+    } finally {
+      reverseBusyRef.current = false;
+      setExitingId(null);
+      setTicketBusy(false);
       loadPositions();
       void loadOrders();
-    } finally {
-      setTicketBusy(false);
     }
-  }, [ticketBusy, exitingId, underlying, feed.lotSize, feed.expiry, real, exitSimLeg, placeContract, flash, loadPositions, loadOrders]);
+  }, [ticketBusy, exitingId, real, reverseSim, reverseReal, flash, loadPositions, loadOrders]);
+  // What the REAL reverse confirmation shows (from the polled book; the reverse itself re-reads both books).
+  const reverseView = useMemo(() => {
+    if (!reverseAsk) return null;
+    const l = reverseAsk;
+    const isLong = l.netQty > 0;
+    return {
+      leg: l, isLong,
+      lots: qtyLots(underlying, l.netQty, l.mult ?? 1, broker === 'kotak' ? feed.kotak?.lotSize ?? null : feed.lotSize),
+      blk: reverseBlockers(panelOrders, l.securityId, isLong),
+    };
+  }, [reverseAsk, underlying, broker, feed.kotak?.lotSize, feed.lotSize, panelOrders]);
+
+  // ── one-cancels-other for REAL targets / stops (lib/indexScalperOco.ts) ─────────────────────────────────────────────
+  // Watches the REAL book: a contract that went flat gets this page's leftover target / stop cancelled (a stop left on
+  // a flat position would open a new one); one that was reduced gets this page's bigger untouched target / stop cut to
+  // what is left. A flat is confirmed with a fresh positions read first (one empty reply must never cancel stops), and
+  // the order book is re-read. Runs in the browser, REAL only, so the page must be open and armed; a Web Lock makes a
+  // second open tab do it after the first, against the book the first left.
+  const ocoPrevRef = useRef<{ key: string; book: Map<string, number>; mult: Map<string, number> } | null>(null);
+  const ocoQueueRef = useRef<OcoEvent[]>([]);
+  const ocoBusyRef = useRef(false);
+  const drainOco = useCallback(async () => {
+    if (ocoBusyRef.current) return;
+    ocoBusyRef.current = true;
+    const run = async () => {
+      while (ocoQueueRef.current.length) {
+        const events = ocoQueueRef.current.splice(0);
+        let confirmed = events;
+        if (events.some(e => e.kind === 'flat')) {
+          const fresh = await loadPositions(true);
+          if (!fresh) continue; // cannot confirm: never cancel a stop on an unconfirmed flat
+          const f = feedRef.current;
+          const kotak = brokerRef.current === 'kotak';
+          const now = netBySecurity(kotak ? legsFromKotakPositions(fresh, kotakSymbolsRef.current ?? {}, () => null, underlying) : legsFromDhanPositions(fresh, f.ltpById, underlying));
+          confirmed = events.filter(e => e.kind !== 'flat' || !now.has(e.securityId));
+        }
+        if (!confirmed.length) continue;
+        const rows = await freshOrderRows();
+        if (!rows) { flash({ ok: false, text: 'A position closed, but the order book could not be read to cancel its target / stop: check Orders' }); continue; }
+        const acts = ocoActions(confirmed, rows);
+        const done: string[] = [];
+        const failed: string[] = [];
+        for (const o of acts.cancel) {
+          const err = await cancelQuiet(o.id);
+          if (err) failed.push(`${o.id} (${err})`); else done.push(o.id);
+        }
+        for (const { order, qty } of acts.resize) {
+          const mult = ocoPrevRef.current?.mult.get(order.securityId) ?? 1;
+          const f = feedRef.current;
+          const lots = qtyLots(underlying, qty, mult, brokerRef.current === 'kotak' ? f.kotak?.lotSize ?? null : f.lotSize);
+          if (lots === null || !(await onModifyOrder({ orderId: order.id, lots }))) failed.push(`${order.id} (could not cut it to ${qty})`);
+        }
+        if (done.length) flash({ ok: true, text: `Position closed: cancelled its other target / stop order${done.length === 1 ? '' : 's'} ${done.join(', ')}` });
+        if (failed.length) { flash({ ok: false, text: `Target / stop clean-up failed: ${failed.join(' · ')}. Check Orders` }); if (soundOnRef.current) playWarnChime(); }
+        void loadOrders();
+      }
+    };
+    try {
+      const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+      if (locks?.request) await locks.request('index-scalper-oco', run); else await run();
+    } finally { ocoBusyRef.current = false; }
+  }, [underlying, loadPositions, freshOrderRows, cancelQuiet, onModifyOrder, flash, loadOrders]);
+  useEffect(() => {
+    if (!real || !bookReady) { ocoPrevRef.current = null; return; }
+    const key = `${broker}|${underlying}`;
+    const book = netBySecurity(legs);
+    const mult = new Map(legs.map(l => [l.securityId, l.mult ?? 1]));
+    const prev = ocoPrevRef.current;
+    // Keep the multipliers of contracts that just went flat (a resize needs them; a flat needs none).
+    ocoPrevRef.current = { key, book, mult: new Map([...(prev?.mult ?? []), ...mult]) };
+    if (!prev || prev.key !== key || reverseBusyRef.current) return;
+    const events = ocoEvents(prev.book, book);
+    if (!events.length) return;
+    ocoQueueRef.current.push(...events);
+    void drainOco();
+  }, [legs, real, broker, underlying, bookReady, drainOco]);
+
+  // SIM: a paper target / stop belongs to the open leg only. Exit, a trailing-stop hit or a reverse leaves the leg flat;
+  // its old levels must not come back on the next position on that contract.
+  useEffect(() => {
+    if (real || !simReady) return;
+    const open = new Set(legs.map(l => l.id));
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSimBrackets(prev => {
+      const stale = Object.keys(prev).filter(id => !open.has(id));
+      if (!stale.length) return prev;
+      const next = { ...prev };
+      for (const id of stale) delete next[id];
+      return next;
+    });
+  }, [legs, real, simReady]);
 
   const onTradeContract = useCallback(async (
     c: PickedContract,
@@ -1844,6 +2003,20 @@ export default function IndexScalperTerminal() {
             </div>
           </div>
         </div>
+      )}
+      {reverseView && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-oncolor-dark/70">
+            <div role="alertdialog" aria-label="Reverse position" className="w-[420px] rounded-lg border border-rose-500/70 bg-zinc-900 p-5 shadow-2xl">
+              <h2 className="text-sm font-bold text-rose-300 mb-2">Reverse {reverseView.isLong ? 'long' : 'short'} {reverseView.leg.type}{reverseView.leg.type === 'FUT' ? '' : ` ${reverseView.leg.strike}`}{reverseView.lots ? ` · ${reverseView.lots} lot${reverseView.lots === 1 ? '' : 's'}` : ''}?</h2>
+              <p className="text-xs text-zinc-300 mb-2">Two market orders on {brokerName}: close the whole position (as the broker shows it now), then {reverseView.isLong ? 'SELL' : 'BUY'} the same lots on the same contract ({reverseView.leg.symbol}). The other side is opened only if the close is placed.</p>
+              {reverseView.blk.own.length > 0 && <p className="text-xs text-zinc-300 mb-2">This page&apos;s working order{reverseView.blk.own.length === 1 ? '' : 's'} {reverseView.blk.own.join(', ')} on the closing side will be cancelled first (after the flip {reverseView.blk.own.length === 1 ? 'it' : 'they'} would add to the new position).</p>}
+              {reverseView.blk.foreign.length > 0 && <p className="text-xs text-amber-400 mb-2">Order {reverseView.blk.foreign.join(', ')} placed elsewhere works on the closing side: the reverse will be refused until it is cancelled.</p>}
+              <div className="flex justify-end gap-2 mt-3">
+                <button type="button" autoFocus onClick={() => setReverseAsk(null)} className="h-8 px-3 rounded text-xs font-semibold text-zinc-300 hover:bg-zinc-800">Cancel</button>
+                <button type="button" onClick={() => void onReversePosition(reverseView.leg, true)} className="h-8 px-3 rounded bg-rose-600 hover:bg-rose-500 text-oncolor text-xs font-bold">Reverse to {reverseView.isLong ? 'short' : 'long'}</button>
+              </div>
+            </div>
+          </div>
       )}
       {cancelAsk && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-oncolor-dark/70">

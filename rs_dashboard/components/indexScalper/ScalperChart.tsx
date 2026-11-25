@@ -1657,7 +1657,8 @@ function ScalperChart(props: Props) {
             {/* Reverse position button */}
             <button
               type="button"
-              title="Reverse position (close current and open opposite)"
+              aria-label={`Reverse ${p.leg.type}${p.leg.type === 'FUT' ? '' : ` ${p.leg.strike}`}`}
+              title="Reverse position: close it in full, then open the same lots on the other side of the same contract (REAL asks first)"
               onClick={(e) => {
                 e.stopPropagation();
                 onReversePosition?.(p.leg);

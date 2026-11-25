@@ -19,7 +19,7 @@ function candles() {
   });
 }
 
-type MockState = { calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[]; orders?: Record<string, unknown>[]; noLive?: boolean; chainCalls?: number; liveExpiry?: string; marginCalls?: number; cancels?: string[]; holdings?: Record<string, unknown>[]; positionsFail?: boolean; tick?: number };
+type MockState = { calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[]; orders?: Record<string, unknown>[]; noLive?: boolean; chainCalls?: number; liveExpiry?: string; marginCalls?: number; cancels?: string[]; holdings?: Record<string, unknown>[]; positionsFail?: boolean; tick?: number; rejectOrders?: boolean };
 
 async function mockApi(page: Page, state: MockState) {
   await page.route('**/api/**', async (route: Route) => {
@@ -79,6 +79,7 @@ async function mockApi(page: Page, state: MockState) {
     if (p === '/api/index-scalper/holdings') return json(route, { success: true, data: state.holdings ?? [] });
     if (p === '/api/scalper/fast-order') {
       state.calls.push({ path: p, body });
+      if (state.rejectOrders) return json(route, { success: false, error: 'RMS: rejected' }, 400);
       state.positions = [];
       return json(route, { success: true, order_id: '7001' });
     }
@@ -237,6 +238,94 @@ test.describe('Index Scalper', () => {
       securityId: '402', quantity: 715, side: 'SELL', orderType: 'MARKET', productType: 'INTRADAY', source: 'isxx', exchangeSegment: 'NSE_FNO',
     });
     expect(String(state.calls[0].body?.idempotencyKey ?? '').length).toBeGreaterThanOrEqual(8);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('REAL Reverse: asks first, re-reads the book, cancels this page\'s stop, closes (isxx) then opens the same lots on the position\'s own contract', async ({ page, context }) => {
+    const state: MockState = {
+      calls: [], blocked: [],
+      // a long CE of the NEXT expiry (id 3028) while the screen shows 2026-12-01: the reverse must trade 3028, not 302
+      positions: [{ tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '3028', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY', netQty: 130, buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG' }],
+      orders: [{ orderId: 'SL1', correlationId: 'isxsl', securityId: '3028', tradingSymbol: 'NIFTY-Dec2026-25350-CE', productType: 'INTRADAY', transactionType: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 150, price: 0, quantity: 130, filledQty: 0, orderStatus: 'PENDING', drvOptionType: 'CALL', drvStrikePrice: 25350 }],
+    };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    const chip = page.getByTestId('position-chip');
+    await expect(chip.getByTestId('position-lots')).toHaveText('2', { timeout: 15_000 });
+
+    // the broker shows 1 lot now (the mobile app sold one): the reverse is sized from that, not the chip's 2
+    state.positions = [{ ...state.positions[0], netQty: 65 }];
+    await chip.getByRole('button', { name: 'Reverse CE 25350' }).click();
+    const dlg = page.getByRole('alertdialog', { name: 'Reverse position' });
+    await expect(dlg).toContainText('SL1');
+    await dlg.getByRole('button', { name: 'Cancel', exact: true }).click(); // the first answer is no: nothing sent
+    expect(state.calls).toEqual([]);
+    await chip.getByRole('button', { name: 'Reverse CE 25350' }).click();
+    await dlg.getByRole('button', { name: 'Reverse to short' }).click();
+    await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(2);
+    expect(state.cancels).toEqual(['SL1']);
+    expect(state.calls[0].body).toMatchObject({ securityId: '3028', side: 'SELL', quantity: 65, orderType: 'MARKET', productType: 'INTRADAY', source: 'isxx' });
+    expect(state.calls[1].body).toMatchObject({ securityId: '3028', side: 'SELL', quantity: 65, orderType: 'MARKET', productType: 'INTRADAY', source: 'isx' });
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('REAL Reverse whose close is rejected keeps the position\'s stop (nothing cancelled, nothing opened)', async ({ page, context }) => {
+    const state: MockState = {
+      calls: [], blocked: [], rejectOrders: true,
+      positions: [{ tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY', netQty: 65, buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG' }],
+      orders: [{ orderId: 'SL1', correlationId: 'isxsl', securityId: '302', tradingSymbol: 'NIFTY-Dec2026-25350-CE', productType: 'INTRADAY', transactionType: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 150, price: 0, quantity: 65, filledQty: 0, orderStatus: 'PENDING', drvOptionType: 'CALL', drvStrikePrice: 25350 }],
+    };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    const chip = page.getByTestId('position-chip');
+    await expect(chip.getByTestId('position-lots')).toHaveText('1', { timeout: 15_000 });
+    await chip.getByRole('button', { name: 'Reverse CE 25350' }).click();
+    await page.getByRole('alertdialog', { name: 'Reverse position' }).getByRole('button', { name: 'Reverse to short' }).click();
+    await expect(page.getByText(/not closed \(its target \/ stop orders are untouched\)/)).toBeVisible({ timeout: 15_000 });
+    expect(state.calls.length).toBe(1);
+    expect(state.calls[0].body).toMatchObject({ side: 'SELL', source: 'isxx' });
+    expect(state.cancels ?? []).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('REAL Reverse is refused (nothing sent) while another placer\'s order works on the closing side, or above the per-order cap', async ({ page, context }) => {
+    const state: MockState = {
+      calls: [], blocked: [],
+      positions: [{ tradingSymbol: 'NIFTY-Dec2026-25350-PE', securityId: '402', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY', netQty: 65, buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG' }],
+      orders: [{ orderId: 'ST9', correlationId: 'strat', securityId: '402', tradingSymbol: 'NIFTY-Dec2026-25350-PE', productType: 'INTRADAY', transactionType: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 150, price: 0, quantity: 65, filledQty: 0, orderStatus: 'PENDING', drvOptionType: 'PUT', drvStrikePrice: 25350 }],
+    };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    const chip = page.getByTestId('position-chip');
+    await expect(chip.getByTestId('position-lots')).toHaveText('1', { timeout: 15_000 });
+    await chip.getByRole('button', { name: 'Reverse PE 25350' }).click();
+    const dlg = page.getByRole('alertdialog', { name: 'Reverse position' });
+    await expect(dlg).toContainText('ST9 placed elsewhere');
+    await dlg.getByRole('button', { name: 'Reverse to short' }).click();
+    await expect(page.getByText(/order ST9 placed elsewhere works on the closing side/)).toBeVisible({ timeout: 15_000 });
+    expect(state.calls).toEqual([]);
+    expect(state.cancels ?? []).toEqual([]);
+
+    // 21 lots: the other side would be one 21-lot order, above NIFTY's 20-lot cap
+    state.orders = [];
+    state.positions = [{ ...state.positions[0], netQty: 1365 }];
+    await expect(chip.getByTestId('position-lots')).toHaveText('21', { timeout: 15_000 });
+    await chip.getByRole('button', { name: 'Reverse PE 25350' }).click();
+    await dlg.getByRole('button', { name: 'Reverse to short' }).click();
+    await expect(page.getByText(/above the 20-lot cap per order/)).toBeVisible({ timeout: 15_000 });
+    expect(state.calls).toEqual([]);
     expect(state.blocked).toEqual([]);
   });
 

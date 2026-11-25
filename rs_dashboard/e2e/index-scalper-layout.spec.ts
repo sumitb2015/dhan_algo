@@ -719,6 +719,116 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('REAL one-cancels-other: the target fills -> this page\'s stop is cancelled; another placer\'s order is left alone', async ({ page, context }) => {
+    test.setTimeout(90_000);
+    const state = newState();
+    const pos = { tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY', netQty: 65, buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG' };
+    const o = (orderId: string, correlationId: string, orderType: string, extra: Record<string, unknown>) => ({
+      orderId, correlationId, securityId: '302', tradingSymbol: 'NIFTY-Dec2026-25350-CE', productType: 'INTRADAY', transactionType: 'SELL',
+      orderType, quantity: 65, filledQty: 0, orderStatus: 'PENDING', drvOptionType: 'CALL', drvStrikePrice: 25350, drvExpiryDate: '2026-12-01', ...extra,
+    });
+    state.positions = [pos];
+    state.orders = [
+      o('TP1', 'isxtp', 'LIMIT', { price: 230, triggerPrice: 0 }),
+      o('SL1', 'isxsl', 'STOP_LOSS_MARKET', { price: 0, triggerPrice: 190 }),
+      o('ST9', 'strategy', 'STOP_LOSS_MARKET', { price: 0, triggerPrice: 180 }),
+    ];
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    await expect(page.getByTestId('chart-pane-0').getByTestId('position-chip')).toHaveCount(1, { timeout: 15_000 });
+    await page.waitForTimeout(4_000); // a few polls with the position open: nothing is touched
+    expect(state.calls).toEqual([]);
+
+    // the target fills at the broker: the position is gone and TP1 is TRADED
+    state.positions = [];
+    state.orders = state.orders.map(x => (x.orderId === 'TP1' ? { ...x, orderStatus: 'TRADED', filledQty: 65 } : x));
+    const cancels = () => state.calls.filter(c => c.path === '/api/scalper/orders').map(c => c.body?.orderId);
+    await expect.poll(cancels, { timeout: 15_000 }).toEqual(['SL1']);
+    await expect(page.getByText(/cancelled its other target \/ stop order SL1/)).toBeVisible();
+    await page.waitForTimeout(4_000);
+    expect(cancels()).toEqual(['SL1']); // once, and never the strategy's ST9
+    expect(state.calls.filter(c => c.path === '/api/scalper/fast-order')).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('REAL one-cancels-other: a part-filled target cuts this page\'s bigger stop down to what is left', async ({ page, context }) => {
+    test.setTimeout(90_000);
+    const state = newState();
+    const pos = { tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY', netQty: 130, buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG' };
+    state.positions = [pos];
+    state.orders = [
+      { orderId: 'TP1', correlationId: 'isxtp', securityId: '302', tradingSymbol: 'NIFTY-Dec2026-25350-CE', productType: 'INTRADAY', transactionType: 'SELL', orderType: 'LIMIT', price: 230, triggerPrice: 0, quantity: 130, filledQty: 0, orderStatus: 'PENDING', drvOptionType: 'CALL', drvStrikePrice: 25350, drvExpiryDate: '2026-12-01' },
+      { orderId: 'SL1', correlationId: 'isxsl', securityId: '302', tradingSymbol: 'NIFTY-Dec2026-25350-CE', productType: 'INTRADAY', transactionType: 'SELL', orderType: 'STOP_LOSS_MARKET', price: 0, triggerPrice: 190, quantity: 130, filledQty: 0, orderStatus: 'PENDING', drvOptionType: 'CALL', drvStrikePrice: 25350, drvExpiryDate: '2026-12-01' },
+    ];
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    await expect(page.getByTestId('chart-pane-0').getByTestId('position-chip').getByTestId('position-lots')).toHaveText('2', { timeout: 15_000 });
+
+    // half the target fills: 65 left; the stop for 130 would flip the position, so it is cut to 65 (1 lot)
+    state.positions = [{ ...pos, netQty: 65 }];
+    state.orders = state.orders.map(x => (x.orderId === 'TP1' ? { ...x, orderStatus: 'PART_TRADED', filledQty: 65 } : x));
+    const patches = () => state.calls.filter(c => c.path === '/api/scalper/orders#PATCH');
+    await expect.poll(() => patches().length, { timeout: 15_000 }).toBe(1);
+    expect(patches()[0].body).toMatchObject({ orderId: 'SL1', quantity: 65, orderType: 'STOP_LOSS_MARKET', triggerPrice: 190 });
+    expect(state.calls.filter(c => c.path === '/api/scalper/orders')).toEqual([]); // nothing cancelled
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('SIM: a paper target does not come back on the next position after an Exit', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    const pane = page.getByTestId('chart-pane-0');
+    const overlay = pane.getByTestId('quick-overlay');
+    await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
+    await overlay.getByRole('button', { name: 'Quick buy 25350 CE 1 lot' }).click();
+    const chip = pane.getByTestId('position-chip');
+    await chip.getByRole('button', { name: 'Target for CE 25350' }).click();
+    await page.getByRole('dialog', { name: 'Target premium for CE 25350' }).getByLabel('TP premium').fill('250');
+    await page.getByRole('dialog', { name: 'Target premium for CE 25350' }).getByRole('button', { name: 'Set' }).click();
+    await expect(chip.getByTestId('premium-tp')).toContainText('TP 250.00');
+    await page.getByRole('button', { name: 'Exit CE 25350' }).click();
+    await expect(pane.getByTestId('position-chip')).toHaveCount(0, { timeout: 15_000 });
+    await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
+    await overlay.getByRole('button', { name: 'Quick buy 25350 CE 1 lot' }).click();
+    await expect(pane.getByTestId('position-chip')).toHaveCount(1, { timeout: 15_000 });
+    await expect(pane.getByTestId('premium-tp')).toHaveCount(0);
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('SIM Reverse: a paper long becomes the same lots short at once (no question), nothing reaches a broker', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    const pane = page.getByTestId('chart-pane-0');
+    const overlay = pane.getByTestId('quick-overlay');
+    await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
+    await overlay.getByRole('button', { name: 'Quick buy 25350 CE 1 lot' }).click();
+    const chip = pane.getByTestId('position-chip');
+    await expect(chip.getByTestId('leg-label')).toHaveText('B CE 25350', { timeout: 15_000 });
+    await chip.getByRole('button', { name: 'Reverse CE 25350' }).click();
+    await expect(chip.getByTestId('leg-label')).toHaveText('S CE 25350', { timeout: 15_000 });
+    await expect(chip.getByTestId('position-lots')).toHaveText('1');
+    await expect(page.getByRole('alertdialog')).toHaveCount(0);
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
   test('Quick Trade REAL TSL on a strike: one market close when the premium crosses the stop, x removes a trail', async ({ page, context }) => {
     test.setTimeout(90_000);
     const state = newState();

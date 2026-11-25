@@ -21,6 +21,8 @@ interface KState {
   freezeQty?: number;
   /** symbol-lookup fails this many times before answering (retry test) */
   symbolFails?: number;
+  /** extra Kotak contracts in the symbol lookup (another expiry) */
+  extraSyms?: Record<string, unknown>;
 }
 
 function candles() {
@@ -58,6 +60,7 @@ async function mock(page: Page, s: KState) {
       if ((s.symbolFails ?? 0) > 0) { s.symbolFails = (s.symbolFails ?? 0) - 1; return json(route, { success: false, error: 'Kotak instrument cache is being rebuilt' }, 500); }
       const map: Record<string, unknown> = {};
       for (const k of Object.keys(DHAN_IDS)) for (const t of ['CE', 'PE'] as const) map[KSYM(k, t)] = { underlying: 'NIFTY', expiry: '2026-12-01', strike: Number(k), side: t };
+      Object.assign(map, s.extraSyms ?? {});
       return json(route, { success: true, data: map });
     }
     if (p === '/api/scalper/kotak/funds') return json(route, { success: true, data: { availabelBalance: 500000, availableBalance: 500000, utilizedAmount: 1200 } });
@@ -180,6 +183,26 @@ test.describe('Index Scalper on Kotak', () => {
     await row.getByRole('button', { name: /^Exit / }).click();
     await expect(page.getByRole('status').filter({ hasText: 'unknown outcome' })).toBeVisible({ timeout: 15_000 });
     expect(kotakOrderPosts(s)).toEqual([]);
+    expect(s.blocked).toEqual([]);
+  });
+
+  test('Reverse on Kotak trades the position\'s own contract (another expiry), close then open, never the one on screen', async ({ page, context }) => {
+    const sym = 'NIFTY26122925350CE'; // the 29-Dec contract; the screen shows 01-Dec (KSYM's would be NIFTY2612025350CE)
+    const s: KState = {
+      calls: [], blocked: [], records: [], book: [],
+      extraSyms: { [sym]: { underlying: 'NIFTY', expiry: '2026-12-29', strike: 25350, side: 'CE' } },
+      positions: [{ tradingSymbol: sym, securityId: '77001', netQty: 65, buyQty: 65, sellQty: 0, buyAvg: 300, sellAvg: 0, productType: 'MIS', realizedProfit: 0, lastTradedPrice: 0, unrealizedProfit: 0 }],
+    };
+    await openOnKotak(page, context, s);
+    await armReal(page);
+    const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
+    await expect(chip).toHaveCount(1, { timeout: 15_000 });
+    await chip.getByRole('button', { name: 'Reverse CE 25350' }).click();
+    await page.getByRole('alertdialog', { name: 'Reverse position' }).getByRole('button', { name: 'Reverse to short' }).click();
+    await expect.poll(() => kotakOrderPosts(s).length, { timeout: 15_000 }).toBe(2);
+    expect(kotakOrderPosts(s)[0].body).toMatchObject({ tradingSymbol: sym, quantity: 65, side: 'SELL', orderType: 'MARKET', intent: 'close' });
+    expect(kotakOrderPosts(s)[1].body).toMatchObject({ tradingSymbol: sym, quantity: 65, side: 'SELL', orderType: 'MARKET', intent: 'open' });
+    expect(dhanAccountCalls(s)).toEqual([]);
     expect(s.blocked).toEqual([]);
   });
 

@@ -98,6 +98,29 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
 - Trade-off to state when asked: a running strategy's leg on the same contract can now be closed from here, and the
   strategy will not know.
 
+### Reverse position (rebuilt 2026-11-25; rules `lib/indexScalperReverse.ts`)
+- REAL asks first (`Reverse position` dialog), then: fresh positions read (never the chip's 3 s-old qty) -> fresh order
+  book -> cancel THIS page's working orders on the closing side of that contract (the old TP / SL would add to the new
+  position after the flip) -> refuse while another placer's order works there -> close in full via `exitRealRow`
+  (`isxx`, Kotak freeze slices) -> open the same lots on the other side only if the close was placed.
+- Always the position's OWN contract (`exactContract` on `TicketRequest`): Dhan security id / Kotak trading symbol. A
+  lookup by strike in the expiry on screen traded another expiry's contract on Kotak (bug found 2026-11-25).
+- The opening half is capped per order (`reverseLotsError`); above the cap the user exits, then opens in smaller orders.
+  MCX crude MIS legs refuse (NRML-only). SIM: close then open at once, no question; a refused open says so.
+- Order inside REAL: foreign check (nothing sent) -> CLOSE -> cancel own closing-side orders -> fresh positions read
+  (refuse if already flipped) -> OPEN. Cancelling before the close left the position without its stop when the close
+  was rejected (review 2026-11-25).
+
+### One-cancels-other for REAL target / stop (`lib/indexScalperOco.ts`, added 2026-11-25)
+- Diffs the REAL book per contract (`netBySecurity` -> `ocoEvents`): FLAT -> cancel this page's own working LIMIT / SL /
+  SL-M orders on the old closing side (a stop left on a flat position opens a new one); REDUCED -> cut this page's
+  untouched bigger target / stop to what is left (`onModifyOrder`), so it can never flip the position. Covers a target or
+  stop filling, Exit / Exit All / TSL exits and closes done elsewhere.
+- A flat is confirmed by a fresh positions read before any cancel; the order book is re-read; market orders and other
+  placers' orders are never touched; skipped while a Reverse runs (`reverseBusyRef`); Web Lock `index-scalper-oco`
+  serialises open tabs. Browser-only: needs the page open with REAL armed, and reacts on the 3 s positions poll.
+- SIM: the paper watcher already clears both levels on a hit; levels of a leg that is no longer open are dropped.
+
 ### Trailing stop loss (TSL, added 2026-11-25)
 - **Browser-only, by the owner's choice**: no order rests at the broker. The stop follows the best price of the leg's own
   instrument (option premium / future) `pts` behind it and never loosens; when crossed, the tab that holds it sends a

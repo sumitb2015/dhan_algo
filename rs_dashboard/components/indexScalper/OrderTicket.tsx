@@ -25,6 +25,9 @@ export interface TicketRequest {
   /** The order closes an existing leg (TP / SL bracket): it keeps `product` as given. Otherwise it opens, and on MCX
    *  crude the terminal sends it as MARGIN whatever `product` says (lib/indexScalperInstrument.ts openingProduct). */
   closesLeg?: boolean;
+  /** The contract is an existing position's own (Reverse): send it as is, by its Dhan security id / Kotak trading
+   *  symbol, never looked up again by strike in the expiry on screen (that is another contract when they differ). */
+  exactContract?: boolean;
 }
 
 const TYPES: { v: TicketOrderType; label: string }[] = [
