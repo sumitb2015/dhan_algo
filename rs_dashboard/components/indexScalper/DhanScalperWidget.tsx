@@ -22,6 +22,10 @@ import {
   calcOptionBuyReq, computeAtmStrikes, formatDhanExpiry, formatManageScripExpiry, getStrikeOffsetLabel,
 } from '@/lib/dhanScalperMath';
 import { cn } from '@/lib/utils';
+import { readPref, savePref } from '@/lib/localPref';
+
+const ATM_OPEN_KEY = 'indexScalper.widgetAtmOpen.v1';
+const FUT_OPEN_KEY = 'indexScalper.widgetFutOpen.v1';
 
 const STEP = 50; // NIFTY strike step
 
@@ -126,6 +130,15 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
   const [ceCardOpen, setCeCardOpen] = useState(false);
   const [peCardOpen, setPeCardOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // ATM and FUT sections fold like the CE / PE cards; open by default, the choice remembered per viewer.
+  const [atmOpen, setAtmOpen] = useState(true);
+  const [futOpen, setFutOpen] = useState(true);
+  useEffect(() => {
+    if (readPref(ATM_OPEN_KEY) === '0') setAtmOpen(false);
+    if (readPref(FUT_OPEN_KEY) === '0') setFutOpen(false);
+  }, []);
+  const toggleAtm = () => setAtmOpen(o => { savePref(ATM_OPEN_KEY, o ? '0' : '1'); return !o; });
+  const toggleFut = () => setFutOpen(o => { savePref(FUT_OPEN_KEY, o ? '0' : '1'); return !o; });
   const [productDraft, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
   // MCX crude is NRML only (Intraday disabled): Kotak's RMS refuses a fresh MIS crude position.
   const crudeNrml = nrmlOnly(feed.underlying);
@@ -271,7 +284,16 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
 
         <div className="p-3 flex flex-col gap-2.5">
           {why && <div role="status" className="text-[11px] text-amber-300">{why}: orders are off.</div>}
-          <div>
+          <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-2.5 shadow-sm">
+            <button type="button" aria-expanded={atmOpen} aria-label={atmOpen ? 'Collapse ATM sell' : 'Expand ATM sell'} onClick={toggleAtm}
+              className={cn('w-full flex items-center justify-between py-0.5 rounded', FOCUS)}>
+              <span className="flex items-center gap-2">
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded border text-amber-300 bg-amber-500/10 border-amber-500/30">ATM</span>
+                <span className="text-xs font-bold text-zinc-100 tabular-nums">Sell PE {base?.peStrike ?? '—'} · CE {base?.ceStrike ?? '—'}</span>
+              </span>
+              <span className="text-zinc-400">{atmOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}</span>
+            </button>
+            {atmOpen && (<div className="mt-2.5">
             <div className="grid grid-cols-[1fr_100px_1fr] items-center mb-1 px-1">
               <div className="text-xs font-semibold text-zinc-400 text-center tabular-nums">{base?.peStrike ?? '—'}</div>
               <div />
@@ -298,18 +320,23 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
                 <span className="text-[11px] text-zinc-400 text-center mt-1 tabular-nums" title={marginTitle}>Margin: {kotakReal ? '—' : inr(atmCeSellReq)}</span>
               </div>
             </div>
+            </div>)}
           </div>
           {card('CE')}
           {card('PE')}
           {isMcx(feed.underlying) && futContract && (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-2.5 shadow-sm">
-              <div className="flex items-center justify-between py-0.5">
-                <span className="text-xs font-bold text-amber-300">
+              <button type="button" aria-expanded={futOpen} aria-label={futOpen ? 'Collapse futures' : 'Expand futures'} onClick={toggleFut}
+                className={cn('w-full flex items-center justify-between py-0.5 rounded', FOCUS)}>
+                <span className="text-xs font-bold text-amber-300 tabular-nums">
                   FUT · {futContract.expiry ? futContract.expiry.slice(5) : ''} ({futContract.ltp ? futContract.ltp.toFixed(2) : '—'})
                 </span>
-                <span className="text-[10px] text-zinc-400">Mini 10 bbl</span>
-              </div>
-              <div className="mt-2 grid grid-cols-[1fr_100px_1fr] gap-2 items-center">
+                <span className="flex items-center gap-2">
+                  <span className="text-[10px] text-zinc-400">Mini 10 bbl</span>
+                  <span className="text-zinc-400">{futOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}</span>
+                </span>
+              </button>
+              {futOpen && <div className="mt-2 grid grid-cols-[1fr_100px_1fr] gap-2 items-center">
                 <button
                   type="button"
                   disabled={busy || !ready || !futContract.ltp}
@@ -329,7 +356,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
                 >
                   Buy FUT
                 </button>
-              </div>
+              </div>}
             </div>
           )}
         </div>

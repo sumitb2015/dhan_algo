@@ -494,6 +494,17 @@ test.describe('Index Scalper', () => {
     await expect(chip).toHaveAttribute('data-side', 'short');
     await expect(chip.getByTestId('position-lots')).toHaveAttribute('title', 'Short 2 lots (130 units)'); // 2 lots x 65
 
+    // the ATM sell section folds like the CE / PE cards; the choice survives closing and reopening the widget
+    await w.getByRole('button', { name: 'Collapse ATM sell' }).click();
+    await expect(w.getByRole('button', { name: /^Sell ATM call/ })).toHaveCount(0);
+    await expect(w).toContainText('Sell PE 25350 · CE 25350');
+    await page.getByRole('button', { name: 'Scalper', exact: true }).click();
+    await expect(w).toHaveCount(0);
+    await page.getByRole('button', { name: 'Scalper', exact: true }).click();
+    await expect(w.getByRole('button', { name: 'Expand ATM sell' })).toHaveAttribute('aria-expanded', 'false');
+    await w.getByRole('button', { name: 'Expand ATM sell' }).click();
+    await expect(w.getByRole('button', { name: /^Sell ATM call/ })).toBeVisible();
+
     // X closes the widget AND disarms one-click: the chain's B opens the ticket again instead of trading
     await w.getByRole('button', { name: 'Close scalper' }).click();
     await expect(w).toHaveCount(0);
