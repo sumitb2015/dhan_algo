@@ -103,6 +103,28 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
   account reads are rate-limited (order book every 10 s vs Dhan 5 s); its contract reads retry every 15 s; sell
   margin is not shown on Kotak.
 
+### Market watch windows (Top Indices / Top 10 Stocks, added 2026-11-25)
+- Header buttons **Indices** / **Top 10** open draggable windows (`MarketWatchWindow.tsx`). Watch-only: no order route,
+  no trade buttons; the e2e asserts `state.calls` stays empty.
+- Data is WebSocket-only: `live_indices_ws.py` / `live_equity_ws.py` read the shared Dhan WebSocket hub and rewrite
+  their JSON every 2 s; the SSE route `api/index-scalper/market-watch/stream/` checks both files each 1 s and pushes a
+  frame only when an `updated_at` changes (plus a 15 s keepalive comment). `?want=indices,stocks` sends only the open
+  windows' blocks; stocks are cut to the 10 symbols server-side. No REST quote call, no spawn in the route.
+- Indices = the hub's 9 headline rows (`WATCH_INDICES`: NIFTY, BANKNIFTY, FINNIFTY, IT, AUTO, PHARMA, METAL, REALTY,
+  VIX). Crude is left out on purpose: `/api/scalper/top-indices` prices it over REST.
+- Top 10 = the static `NIFTY_TOP10_BY_WEIGHT` in `lib/nifty50.ts` (same list as AdvancedScalper's `TopWeightStocks`).
+  It is hand-maintained and was behind `index_constituents/nifty50_weights.csv` on 2026-11-25 (ITC listed where M&M
+  is now #10, Axis above Infosys); the owner chose to keep the static list. Don't switch the ranking without asking.
+  The footer "weighted pull" is sum(weight x change%) / 100 over priced rows, with "n/10 priced" when some are missing.
+- `useMarketWatch` opens ONE EventSource only while a window is open (closed when both are). It fires the idempotent
+  `POST /api/live-indices` / `/api/live-equity {action:'start'}` once per page load per window and **never stops a
+  bridge** (other pages share them).
+- `live_equity_ws.py` writes a naive local `updated_at`; the route converts both timestamps to absolute ISO
+  (`absIso`) so the browser's LIVE / STALE (15 s, `WATCH_STALE_MS`) never guesses a zone. Staleness comes from the
+  file's own timestamp, not the bridge status, and a 1 s client clock turns a frozen feed STALE with no frame arriving.
+- No genuine previous close (`prev_close <= 0`: the equity bridge zeroes Dhan's post-15:30 flip) = change shown as a
+  dash, never 0.00%; unknown values sort last in both directions (`sortRows`).
+
 ### Prices and feed
 - One shared options bridge per underlying/expiry, 35 strikes each side. A strike outside it has REST history but no
   live ticks; market orders on it refuse.
@@ -116,6 +138,10 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
 - :3000 is usually `next start` (production): source edits need `npm run build` + restart. Restarting during market
   hours also stops the server watchers (price ladder, Kotak/Zerodha guards, Gearbox square-off).
 - e2e on its own dev server (:3100), see `dhan-trading-chart` "Verifying a chart change".
+- Market watch: `node --test lib/indexScalperMarketWatch.test.ts`; e2e "Top indices / Top 10 stocks" in
+  `e2e/index-scalper-layout.spec.ts` mocks the SSE route with a single `text/event-stream` body stamped `sessionIso()`
+  (EventSource reconnects on its own) and records bridge starts in `state.bridgeStarts`, not `state.calls` (other
+  tests assert `calls` is empty). Header buttons need `exact: true`: "Top indices" also matches "Close Top Indices".
 
 ## Common mistakes
 
@@ -126,3 +152,5 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
 | Exiting a Kotak contract with an unknown order | Exit lands before the unknown fill, flips | `heldByUnknown` 60 s hold |
 | Expecting broker legs in SIM | "Mobile-app trade not shown" | REAL shows the broker book; SIM is paper only |
 | Testing edits against :3000 | Old behaviour | it is a production build: rebuild or use :3100 dev |
+| Stopping a market-watch bridge on window close | Live Dashboard / Advanced Scalper go dark | start only; bridges are shared |
+| Showing 0.00% when prev close is unknown | A flat-looking stock after 15:30 | `changePct: null`, rendered as a dash |
