@@ -6,7 +6,6 @@ import {
   todaysRecords, type KotakRecord,
 } from './indexScalperKotak.ts';
 import { sourceLotCapError } from './kotakOrderRules.ts';
-import { ownedCloseOrder } from './indexScalperPositions.ts';
 
 const SYM = 'NIFTY2612025350PE';
 const rec = (orderId: string, side: 'BUY' | 'SELL', product = 'MIS'): KotakRecord => ({ orderId, symbol: SYM, side, product, at: 0 });
@@ -25,8 +24,6 @@ test('Kotak ownership: only recorded order IDs, their filled qty, net of this pa
   const own = ownedQtyFromKotakOrders(book, [rec('K1', 'SELL'), rec('K2', 'SELL'), rec('K3', 'BUY'), rec('K4', 'SELL', 'NRML')]);
   assert.equal(own.get(`${SYM}|INTRADAY`), 0); // sold 65, bought back 65
   assert.equal(own.get(`${SYM}|MARGIN`), -65);
-  // with a strategy also short 650 on the same contract, Exit closes only our 65
-  assert.deepEqual(ownedCloseOrder(-715, own.get(`${SYM}|MARGIN`)!), { side: 'BUY', units: 65 });
 });
 
 test('unknown outcomes hold exits on that symbol for 60 s, and are not counted as owned', () => {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyFill, tickError, legAnchor, legPnl, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, parseNiftyOption, pnlSummary, totalPnl,
+  applyFill, tickError, legAnchor, legPnl, legsFromDhanPositions, orderUnits, brokerCloseOrder, parseNiftyOption, pnlSummary, totalPnl,
   type ScalperLeg,
 } from './indexScalperPositions.ts';
 import { applyTick, computeIndicator, flipsAtLast, mergeHistory, migrateIndicatorsV1, pointColor, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
@@ -51,28 +51,11 @@ test('partial P&L counts the legs it leaves out', () => {
   assert.deepEqual(pnlSummary([]), { pnl: null, unpriced: 0 });
 });
 
-test('ownership is only what isx-tagged orders filled, per security + product, net of its own exits', () => {
-  const orders = [
-    { correlationId: 'isxabc1', securityId: '111', productType: 'INTRADAY', transactionType: 'SELL', filledQty: 65 },
-    { correlationId: 'isxabc2', securityId: '111', productType: 'INTRADAY', transactionType: 'SELL', filledQty: 65 },
-    { correlationId: 'isxabc3', securityId: '111', productType: 'INTRADAY', transactionType: 'BUY', filledQty: 65 },
-    { correlationId: 'isxabc4', securityId: '111', productType: 'MARGIN', transactionType: 'SELL', filledQty: 0 }, // unfilled
-    { correlationId: 'mlfxyz', securityId: '111', productType: 'INTRADAY', transactionType: 'SELL', filledQty: 650 }, // another terminal
-    { correlationId: '', securityId: '222', productType: 'INTRADAY', transactionType: 'BUY', filledQty: 75 }, // strategy / manual
-  ];
-  const own = ownedQtyFromOrders(orders);
-  assert.equal(own.get('111|INTRADAY'), -65);
-  assert.equal(own.has('111|MARGIN'), false);
-  assert.equal(own.has('222|INTRADAY'), false);
-});
-
-test('owned close is clamped by both the broker row and what this page owns, never flips, never touches others', () => {
-  assert.deepEqual(ownedCloseOrder(-715, -65), { side: 'BUY', units: 65 }); // a strategy holds the other 650
-  assert.deepEqual(ownedCloseOrder(-65, -130), { side: 'BUY', units: 65 }); // broker already reduced it
-  assert.deepEqual(ownedCloseOrder(130, 130), { side: 'SELL', units: 130 });
-  assert.equal(ownedCloseOrder(-65, 0), null); // not ours
-  assert.equal(ownedCloseOrder(65, -65), null); // opposite direction: not ours to close
-  assert.equal(ownedCloseOrder(0, 65), null);
+test('close order takes the whole broker row whoever opened it, opposite side, never flips', () => {
+  assert.deepEqual(brokerCloseOrder(-715), { side: 'BUY', units: 715 }); // includes quantity opened elsewhere (mobile app)
+  assert.deepEqual(brokerCloseOrder(130), { side: 'SELL', units: 130 });
+  assert.equal(brokerCloseOrder(0), null);
+  assert.equal(brokerCloseOrder(Number.NaN), null);
 });
 
 test('applyFill blends adds, keeps avg on reduce, resets on flip and flat', () => {

@@ -77,8 +77,8 @@ export interface OrderRowView {
   orderType: string; product: string; qty: number | null; tradedQty: number | null;
   price: number | null; trigger: number | null; avgTraded: number | null;
   status: string; bucket: OrderBucket; reason: string;
-  /** This page's own order (isx correlationId) still working at the exchange: the panel may cancel it. Orders a
-   *  strategy, another terminal or Dhan's own app placed are never cancelled from here. */
+  /** Still working at the exchange: the panel and chart may cancel it, whoever placed it (this page, the mobile app,
+   *  another terminal or a strategy). */
   cancellable: boolean;
 }
 
@@ -88,7 +88,7 @@ function isOptionOrder(o: Row): boolean {
   return /(CE|PE)$/.test(String(o.tradingSymbol ?? o.trading_symbol ?? '').toUpperCase());
 }
 
-export function orderRows(orders: Row[], ownSource = 'isx'): OrderRowView[] {
+export function orderRows(orders: Row[]): OrderRowView[] {
   return orders.map(o => {
     const status = String(o.orderStatus ?? '').toUpperCase();
     const bucket = orderBucket(status);
@@ -117,7 +117,7 @@ export function orderRows(orders: Row[], ownSource = 'isx'): OrderRowView[] {
       status: status.replace(/_/g, ' '),
       bucket,
       reason: String(o.omsErrorDescription ?? '').trim(),
-      cancellable: bucket === 'open' && String(o.correlationId ?? '').startsWith(ownSource),
+      cancellable: bucket === 'open',
     };
   }).sort((a, b) => (a.sortKey < b.sortKey ? 1 : a.sortKey > b.sortKey ? -1 : 0));
 }

@@ -42,14 +42,14 @@ test('order row reads like Dhan\'s panel', () => {
   assert.deepEqual(orderCounts([r]).map(c => `${c.label} ${c.n}`), ['All 1', 'Cancelled 1']);
 });
 
-test('only this page\'s own working orders can be cancelled from the panel; newest first', () => {
+test('every working order can be cancelled from the panel, whoever placed it; newest first', () => {
   const rows = orderRows([
     { ...cancelled, orderId: 'A', orderStatus: 'PENDING', correlationId: 'isxk1', createTime: '2026-11-25 10:00:00' },
-    { ...cancelled, orderId: 'B', orderStatus: 'PENDING', correlationId: 'sgx123', createTime: '2026-11-25 10:01:00' }, // a strategy's
+    { ...cancelled, orderId: 'B', orderStatus: 'PENDING', correlationId: 'sgx123', createTime: '2026-11-25 10:01:00' }, // a strategy's: cancellable too
     { ...cancelled, orderId: 'C', orderStatus: 'TRADED', correlationId: 'isxk2', createTime: '2026-11-25 09:59:00' },
   ]);
   assert.deepEqual(rows.map(r => r.id), ['B', 'A', 'C']);
-  assert.deepEqual(rows.map(r => r.cancellable), [false, true, false]);
+  assert.deepEqual(rows.map(r => r.cancellable), [true, true, false]);
   assert.deepEqual(orderCounts(rows).map(c => `${c.label} ${c.n}`), ['All 3', 'Open 2', 'Executed 1']);
 });
 

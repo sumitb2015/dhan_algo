@@ -101,32 +101,12 @@ export const ISX_SOURCE = 'isx';
 
 export const ownKey = (securityId: string, product: string) => `${securityId}|${product.toUpperCase()}`;
 
-/** Signed units this page's own orders have FILLED today, per `ownKey(securityId, product)`, read from Dhan's order
- *  book (every order this page sends carries an `isx…` correlationId). Unfilled / rejected orders count 0 — only
- *  `filledQty` moves ownership — and this page's exits net it back down. Quantity opened by a strategy, another terminal
- *  or by hand never appears here, so it can never be closed from this page. */
-export function ownedQtyFromOrders(orders: Record<string, unknown>[], source = ISX_SOURCE): Map<string, number> {
-  const out = new Map<string, number>();
-  for (const o of orders) {
-    if (!String(o.correlationId ?? '').startsWith(source)) continue;
-    const filled = Number(o.filledQty);
-    if (!Number.isFinite(filled) || filled <= 0) continue;
-    const side = String(o.transactionType ?? '').toUpperCase();
-    if (side !== 'BUY' && side !== 'SELL') continue;
-    const securityId = String(o.securityId ?? '');
-    if (!securityId) continue;
-    const k = ownKey(securityId, String(o.productType ?? ''));
-    out.set(k, (out.get(k) ?? 0) + (side === 'BUY' ? filled : -filled));
-  }
-  return out;
-}
-
-/** Close order for one broker row: what this page owns, clamped by what the broker still shows, side opposite to it.
- *  null when the page owns nothing in that direction (the rest belongs to someone else and is left alone). */
-export function ownedCloseOrder(brokerNet: number, owned: number): { side: 'BUY' | 'SELL'; units: number } | null {
-  if (!Number.isFinite(brokerNet) || !Number.isFinite(owned) || brokerNet === 0 || owned === 0) return null;
-  if (Math.sign(brokerNet) !== Math.sign(owned)) return null;
-  return { side: brokerNet > 0 ? 'SELL' : 'BUY', units: Math.min(Math.abs(brokerNet), Math.abs(owned)) };
+/** Close order for one broker row: its whole open quantity, side opposite to it. The page closes any position on its
+ *  underlying, whoever opened it (this page, the mobile app, another terminal or a strategy); sizing off the broker's
+ *  own row read right before the exit means the order can never flip the position. null when the row is flat. */
+export function brokerCloseOrder(brokerNet: number): { side: 'BUY' | 'SELL'; units: number } | null {
+  if (!Number.isFinite(brokerNet) || brokerNet === 0) return null;
+  return { side: brokerNet > 0 ? 'SELL' : 'BUY', units: Math.abs(brokerNet) };
 }
 
 /** Apply a fill to a signed position, returning the new net qty and average (average of the open lot only). */

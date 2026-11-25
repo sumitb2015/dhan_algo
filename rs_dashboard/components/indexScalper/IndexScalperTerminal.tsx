@@ -4,7 +4,9 @@
 //
 // SIM (paper, never calls an order route) is the default. REAL is armed per page load and never persisted. Every REAL
 // order goes through /api/scalper/fast-order tagged source 'isx' (server-side cap), carries an idempotency key, and an
-// unknown outcome is reported, never retried. Exit quantities come from the broker's live position, not from UI state.
+// unknown outcome is reported, never retried. Exit quantities come from the broker's live position, not from UI state:
+// Exit / Exit All / "-" close ANY position on the underlying (opened here, in the mobile app, another terminal or a
+// strategy), sized off a fresh broker read so an exit can never flip a position.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -33,11 +35,11 @@ import {
   INSTRUMENTS, dhanOrderQty, kotakOrderQty, pnlMultiplier, lotUnits, qtyLots, nrmlOnly, openingProduct, type Underlying,
 } from '@/lib/indexScalperInstrument';
 import {
-  MAX_LOTS, applyFill, legsFromDhanPositions, legsKey, orderUnits, ownedCloseOrder, ownedQtyFromOrders, type ScalperLeg,
+  MAX_LOTS, applyFill, brokerCloseOrder, legsFromDhanPositions, legsKey, orderUnits, type ScalperLeg,
 } from '@/lib/indexScalperPositions';
 import { closeOrderProduct } from '@/lib/positionProduct';
 import {
-  dashProduct, freezeSlices, heldByUnknown, kotakOrdersAsDhan, legsFromKotakPositions, ownedQtyFromKotakOrders, recordedIds,
+  dashProduct, freezeSlices, heldByUnknown, kotakOrdersAsDhan, legsFromKotakPositions, recordedIds,
   withResolvedUnknowns, type KotakRecord, type KotakSymbolInfo,
 } from '@/lib/indexScalperKotak';
 import { readPref, savePref } from '@/lib/localPref';
@@ -637,38 +639,28 @@ export default function IndexScalperTerminal() {
     return { ok: true, text: `SIM closed ${sl.strike} ${sl.type} @ ${leg.ltp.toFixed(2)}` };
   }, [sim.legs, simFill, underlying]);
 
-  /** Signed units this page's own (`isx`-tagged) orders filled today, per security + product, from Dhan's order book.
-   *  null when the book cannot be read: an exit is then refused rather than sized off the broker's whole position. */
-  const loadOwned = useCallback(async (): Promise<{ owned: Map<string, number>; records: KotakRecord[]; book: Record<string, unknown>[] } | null> => {
+  /** Kotak only: this page's recorded orders + Kotak's order book, for the unknown-outcome hold before an exit (an
+   *  order whose outcome is unknown may still fill, and an exit sized before it lands could flip). Dhan needs nothing. */
+  const loadKotakGuard = useCallback(async (): Promise<{ records: KotakRecord[]; book: Record<string, unknown>[] } | null> => {
     try {
-      if (brokerRef.current === 'kotak') {
-        // Kotak: what THIS page's recorded order IDs filled, from Kotak's own order book.
-        const [records, r] = await Promise.all([loadKotakRecords(), fetch(scalperRoute('kotak', 'orders'))]);
-        const j = await r.json() as { success: boolean; data?: Record<string, unknown>[] };
-        if (!records || !j.success || !Array.isArray(j.data)) return null;
-        return { owned: ownedQtyFromKotakOrders(j.data, records), records, book: j.data };
-      }
-      const r = await fetch('/api/scalper/orders');
+      const [records, r] = await Promise.all([loadKotakRecords(), fetch(scalperRoute('kotak', 'orders'))]);
       const j = await r.json() as { success: boolean; data?: Record<string, unknown>[] };
-      return j.success && Array.isArray(j.data) ? { owned: ownedQtyFromOrders(j.data), records: [], book: [] } : null;
+      if (!records || !j.success || !Array.isArray(j.data)) return null;
+      return { records, book: j.data };
     } catch { return null; }
   }, [loadKotakRecords]);
 
-  /** Close what THIS page opened on one broker row (security + product), clamped by what the broker still shows.
-   *  Quantity a strategy, another terminal or a manual order holds on the same contract is never touched. */
-  // `maxUnits` (broker units) caps the close: the chip's "-" takes one lot off through this same owned-quantity path.
-  const exitRealRow = useCallback(async (leg: ScalperLeg, owned: Map<string, number>, records: KotakRecord[] = [], book: Record<string, unknown>[] = [], maxUnits?: number): Promise<Outcome & { skipped?: boolean }> => {
+  /** Close one broker row (security + product) in full, whoever opened it; `leg` is the row from a fresh broker read.
+   *  `maxUnits` (broker units) caps the close: the chip's "-" takes one lot off through this same path. */
+  const exitRealRow = useCallback(async (leg: ScalperLeg, records: KotakRecord[] = [], book: Record<string, unknown>[] = [], maxUnits?: number): Promise<Outcome> => {
     const label = `${leg.strike} ${leg.type}${leg.product ? ` ${leg.product}` : ''}`;
     const kotak = brokerRef.current === 'kotak';
     // Kotak: an order on this contract whose outcome is unknown may still fill; an exit sized before it lands could flip.
     if (kotak && heldByUnknown(records, leg.securityId, Date.now(), 60_000, book)) {
       return { ok: false, text: `${label}: an order on this contract has an unknown outcome; exit held for up to 60 s (check Orders)` };
     }
-    const full = ownedCloseOrder(leg.netQty, owned.get(leg.id) ?? 0);
-    if (!full) return { ok: false, skipped: true, text: `${label}: not opened from this page today, left open (square it off where it was opened)` };
-    if (maxUnits !== undefined && full.units < maxUnits) {
-      return { ok: false, text: `${label}: this page opened less than one lot of it, nothing taken off` };
-    }
+    const full = brokerCloseOrder(leg.netQty);
+    if (!full) return { ok: true, text: `${label}: already flat` };
     const order = maxUnits !== undefined ? { ...full, units: Math.min(full.units, maxUnits) } : full;
     const product = closeOrderProduct(kotak ? 'kotak' : 'dhan', kotak ? (leg.product === 'MARGIN' ? 'NRML' : leg.product === 'INTRADAY' ? 'MIS' : leg.product) : leg.product);
     if (!product || product.assumed) return { ok: false, text: `${label}: unsupported or missing product "${leg.product}", square it off at the broker` };
@@ -693,24 +685,22 @@ export default function IndexScalperTerminal() {
     } else {
       out = await sendReal({ securityId: leg.securityId, quantity: order.units, side: order.side, orderType: 'MARKET', ...product.fields });
     }
-    if (out.ok && maxUnits === undefined && order.units < Math.abs(leg.netQty)) {
-      return { ...out, text: `${out.text}: closed ${order.units} of ${Math.abs(leg.netQty)}, the rest was not opened from this page` };
-    }
     return out;
   }, [sendReal]);
 
-  /** Fresh broker rows + ownership, read together right before an exit. */
-  const readExitState = useCallback(async (): Promise<{ live: ScalperLeg[]; owned: Map<string, number>; records: KotakRecord[]; book: Record<string, unknown>[] } | string> => {
-    const [rows, own] = await Promise.all([loadPositions(true), loadOwned()]);
+  /** Fresh broker rows (plus, on Kotak, the unknown-outcome guard) read right before an exit. */
+  const readExitState = useCallback(async (): Promise<{ live: ScalperLeg[]; records: KotakRecord[]; book: Record<string, unknown>[] } | string> => {
+    const kotak = brokerRef.current === 'kotak';
+    const [rows, guard] = await Promise.all([loadPositions(true), kotak ? loadKotakGuard() : Promise.resolve({ records: [], book: [] })]);
     if (!rows) return 'Could not read live positions: nothing was closed';
-    if (!own) return 'Could not read the order book to tell which quantity this page opened: nothing was closed';
+    if (!guard) return 'Could not read the Kotak order book (needed to check for orders with an unknown outcome): nothing was closed';
     const f = feedRef.current;
     if (brokerRef.current === 'kotak' && !f.kotak) return `${f.kotakError ?? 'Kotak contracts are not loaded yet'}: nothing was closed`;
     const live = brokerRef.current === 'kotak'
       ? legsFromKotakPositions(rows, f.kotak?.symbols ?? {}, () => null, underlying)
       : legsFromDhanPositions(rows, f.ltpById, underlying);
-    return { live, owned: own.owned, records: own.records, book: own.book };
-  }, [loadPositions, loadOwned, underlying]);
+    return { live, records: guard.records, book: guard.book };
+  }, [loadPositions, loadKotakGuard, underlying]);
 
   const exitLeg = useCallback(async (leg: ScalperLeg) => {
     if (exitingId) return;
@@ -723,7 +713,7 @@ export default function IndexScalperTerminal() {
         if (typeof st === 'string') out = { ok: false, text: st };
         else {
           const row = st.live.find(l => l.id === leg.id);
-          out = row ? await exitRealRow(row, st.owned, st.records, st.book) : { ok: true, text: 'Already flat' };
+          out = row ? await exitRealRow(row, st.records, st.book) : { ok: true, text: 'Already flat' };
         }
         loadPositions();
       }
@@ -747,18 +737,15 @@ export default function IndexScalperTerminal() {
       // closed twice. Cover shorts before selling longs so a hedge is never gone while its short is still open.
       const ordered = [...st.live.filter(l => l.netQty < 0), ...st.live.filter(l => l.netQty > 0)];
       const problems: string[] = [];
-      let skipped = 0;
       let sent = 0;
       for (const l of ordered) {
-        const o = await exitRealRow(l, st.owned, st.records, st.book);
-        if (o.skipped) { skipped++; continue; }
+        const o = await exitRealRow(l, st.records, st.book);
         if (!o.ok) { problems.push(o.text); if (o.unknown) break; continue; }
         sent++;
       }
-      const note = skipped ? ` · ${skipped} leg(s) not opened from this page left open` : '';
       flash({
         ok: problems.length === 0,
-        text: problems.length ? `Exit All incomplete: ${problems.join(' · ')}${note}` : `Exit All sent for ${sent} leg(s) opened from this page${note}`,
+        text: problems.length ? `Exit All incomplete: ${problems.join(' · ')}` : `Exit All sent for ${sent} leg(s)`,
       });
       loadPositions();
     } finally { setExitingId(null); }
@@ -785,7 +772,7 @@ export default function IndexScalperTerminal() {
     };
   }, [feed.quotes, feed.strikeIds, feed.kotak, feed.expiry]);
 
-  /** Cancel one of THIS page's working orders (the panel offers it only for isx-tagged ones). */
+  /** Cancel any working order on the broker's book (this page's, the mobile app's, another terminal's). */
   const cancelOrder = useCallback(async (orderId: string) => {
     if (cancellingId) return;
     setCancellingId(orderId);
@@ -1123,8 +1110,8 @@ export default function IndexScalperTerminal() {
     }
   }, [ticketBusy, placeContract, flash]);
   // Quick Trade chip +/-: one lot more in the leg's own direction, or one lot taken off. "+" is an opening order
-  // (placeContract: lot cap, live price, session, isx). "-" closes through the exit path (fresh broker read, only what
-  // this page opened, Kotak freeze slices, unknown-outcome hold), capped at one lot; SIM fills one lot the other way.
+  // (placeContract: lot cap, live price, session, isx). "-" closes through the exit path (fresh broker read, Kotak
+  // freeze slices, unknown-outcome hold), capped at one lot; SIM fills one lot the other way.
   const adjustLeg = useCallback(async (leg: ScalperLeg, delta: 1 | -1) => {
     if (exitingId || ticketBusy) return;
     const f = feedRef.current;
@@ -1151,7 +1138,7 @@ export default function IndexScalperTerminal() {
         if (typeof st === 'string') out = { ok: false, text: st };
         else {
           const row = st.live.find(l => l.id === leg.id);
-          out = row ? await exitRealRow(row, st.owned, st.records, st.book, brokerUnitsPerLot) : { ok: false, text: 'Position not found at the broker' };
+          out = row ? await exitRealRow(row, st.records, st.book, brokerUnitsPerLot) : { ok: false, text: 'Position not found at the broker' };
         }
         loadPositions();
       }
