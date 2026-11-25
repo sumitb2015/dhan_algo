@@ -1,7 +1,7 @@
 'use client';
 
 // Live data for /index-scalper: the shared options tick bridge (spot + per-strike LTP / OI / buildup), the
-// expiry list, lot size and strike -> security id map. Supports NIFTY and CRUDEOILM. Nothing here places an order.
+// expiry list, lot size and strike -> security id map. Supports NIFTY, CRUDEOILM and CRUDEOIL. Nothing here places an order.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
@@ -9,7 +9,7 @@ import type { LiveQuotes } from '@/components/Scalper';
 import { chainSnapshot, type RestChain } from '@/lib/indexScalperChain';
 import { inOrderSession } from '@/lib/indexScalperSession';
 import type { KotakSymbolInfo } from '@/lib/indexScalperKotak';
-import type { Underlying } from '@/lib/indexScalperInstrument';
+import { isMcx, type Underlying } from '@/lib/indexScalperInstrument';
 
 export interface StrikeIds { ceId?: string; peId?: string }
 
@@ -56,6 +56,9 @@ export interface IndexScalperFeed {
   volumeById: Map<string, number>;
   /** Future contract for the selected option month (MCX mini future, or Nifty future). */
   future: FutureContractInfo | null;
+  /** NIFTY only: its future for the chart's FUT pane (chart only, never traded from here). `ltp` / `volume` are live
+   *  when the options bridge tracks this same contract (else null: history only). */
+  indexFuture: { dhanId: string; expiry: string; ltp: number | null; volume: number | null } | null;
   /** Kotak contracts when Kotak is the page's broker (null on Dhan, and until both reads land). */
   kotak: KotakContracts | null;
   /** Why Kotak's contracts are not loaded (a read failed; it is retried every 15 s), null while fine or loading. */
@@ -256,7 +259,7 @@ export function useIndexScalperFeed(
     }
     // CRUDEOILM only: the bridge's spot IS the option month's own future (the contract the lookup returns). NIFTY's spot
     // is the index, not its future, so a NIFTY future gets no price here.
-    if (underlying === 'CRUDEOILM' && dhanFuture?.securityId && src.spot > 0) m.set(dhanFuture.securityId, src.spot);
+    if (isMcx(underlying) && dhanFuture?.securityId && src.spot > 0) m.set(dhanFuture.securityId, src.spot);
     return m;
   }, [quotes, strikeIds, dhanFuture, underlying]);
 
@@ -272,11 +275,23 @@ export function useIndexScalperFeed(
     }
     // The bridge's future is the option month's own (CRUDEOILM): its volume belongs to that contract only.
     const fv = src.future?.volume;
-    if (underlying === 'CRUDEOILM' && dhanFuture?.securityId && fv && fv > 0 && (!src.future?.expiry || src.future.expiry === dhanFuture.expiry)) {
+    if (isMcx(underlying) && dhanFuture?.securityId && fv && fv > 0 && (!src.future?.expiry || src.future.expiry === dhanFuture.expiry)) {
       m.set(dhanFuture.securityId, fv);
     }
     return m;
   }, [quotes, strikeIds, dhanFuture, underlying]);
+
+  const indexFuture = useMemo(() => {
+    if (isMcx(underlying) || !dhanFuture?.securityId) return null;
+    const f = quotes?.future;
+    const same = !!f && f.ltp > 0 && String(f.expiry ?? '').slice(0, 10) === dhanFuture.expiry.slice(0, 10);
+    return {
+      dhanId: dhanFuture.securityId,
+      expiry: dhanFuture.expiry.slice(0, 10),
+      ltp: same ? f!.ltp : null,
+      volume: same && f!.volume && f!.volume > 0 ? f!.volume : null,
+    };
+  }, [underlying, dhanFuture, quotes?.future]);
 
   const hasLive = !!quotes;
   useEffect(() => {
@@ -308,7 +323,7 @@ export function useIndexScalperFeed(
 
   const future = useMemo<FutureContractInfo | null>(() => {
     // Futures trade on this page for CRUDEOILM only (see ltpById: NIFTY's spot is the index, not a futures price).
-    if (underlying !== 'CRUDEOILM' || (!dhanFuture && !kotakFutureSymbol)) return null;
+    if (!isMcx(underlying) || (!dhanFuture && !kotakFutureSymbol)) return null;
     const src = quotes ?? snapshot;
     const futLtp = (dhanFuture?.securityId ? ltpById.get(dhanFuture.securityId) : null) ?? (src && src.spot > 0 ? src.spot : null);
     return {
@@ -326,7 +341,7 @@ export function useIndexScalperFeed(
     stale: feedAgeSec !== null && feedAgeSec > STALE_FEED_MS / 1000,
     marketOpen: nowMs > 0 && inOrderSession(underlying, nowMs),
     lotSize: lookupFor === `${underlying}:${expiry}` ? lotSize : null,
-    strikeIds, ltpById, volumeById, future,
+    strikeIds, ltpById, volumeById, future, indexFuture,
     kotak, kotakError: broker === 'kotak' && !kotak ? (kotakSymbolsError ?? kotakLookupError) : null,
   };
 }

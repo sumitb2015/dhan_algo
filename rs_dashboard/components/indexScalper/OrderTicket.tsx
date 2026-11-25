@@ -7,8 +7,8 @@ import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import type { PickedContract } from './OptionChainPanel';
 import { useDraggable } from './useDraggable';
-import { MAX_LOTS, OPTION_TICK, orderUnits, tickError } from '@/lib/indexScalperPositions';
-import { nrmlOnly, type Underlying } from '@/lib/indexScalperInstrument';
+import { OPTION_TICK, orderUnits, tickError } from '@/lib/indexScalperPositions';
+import { INSTRUMENTS, isMcx, nrmlOnly, type Underlying } from '@/lib/indexScalperInstrument';
 import { cn } from '@/lib/utils';
 
 export type TicketOrderType = 'MARKET' | 'LIMIT' | 'STOP_LOSS_MARKET' | 'STOP_LOSS';
@@ -66,12 +66,12 @@ export default function OrderTicket({
   const [trigDraft, setTrigDraft] = useState('');
   const [err, setErr] = useState<string | null>(null);
   // This contract's tick from the master list; Rs 0.05 (NSE index options) or 1.0 (MCX crude future) until it answers or when it is unknown.
-  const defaultTick = contract.type === 'FUT' && underlying === 'CRUDEOILM' ? 1.0 : OPTION_TICK;
+  const defaultTick = contract.type === 'FUT' && isMcx(underlying) ? 1.0 : OPTION_TICK;
   const [tick, setTick] = useState(defaultTick);
   useEffect(() => {
     if (!contract.securityId) return;
     let dead = false;
-    const seg = underlying === 'CRUDEOILM' ? 'MCX_COMM' : 'NSE_FNO';
+    const seg = isMcx(underlying) ? 'MCX_COMM' : 'NSE_FNO';
     fetch(`/api/index-scalper/tick?securityId=${encodeURIComponent(contract.securityId)}&segment=${seg}`)
       .then(r => r.json())
       .then((j: { success: boolean; tick?: number | null }) => { if (!dead && j.success && typeof j.tick === 'number' && j.tick > 0) setTick(j.tick); })
@@ -81,7 +81,7 @@ export default function OrderTicket({
 
   const ltp = liveLtp ?? contract.ltp;
   const lots = Number(lotsDraft);
-  const size = orderUnits(lots, lotSize);
+  const size = orderUnits(lots, lotSize, INSTRUMENTS[underlying].maxLots);
   const needsPrice = orderType === 'LIMIT' || orderType === 'STOP_LOSS';
   const needsTrigger = orderType === 'STOP_LOSS' || orderType === 'STOP_LOSS_MARKET';
   const refPrice = needsPrice ? Number(priceDraft) : ltp;
@@ -153,7 +153,7 @@ export default function OrderTicket({
         )}
 
         <div className="grid grid-cols-2 gap-2">
-          <label className="text-[11px] text-zinc-400">Lots (max {MAX_LOTS})
+          <label className="text-[11px] text-zinc-400">Lots (max {INSTRUMENTS[underlying].maxLots})
             <input inputMode="numeric" className={inputCls} value={lotsDraft} onChange={e => setLotsDraft(e.target.value)} />
           </label>
           <label className="text-[11px] text-zinc-400">Product

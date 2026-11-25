@@ -16,7 +16,7 @@ import { appendRecord, kotakProduct, todaysRecords, type KotakDayFile, type Kota
 // day file, so the page can tell its own Kotak fills from a strategy's or another terminal's on the same contract
 // (Kotak has no order tag the repo can read back). GET returns today's records.
 //
-// Opening orders carry source 'isx' (20-lot cap, lib/kotakOrderRules.ts); closes are uncapped, as on every Kotak desk
+// Opening orders carry source 'isx' (20-lot cap; 'isxc' = 5 lots on CRUDEOIL, lib/kotakOrderRules.ts); closes are uncapped, as on every Kotak desk
 // (a close must never be refused for its size; its size comes from what this page owns, clamped by the broker row).
 // An idempotency key replays the first answer for 60 s; an unknown outcome is kept so a replay never sends twice.
 
@@ -46,8 +46,8 @@ interface Body {
 async function placeOnce(b: Body): Promise<{ status: number; body: Record<string, unknown> }> {
   const symbol = String(b.tradingSymbol ?? '');
   const underlying = kotakUnderlyingOf(symbol);
-  if (!symbol || (underlying !== 'NIFTY' && underlying !== 'CRUDEOILM')) {
-    return { status: 400, body: { success: false, error: 'tradingSymbol must be a NIFTY or CRUDEOILM contract' } };
+  if (!symbol || (underlying !== 'NIFTY' && underlying !== 'CRUDEOILM' && underlying !== 'CRUDEOIL')) {
+    return { status: 400, body: { success: false, error: 'tradingSymbol must be a NIFTY, CRUDEOILM or CRUDEOIL contract' } };
   }
   const product = kotakProduct(b.product);
   if (!product) return { status: 400, body: { success: false, error: `Unsupported product: ${String(b.product)} (expected INTRADAY or MARGIN)` } };
@@ -67,11 +67,12 @@ async function placeOnce(b: Body): Promise<{ status: number; body: Record<string
   if (contract.freezeQty && qty > contract.freezeQty) {
     return { status: 400, body: { success: false, error: `Quantity ${qty} exceeds the exchange freeze quantity ${contract.freezeQty} for ${symbol}: send it in parts` } };
   }
-  const exchange = contract.segment || (underlying === 'CRUDEOILM' ? 'mcx_fo' : 'nse_fo');
+  const exchange = contract.segment || (underlying === 'NIFTY' ? 'nse_fo' : 'mcx_fo');
   const built = buildKotakOrderPayload({
     tradingsymbol: symbol, quantity: Number(b.quantity), side, orderType: String(b.orderType ?? 'MARKET'),
     price: Number(b.price) || 0, triggerPrice: Number(b.triggerPrice) || 0, exchange, product,
-    ...(intent === 'open' ? { source: 'isx' } : {}),
+    // The cap key comes from the contract, never the browser: full-size CRUDEOIL (100 bbl a lot) is capped at 5 lots.
+    ...(intent === 'open' ? { source: underlying === 'CRUDEOIL' ? 'isxc' : 'isx' } : {}),
   }, contract);
   if ('error' in built) return { status: 400, body: { success: false, error: built.error } };
 

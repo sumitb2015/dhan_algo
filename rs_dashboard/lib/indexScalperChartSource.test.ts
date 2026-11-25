@@ -70,3 +70,17 @@ test('labels', () => {
   assert.equal(sourceLabel('NIFTY', resolveSource({ kind: 'underlying' }, 'NIFTY', ids, 1)), 'NIFTY IDX');
   assert.equal(sourceLabel('NIFTY', resolveSource({ kind: 'option', type: 'PE', strike: 25500 }, 'NIFTY', ids, 1)), 'NIFTY 25500 PE');
 });
+
+test('NIFTY FUT pane: resolves to the future (its Dhan id, futures tick), chart only: no legs, brackets or orders', () => {
+  const r = resolveSource({ kind: 'future' }, 'NIFTY', new Map(), 25900, null, '62329');
+  assert.deepEqual([r.kind, r.dhanId, r.tick], ['future', '62329', 0.05]);
+  assert.equal(sourceLabel('NIFTY', r), 'NIFTY FUT');
+  const leg = { id: 'a', securityId: '62329', product: 'INTRADAY', symbol: 'NIFTY-Dec2026-FUT', strike: 0, type: 'FUT' as const, netQty: 75, avg: 1, ltp: 1, sim: false };
+  assert.equal(legOnChart(leg, r), false);
+  assert.equal(bracketsOnChart(leg, r), false);
+  assert.equal(orderOnChart({ securityId: '62329', isOption: false }, r), false);
+  // without the lookup's id yet: no contract (the pane waits), never the index
+  assert.equal(resolveSource({ kind: 'future' }, 'NIFTY', new Map(), 25900).dhanId, null);
+  // CRUDEOILM: its underlying pane already is the future, so a saved 'future' source shows that
+  assert.equal(resolveSource({ kind: 'future' }, 'CRUDEOILM', new Map(), 7500).kind, 'underlying');
+});

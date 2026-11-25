@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import { PROJECT_ROOT, runPythonJson, dedupe, spaced } from '@/lib/pyExec';
 
-// Read-only market data: NIFTY index / CRUDEOILM future candles, or one option's premium candles (kind=option), for /index-scalper. Never places orders.
+// Read-only market data: NIFTY index / NIFTY future / CRUDEOILM or CRUDEOIL future candles, or one option's premium candles (kind=option), for /index-scalper. Never places orders.
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'index_scalper_candles.py');
 
 interface Result {
@@ -17,8 +17,8 @@ const TTL_MS = 20_000;
 export async function GET(req: NextRequest) {
   const sp = new URL(req.url).searchParams;
   const underlying = (sp.get('underlying') ?? 'NIFTY').toUpperCase();
-  if (underlying !== 'NIFTY' && underlying !== 'CRUDEOILM') {
-    return NextResponse.json({ success: false, error: 'underlying must be NIFTY or CRUDEOILM' }, { status: 400 });
+  if (underlying !== 'NIFTY' && underlying !== 'CRUDEOILM' && underlying !== 'CRUDEOIL') {
+    return NextResponse.json({ success: false, error: 'underlying must be NIFTY, CRUDEOILM or CRUDEOIL' }, { status: 400 });
   }
   const interval = sp.get('interval') ?? '5';
   if (!['1', '3', '5', '15', '30', '60'].includes(interval)) {
@@ -29,8 +29,12 @@ export async function GET(req: NextRequest) {
   // kind=option: premium candles of one option contract (its Dhan security id). Segment / instrument are fixed per
   // underlying here, never taken from the browser.
   const kind = sp.get('kind') ?? 'underlying';
-  if (kind !== 'underlying' && kind !== 'option') {
-    return NextResponse.json({ success: false, error: 'kind must be underlying or option' }, { status: 400 });
+  if (kind !== 'underlying' && kind !== 'option' && kind !== 'future') {
+    return NextResponse.json({ success: false, error: 'kind must be underlying, future or option' }, { status: 400 });
+  }
+  // kind=future: the NIFTY future (by its Dhan id), for the chart's FUT pane. Crude's future is its underlying pane.
+  if (kind === 'future' && (underlying !== 'NIFTY' || !secId)) {
+    return NextResponse.json({ success: false, error: 'kind=future is NIFTY only and needs a numeric securityId' }, { status: 400 });
   }
   if (kind === 'option' && !secId) {
     return NextResponse.json({ success: false, error: 'kind=option needs a numeric securityId' }, { status: 400 });
@@ -44,10 +48,13 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ success: true, ...hit.data }, { headers: { 'Cache-Control': 'no-store' } });
   }
   try {
+    const mcx = underlying === 'CRUDEOILM' || underlying === 'CRUDEOIL';
     const args = ['--symbol', underlying, '--interval', interval, '--days', String(days)];
     if (kind === 'option') {
-      args.push('--segment', underlying === 'CRUDEOILM' ? 'MCX_COMM' : 'NSE_FNO', '--instrument', underlying === 'CRUDEOILM' ? 'OPTFUT' : 'OPTIDX');
-    } else if (underlying === 'CRUDEOILM') {
+      args.push('--segment', mcx ? 'MCX_COMM' : 'NSE_FNO', '--instrument', mcx ? 'OPTFUT' : 'OPTIDX');
+    } else if (kind === 'future') {
+      args.push('--segment', 'NSE_FNO', '--instrument', 'FUTIDX');
+    } else if (mcx) {
       args.push('--segment', 'MCX_COMM', '--instrument', 'FUTCOM');
     }
     if (secId) {

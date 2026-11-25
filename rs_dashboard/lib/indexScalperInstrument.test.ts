@@ -90,3 +90,27 @@ test('MCX crude opens NRML only; NIFTY keeps the requested product', () => {
   assert.equal(openingProduct('NIFTY', 'INTRADAY'), 'INTRADAY');
   assert.equal(openingProduct('NIFTY', 'MARGIN'), 'MARGIN');
 });
+
+test('CRUDEOIL (full-size, 100 bbl a lot): Dhan quantity in lots, Kotak in barrels, P&L x100 on Dhan, 5-lot cap, own tag', async () => {
+  const { isMcx, mcxBarrels, lotUnits, qtyLots } = await import('./indexScalperInstrument.ts');
+  assert.equal(isMcx('CRUDEOIL'), true);
+  assert.equal(isMcx('NIFTY'), false);
+  assert.equal(mcxBarrels('CRUDEOIL'), 100);
+  assert.equal(mcxBarrels('CRUDEOILM'), 10);
+  assert.equal(dhanOrderQty('CRUDEOIL', 3, 1), 3); // lots
+  assert.equal(kotakOrderQty('CRUDEOIL', 3, 100), 300); // barrels
+  assert.equal(kotakOrderQty('CRUDEOILM', 3, 10), 30); // unchanged for the mini
+  assert.equal(pnlMultiplier('CRUDEOIL', 'dhan'), 100);
+  assert.equal(pnlMultiplier('CRUDEOIL', 'kotak'), 1);
+  assert.equal(displayLotUnits('CRUDEOIL'), 100);
+  assert.equal(lotUnits('CRUDEOIL', null), 100);
+  // Dhan netQty 2 (lots) x 100 = 200 bbl = 2 lots; Kotak netQty 200 (bbl) = 2 lots; never a 10x / 100x mix-up
+  assert.equal(qtyLots('CRUDEOIL', 2, 100, null), 2);
+  assert.equal(qtyLots('CRUDEOIL', 200, 1, null), 2);
+  assert.equal(qtyLots('CRUDEOIL', 20, 1, null), null); // 20 bbl is not a whole CRUDEOIL lot
+  assert.equal(INSTRUMENTS.CRUDEOIL.maxLots, 5);
+  assert.equal(INSTRUMENTS.CRUDEOIL.orderSource, 'isxc');
+  assert.ok(INSTRUMENTS.CRUDEOIL.orderSource.startsWith('isx')); // still the page's own orders
+  assert.equal(INSTRUMENTS.CRUDEOILM.maxLots, 20);
+  assert.equal(INSTRUMENTS.NIFTY.maxLots, 20);
+});

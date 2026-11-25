@@ -106,10 +106,12 @@ def main():
             return
         segment = a.segment
         inst = a.instrument
-    elif a.segment == "MCX_COMM" or a.symbol == "CRUDEOILM":
-        fut = helper.find_future("CRUDEOILM", exchange="MCX", instrument="FUTCOM")
+    elif a.segment == "MCX_COMM" or a.symbol in ("CRUDEOILM", "CRUDEOIL"):
+        # The requested crude contract's own near future (CRUDEOIL never falls back to the mini's bars).
+        crude = a.symbol if a.symbol in ("CRUDEOILM", "CRUDEOIL") else "CRUDEOILM"
+        fut = helper.find_future(crude, exchange="MCX", instrument="FUTCOM")
         if not fut:
-            print(json.dumps({"error": "CRUDEOILM future contract not found"}))
+            print(json.dumps({"error": f"{crude} future contract not found"}))
             return
         sec_id = int(fut["SECURITY_ID"])
         segment = "MCX_COMM"

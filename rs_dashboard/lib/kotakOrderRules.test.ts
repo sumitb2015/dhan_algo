@@ -49,3 +49,10 @@ test('gbx (Gearbox Drive) is capped at 1 lot per order on Kotak', () => {
   assert.strictEqual(sourceLotCapError(10, 'gbx', 'CRUDEOILM', 10), null);
   assert.match(String(sourceLotCapError(20, 'gbx', 'CRUDEOILM', 10)), /gbx per-order cap of 1 lots/);
 });
+
+test('isxc (Index Scalper on full-size CRUDEOIL): 5 lots = 500 barrels on Kotak', async () => {
+  const { sourceLotCapError } = await import('./kotakOrderRules.ts');
+  assert.equal(sourceLotCapError(500, 'isxc', 'CRUDEOIL15JAN277900CE', 100), null);
+  assert.match(sourceLotCapError(600, 'isxc', 'CRUDEOIL15JAN277900CE', 100)!, /cap of 5 lots/);
+  assert.equal(sourceLotCapError(200, 'isx', 'CRUDEOILM15JAN2712800CE', 10), null); // the mini keeps 20 lots
+});

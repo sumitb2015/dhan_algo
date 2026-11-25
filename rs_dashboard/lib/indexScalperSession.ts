@@ -3,13 +3,13 @@
 //   live candles stop there (`inMarketSession`).
 // - NIFTY options / futures: NSE F&O trades until 15:40 since SEBI's close auction session (cash is unaffected; same
 //   15:40 as lib/optionsPricing.ts's expiry clock), so ORDERS and option premium candles run to 15:40 (`inOrderSession`).
-// - CRUDEOILM: MCX session (weekdays, 09:00 <= IST time < 23:30 in summer DST or 23:55 in winter)
+// - CRUDEOILM / CRUDEOIL: MCX session (weekdays, 09:00 <= IST time < 23:30 in summer DST or 23:55 in winter)
 // /index-scalper uses it so a feed that keeps sending packets after the close (or a stale spot on a holiday) can never
 // make the page look live: outside the session no paper order fills and no REAL market order is sent.
 
 import { istDateIso, isRegularSession } from './nseHolidays.ts';
 import { mcxSession } from './mcxSession.ts';
-import type { Underlying } from './indexScalperInstrument.ts';
+import { isMcx, type Underlying } from './indexScalperInstrument.ts';
 
 const NSE_OPEN_S = 9 * 3600 + 15 * 60;
 const NSE_CLOSE_S = 15 * 3600 + 30 * 60;
@@ -31,7 +31,7 @@ export function inNseFnoSession(nowMs: number): boolean {
 /** Seconds after IST midnight that bars are anchored to: the session open (NSE 09:15, MCX 09:00). A 30 m / 1 h bar
  *  then runs 09:15-09:45 / 09:15-10:15 like TradingView's, not 09:00-09:30 from midnight. 1/3/5/15 m are unchanged. */
 export function barAnchorSec(underlying: Underlying): number {
-  return underlying === 'CRUDEOILM' ? 9 * 3600 : NSE_OPEN_S;
+  return isMcx(underlying) ? 9 * 3600 : NSE_OPEN_S;
 }
 
 export function inMcxSession(nowMs: number): boolean {
@@ -47,11 +47,11 @@ export function inMcxSession(nowMs: number): boolean {
 
 /** The underlying's own price session (index candles): NSE cash to 15:30, MCX its session. */
 export function inMarketSession(underlying: Underlying, nowMs: number): boolean {
-  return underlying === 'CRUDEOILM' ? inMcxSession(nowMs) : inNseSession(nowMs);
+  return isMcx(underlying) ? inMcxSession(nowMs) : inNseSession(nowMs);
 }
 
 /** When this page may trade (orders, paper fills, paper closes) and option premium candles form: NSE F&O to 15:40,
  *  MCX its session. */
 export function inOrderSession(underlying: Underlying, nowMs: number): boolean {
-  return underlying === 'CRUDEOILM' ? inMcxSession(nowMs) : inNseFnoSession(nowMs);
+  return isMcx(underlying) ? inMcxSession(nowMs) : inNseFnoSession(nowMs);
 }

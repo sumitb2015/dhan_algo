@@ -32,6 +32,7 @@ async function mockApi(page: Page, state: State) {
     if (p === '/api/index-scalper/candles') {
       state.candleReqs.push(u.search);
       const opt = u.searchParams.get('kind') === 'option';
+      if (u.searchParams.get('kind') === 'future') return json(route, { success: true, candles: bars(SPOT + 110, 40).map((b, i) => ({ ...b, v: 50_000 + (i % 7) * 9_000 })), interval: u.searchParams.get('interval') });
       const cs = opt ? bars(210, 20) : bars(SPOT, 40);
       // option bars carry volume when asked (the index never does)
       return json(route, { success: true, candles: opt && state.optVolume ? cs.map((b, i) => ({ ...b, v: 1000 + (i % 9) * 400 })) : cs, interval: u.searchParams.get('interval') });
@@ -39,7 +40,8 @@ async function mockApi(page: Page, state: State) {
     if (p === '/api/options/expiries') return json(route, { success: true, data: ['2026-12-01'] });
     if (p === '/api/scalper/lookup') {
       const strikes = Object.fromEntries(ALL_STRIKES.map(k => { const [ce, pe] = idsOf(k); return [String(k), { ceId: ce, peId: pe }]; }));
-      return json(route, { success: true, data: { lotSize: 65, strikes } });
+      // the NIFTY future (nearest on or after the option expiry), as scalper_api.py's lookup returns it
+      return json(route, { success: true, data: { lotSize: 65, strikes, future: { securityId: '58875', expiry: '2026-12-29' } } });
     }
     if (p === '/api/options/live') {
       if (method === 'POST') return json(route, { success: true });
@@ -62,7 +64,7 @@ async function mockApi(page: Page, state: State) {
           pe: { ltp: IDS[String(k)] ? 229.95 : 100, change_pct: 5, buildup: 'LB', ...side(peOi, k < SPOT) },
         }];
       }));
-      return json(route, { success: true, status: { status: 'RUNNING' }, quotes: { underlying: 'NIFTY', expiry: '2026-12-01', spot: SPOT, atm: SPOT, updated_at: sessionIso(), strikes } });
+      return json(route, { success: true, status: { status: 'RUNNING' }, quotes: { underlying: 'NIFTY', expiry: '2026-12-01', spot: SPOT, atm: SPOT, updated_at: sessionIso(), strikes, future: { ltp: SPOT + 110, expiry: '2026-12-29', volume: 2_000_000 } } });
     }
     if (p === '/api/options/chain') {
       if (!state.snapChain) return json(route, { success: false, error: 'e2e: no chain' }, 502);
@@ -388,6 +390,32 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('NIFTY FUT pane: plots the future with volume, chart only (no "+" order menu), and survives a reload', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    const pane = page.getByTestId('chart-pane-0');
+    await expect(pane.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await pane.getByRole('button', { name: 'FUT', exact: true }).click();
+    await expect(pane).toContainText('NIFTY FUT');
+    await expect(pane).toContainText('2026-12-29 · chart only');
+    await expect.poll(() => state.candleReqs.some(q => q.includes('kind=future') && q.includes('securityId=58875'))).toBe(true);
+    await page.waitForTimeout(800);
+    if (process.env.ISX_SHOT) await pane.screenshot({ path: process.env.ISX_SHOT });
+    // no "+" order menu on the price axis here
+    const box = (await pane.locator('canvas').first().boundingBox())!;
+    const paneBox = (await pane.boundingBox())!;
+    await page.mouse.move(paneBox.x + paneBox.width - 110, box.y + box.height * 0.4);
+    await page.waitForTimeout(400);
+    await expect(pane.getByRole('button', { name: /^Order options at / })).toHaveCount(0);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0')).toContainText('NIFTY FUT', { timeout: 60_000 });
+    await expect(page.getByTestId('chart-pane-0').getByRole('button', { name: 'FUT', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
   test('header shows the current IST time', async ({ page, context }) => {
     const state = newState();
     await signIn(context);
@@ -575,7 +603,7 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
-  test('Quick Trade REAL position: SL as a premium sends an SL-M on that option (isx); its badge cancels the order', async ({ page, context }) => {
+  test('Quick Trade REAL position: SL as a premium sends an SL-M on that option (closing tag isxx); its badge cancels the order', async ({ page, context }) => {
     const state = newState();
     state.positions = [{
       tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY',
@@ -599,7 +627,7 @@ test.describe('Index Scalper layout + option charts', () => {
     await sl.getByLabel('SL premium').press('Enter');
     await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/fast-order').length, { timeout: 15_000 }).toBe(1);
     expect(state.calls.find(c => c.path === '/api/scalper/fast-order')!.body).toMatchObject({
-      securityId: '302', side: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 190, quantity: 65, productType: 'INTRADAY', source: 'isx',
+      securityId: '302', side: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 190, quantity: 65, productType: 'INTRADAY', source: 'isxx',
     });
 
     // the order book now shows it: the chip's badge reads it, and its x cancels that order
@@ -819,7 +847,7 @@ test.describe('Index Scalper layout + option charts', () => {
     await chip.getByRole('button', { name: 'Fewer lots CE 25350' }).click();
     await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/fast-order').length, { timeout: 15_000 }).toBe(2);
     expect(state.calls.filter(c => c.path === '/api/scalper/fast-order')[1].body).toMatchObject({
-      securityId: '302', side: 'SELL', orderType: 'MARKET', quantity: 65, source: 'isx',
+      securityId: '302', side: 'SELL', orderType: 'MARKET', quantity: 65, source: 'isxx',
     });
     expect(state.blocked).toEqual([]);
   });
@@ -993,7 +1021,7 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
-  test('REAL option leg: dragging SL on its premium chart sends an SL-M on that option, tagged isx', async ({ page, context }) => {
+  test('REAL option leg: dragging SL on its premium chart sends an SL-M on that option, tagged isxx (a close)', async ({ page, context }) => {
     const state = newState();
     state.positions = [{
       tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY',
@@ -1015,7 +1043,7 @@ test.describe('Index Scalper layout + option charts', () => {
     await dragFrom(page, chip.getByRole('button', { name: 'SL', exact: true }), 60);
     await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/fast-order').length, { timeout: 15_000 }).toBe(1);
     const sent = state.calls.find(c => c.path === '/api/scalper/fast-order')!.body!;
-    expect(sent).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'STOP_LOSS_MARKET', quantity: 65, source: 'isx', exchangeSegment: 'NSE_FNO' });
+    expect(sent).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'STOP_LOSS_MARKET', quantity: 65, source: 'isxx', exchangeSegment: 'NSE_FNO' });
     const trig = Number(sent.triggerPrice ?? sent.trigger);
     expect(trig).toBeGreaterThan(100);
     expect(trig).toBeLessThan(200);

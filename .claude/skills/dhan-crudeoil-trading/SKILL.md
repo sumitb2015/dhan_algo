@@ -205,6 +205,8 @@ analytics consuming its output (`CrudeOilOITab.tsx`/`CrudeOilCumulativeOITab.tsx
   painting the last file snapshot. Guard: `expiryOwner === underlying` before starting the bridge or fetching the chain. Any
   new effect keyed on `(underlying, expiry)` needs the same guard. Symptom check: bridge status file `expiry` ≠ the dropdown,
   or `live_options_quotes_*.json` `updated_at` frozen while prices still show.
+- **Index Scalper** trades both CRUDEOILM and CRUDEOIL (futures + options, Dhan and Kotak). CRUDEOIL: 5-lot cap, orders tagged
+  `isxc` for its own server cap; see `dhan-index-scalper` "MCX crude" for the exact-root matching that keeps the two apart.
 - **Focus Tool (CRUDEOILM only)** prices off the shared `live_options_ws` bridge, not `focus_tool_ws.py` and not the REST chain
   (30 s cache, lagging `last_price`). Strike step per row via `rowStep(row)`; "100s only" makes it 100. See `dhan-focus-tool`.
 

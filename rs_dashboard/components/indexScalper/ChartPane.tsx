@@ -21,7 +21,7 @@ import { legsKey, type ScalperLeg } from '@/lib/indexScalperPositions';
 import { buildOiProfile, oiProfileKey, type OiMode } from '@/lib/indexScalperOiProfile';
 import type { IndicatorInstance } from '@/lib/indexScalperIndicators';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
-import type { Underlying } from '@/lib/indexScalperInstrument';
+import { isMcx, type Underlying } from '@/lib/indexScalperInstrument';
 import { toIsoDate } from '@/components/DataChip';
 import { cn } from '@/lib/utils';
 
@@ -100,10 +100,10 @@ function ChartPane(p: Props) {
   const spot = feed.spot ?? feed.chain?.spot ?? null;
   const needsSpot = source.kind === 'option' && !feed.strikeIds.has(source.strike);
   const resolved = useMemo(
-    () => resolveSource(source, underlying, feed.strikeIds, spot, feed.kotak?.strikes ?? null),
+    () => resolveSource(source, underlying, feed.strikeIds, spot, feed.kotak?.strikes ?? null, feed.indexFuture?.dhanId ?? null),
     // Spot only matters until the strike is pinned (below); a strike already listed ignores it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [source, underlying, feed.strikeIds, feed.kotak?.strikes, needsSpot ? spot : null],
+    [source, underlying, feed.strikeIds, feed.kotak?.strikes, needsSpot ? spot : null, feed.indexFuture?.dhanId],
   );
 
   // Pin the strike: a pane opened on "ATM" (or on a strike this expiry does not list) keeps the strike it resolved to,
@@ -121,8 +121,11 @@ function ChartPane(p: Props) {
   useEffect(() => { onStatus(index, { date, loading, error }); }, [index, date, loading, error, onStatus]);
 
   const isOption = resolved.kind === 'option';
+  // The NIFTY future: chart only (no orders, positions, brackets, Quick Trade or OI profile on it).
+  const isFuture = resolved.kind === 'future';
+  const isIndex = !isOption && !isFuture;
   const viewportRef = useRef<ChartViewport | null>(null);
-  const quickOn = !!p.quick && !isOption;
+  const quickOn = !!p.quick && isIndex;
   const label = sourceLabel(underlying, resolved);
 
   // The contract this pane's "+" menu and ticket trade: the option on screen, or the underlying's future.
@@ -145,7 +148,8 @@ function ChartPane(p: Props) {
   const paneLegs = useMemo(() => paneLegsAll, [legsSig]);
   // OI per strike for the expiry on screen: the live chain, else Dhan's snapshot (display only). Kept by value (oiProfileKey)
   // so a push that moved only prices does not re-render the chart.
-  const oiSource = !isOption && p.showOi ? (feed.quotes ?? feed.chain)?.strikes ?? null : null;
+  // (index pane only: strike levels are index levels; the future trades ~100 pts away)
+  const oiSource = isIndex && p.showOi ? (feed.quotes ?? feed.chain)?.strikes ?? null : null;
   const oiRaw = useMemo(() => buildOiProfile(oiSource), [oiSource]);
   const oiKey = oiProfileKey(oiRaw);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -172,17 +176,26 @@ function ChartPane(p: Props) {
   const seg = 'h-6 px-2 text-[11px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60';
   const tf = 'h-6 px-1.5 rounded text-[11px] font-semibold text-zinc-300 hover:bg-zinc-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60';
 
-  const drawKey = isOption ? `${DRAW_KEY}:${resolved.dhanId ?? resolved.kotakSymbol ?? 'none'}` : DRAW_KEY;
+  // Drawings belong to the price axis they were made on: an option's premium, the NIFTY future (~100 pts off the index),
+  // each crude contract; the NIFTY index keeps the original key (existing drawings stay).
+  const drawKey = isOption ? `${DRAW_KEY}:${resolved.dhanId ?? resolved.kotakSymbol ?? 'none'}`
+    : isFuture ? `${DRAW_KEY}:fut:${underlying}`
+    : underlying === 'NIFTY' ? DRAW_KEY : `${DRAW_KEY}:${underlying}`;
   const tfLabel = `${interval}`;
 
   return (
     <div data-testid={`chart-pane-${index}`} className="flex flex-col flex-1 min-w-0 min-h-0">
       <div className="flex items-center gap-1.5 px-2 h-8 border-b border-zinc-800 bg-zinc-950 shrink-0">
         <div role="group" aria-label={`Chart ${index + 1} instrument`} className="flex rounded border border-zinc-700 overflow-hidden">
-          <button type="button" aria-pressed={!isOption} onClick={() => setSource({ kind: 'underlying' })}
-            className={cn(seg, !isOption ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}>
-            {underlying === 'CRUDEOILM' ? 'FUT' : 'Index'}
+          <button type="button" aria-pressed={isIndex} onClick={() => setSource({ kind: 'underlying' })}
+            className={cn(seg, isIndex ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}>
+            {isMcx(underlying) ? 'FUT' : 'Index'}
           </button>
+          {!isMcx(underlying) && (
+            <button type="button" aria-pressed={isFuture} onClick={() => setSource({ kind: 'future' })}
+              title="NIFTY future: real volume and a volume-weighted VWAP (chart only: orders are not placed from this pane)"
+              className={cn(seg, isFuture ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}>FUT</button>
+          )}
           <button type="button" aria-pressed={isOption && resolved.type === 'CE'} onClick={() => pickType('CE')}
             className={cn(seg, isOption && resolved.type === 'CE' ? 'bg-sky-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}>CE</button>
           <button type="button" aria-pressed={isOption && resolved.type === 'PE'} onClick={() => pickType('PE')}
@@ -209,9 +222,12 @@ function ChartPane(p: Props) {
         </div>
         <span className="ml-1 text-[11px] font-mono font-semibold text-zinc-300 truncate">{label}</span>
         {isOption && feed.expiry && <span className="text-[10px] font-mono text-zinc-500 shrink-0">{feed.expiry}</span>}
+        {isFuture && feed.indexFuture && <span className="text-[10px] font-mono text-zinc-500 shrink-0">{feed.indexFuture.expiry} · chart only</span>}
         {loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500 shrink-0" aria-label="Loading candles" />}
         {noLiveTicks && (
-          <span data-testid="no-live-ticks" className="text-[10px] text-amber-400 shrink-0" title="The live bridge ticks the strikes around ATM only: this chart shows history, and market orders on it are refused.">
+          <span data-testid="no-live-ticks" className="text-[10px] text-amber-400 shrink-0" title={isFuture
+              ? 'The options bridge is not streaming this future (it tracks another month): this chart shows history only.'
+              : 'The live bridge ticks the strikes around ATM only: this chart shows history, and market orders on it are refused.'}>
             no live ticks
           </span>
         )}
@@ -230,9 +246,10 @@ function ChartPane(p: Props) {
           logScale={p.logScale} pctScale={p.pctScale} autoScale={p.autoScale} showGrid={p.showGrid} showVolume={p.showVolume} volumeMaLen={p.volumeMaLen}
           legs={paneLegs} entrySpots={p.entrySpots} onExitLeg={p.onExitLeg} onAdjustLeg={quickOn ? p.onAdjustLeg : undefined} adjustLots={p.quick?.stepLots ?? 1} exitingId={p.exitingId}
           onToggleIndicator={p.onToggleIndicator} onRemoveIndicator={p.onRemoveIndicator} onEditIndicator={p.onEditIndicator}
-          symbolLabel={isOption ? `${label} · ${tfLabel}` : (underlying === 'CRUDEOILM' ? `CRUDEOILM · ${tfLabel} · FUT` : `NIFTY · ${tfLabel} · IDX`)}
+          symbolLabel={isOption ? `${label} · ${tfLabel}` : isFuture ? `NIFTY · ${tfLabel} · FUT` : (isMcx(underlying) ? `${underlying} · ${tfLabel} · FUT` : `NIFTY · ${tfLabel} · IDX`)}
           focus={p.focus} resetSeq={p.resetSeq}
-          contractName={isOption ? label : p.futureName}
+          contractName={isOption || isFuture ? label : p.futureName}
+          ordersEnabled={!isFuture}
           lots={p.lots}
           openOrders={paneOrders}
           onCancelOrder={p.onCancelOrder} onModifyOrder={p.onModifyOrder}
@@ -263,7 +280,8 @@ function ChartPane(p: Props) {
           <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500 pointer-events-none">
             {isOption && resolved.strike === null && pickList.length > 0
               ? `Waiting for the ${underlying} price to pick the ATM strike…`
-              : isOption && !resolved.dhanId ? 'Waiting for the option contract…' : `No candles to show${error ? '' : ' yet'}.`}
+              : isOption && !resolved.dhanId ? 'Waiting for the option contract…'
+              : isFuture && !resolved.dhanId ? 'Waiting for the NIFTY future contract…' : `No candles to show${error ? '' : ' yet'}.`}
           </div>
         )}
       </div>

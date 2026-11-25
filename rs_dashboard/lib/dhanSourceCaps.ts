@@ -32,6 +32,8 @@ export const SOURCE_QTY_CAPS_MCX: Record<string, number> = {
   fm: 20,
   // 'isx' = Index Scalper (/index-scalper): MAX_LOTS (20) on MCX. Without it the NSE 1500 would apply: 1500 MCX lots.
   isx: 20,
+  // 'isxc' = Index Scalper on full-size CRUDEOIL (100 bbl a lot): 5 lots (INSTRUMENTS.CRUDEOIL.maxLots).
+  isxc: 5,
   // 'orba' = Signal Orb (CRUDEOIL / CRUDEOILM futures and options) is deliberately uncapped (the user removed its lot cap on 2026-11-20).
   // 'gbx' = Gearbox Drive (CRUDEOIL / CRUDEOILM options): MAX_REAL_LOTS 1 until it has run live
   gbx: 1,

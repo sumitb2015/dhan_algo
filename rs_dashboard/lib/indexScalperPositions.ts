@@ -5,7 +5,7 @@
 
 import { parseTradingSymbol, symbolMatchesUnderlying } from './positionLegs.ts';
 import { dedupePositions, positionProduct } from './positionProduct.ts';
-import { pnlMultiplier, type Underlying } from './indexScalperInstrument.ts';
+import { isMcx, pnlMultiplier, type Underlying } from './indexScalperInstrument.ts';
 
 export interface ScalperLeg {
   /** Stable key: `securityId|product` for a REAL broker row (a security can carry an INTRADAY and a MARGIN row), the
@@ -83,16 +83,17 @@ export function pnlSummary(legs: ScalperLeg[]): { pnl: number | null; unpriced: 
   return { pnl: any ? sum : null, unpriced };
 }
 
-/** Hard cap on lots per click (also enforced server-side through the `isx` source cap). */
+/** Hard cap on lots per click (also enforced server-side through the `isx` source cap). The per-instrument cap is
+ *  INSTRUMENTS[u].maxLots (CRUDEOIL 5); this is the largest of them, for lot selects that list every choice. */
 export const MAX_LOTS = 20;
 
 export type SizeCheck = { ok: true; units: number } | { ok: false; error: string };
 
 /** Units for an order of `lots`, or why it is refused. A lot size that is unknown is refused, never guessed. */
-export function orderUnits(lots: number, lotSize: number | null): SizeCheck {
+export function orderUnits(lots: number, lotSize: number | null, maxLots: number = MAX_LOTS): SizeCheck {
   if (lotSize === null || !Number.isInteger(lotSize) || lotSize <= 0) return { ok: false, error: 'Lot size unknown' };
   if (!Number.isInteger(lots) || lots < 1) return { ok: false, error: 'Lots must be a whole number, at least 1' };
-  if (lots > MAX_LOTS) return { ok: false, error: `Max ${MAX_LOTS} lots per order` };
+  if (lots > maxLots) return { ok: false, error: `Max ${maxLots} lots per order` };
   return { ok: true, units: lots * lotSize };
 }
 
@@ -153,18 +154,23 @@ export function applyFill(netQty: number, avg: number, side: 'BUY' | 'SELL', uni
   return { netQty: next, avg: price };
 }
 
-/** Option or futures contract out of a trading symbol ("NIFTY-Dec2026-25350-PE", "CRUDEOILM-17Nov2026-9000-CE", "CRUDEOILM-19Nov2026-FUT"). */
+/** Option or futures contract out of a trading symbol ("NIFTY-Dec2026-25350-PE", "CRUDEOILM-17Nov2026-9000-CE",
+ *  "CRUDEOILM-19Nov2026-FUT", "CRUDEOIL-18Dec2026-FUT"). CRUDEOIL and CRUDEOILM never read each other's symbols: the
+ *  parser returns the exact root, and a futures root must be followed by "-" or a digit. */
 export function parseScalperContract(tradingSymbol: string, underlying: Underlying = 'NIFTY'): { strike: number; type: 'CE' | 'PE' | 'FUT' } | null {
   const p = parseTradingSymbol(tradingSymbol);
   if (p && p.underlying === underlying && (p.type === 'CE' || p.type === 'PE')) {
     return { strike: p.strike, type: p.type };
   }
-  // Futures are traded on this page for CRUDEOILM only (NIFTY's chart is the index, not its future), so a NIFTY future
+  // Futures are traded on this page for MCX crude only (NIFTY's chart is the index, not its future), so a NIFTY future
   // held by a strategy never lands in this page's legs or P&L. The root must be followed by "-" or a digit
-  // (symbolMatchesUnderlying), so CRUDEOIL's full-size future and NIFTYNXT50 are never read as ours.
-  if (underlying !== 'CRUDEOILM') return null;
+  // (symbolMatchesUnderlying), so the other crude contract and NIFTYNXT50 are never read as ours.
+  if (!isMcx(underlying)) return null;
   const s = tradingSymbol.trim().toUpperCase();
-  if (symbolMatchesUnderlying(s, underlying) && s.startsWith(underlying) && /FUT$/.test(s)) {
+  // The EXACT root (then "-" or a digit). symbolMatchesUnderlying alone is not enough here: it files CRUDEOILM under
+  // the CRUDEOIL family on purpose (positionLegs' EXTRA_SYMBOL_ROOTS), which on this page would read a mini future as a
+  // full-size one, 10x its size.
+  if (symbolMatchesUnderlying(s, underlying) && s.startsWith(underlying) && /^[-0-9]/.test(s.slice(underlying.length)) && /FUT$/.test(s)) {
     return { strike: 0, type: 'FUT' };
   }
   return null;

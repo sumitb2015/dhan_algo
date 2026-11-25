@@ -199,7 +199,7 @@ test.describe('Index Scalper', () => {
     expect(state.blocked).toEqual([]);
   });
 
-  test('REAL: arming is explicit, broker position is drawn, Exit closes the whole broker row (any owner) and tags source isx', async ({ page, context }) => {
+  test('REAL: arming is explicit, broker position is drawn, Exit closes the whole broker row (any owner) and tags source isxx (uncapped close)', async ({ page, context }) => {
     const state: MockState = {
       calls: [], blocked: [],
       // 715 at the broker: 65 from this page's isx orders, 650 opened elsewhere (mobile app / strategy). Exit closes all.
@@ -234,7 +234,7 @@ test.describe('Index Scalper', () => {
     await page.getByRole('button', { name: 'Exit PE 25350' }).click();
     await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
     expect(state.calls[0].body).toMatchObject({
-      securityId: '402', quantity: 715, side: 'SELL', orderType: 'MARKET', productType: 'INTRADAY', source: 'isx', exchangeSegment: 'NSE_FNO',
+      securityId: '402', quantity: 715, side: 'SELL', orderType: 'MARKET', productType: 'INTRADAY', source: 'isxx', exchangeSegment: 'NSE_FNO',
     });
     expect(String(state.calls[0].body?.idempotencyKey ?? '').length).toBeGreaterThanOrEqual(8);
     expect(state.blocked).toEqual([]);
@@ -269,7 +269,7 @@ test.describe('Index Scalper', () => {
     await expect(page.getByRole('status').filter({ hasText: 'Exit All' })).toContainText('Exit All sent for 2 leg(s)', { timeout: 15_000 });
     expect(state.calls.length).toBe(2);
     expect(state.calls.map(c => c.body?.productType).sort()).toEqual(['INTRADAY', 'MARGIN']);
-    for (const c of state.calls) expect(c.body).toMatchObject({ securityId: '402', quantity: 65, side: 'BUY', source: 'isx' });
+    for (const c of state.calls) expect(c.body).toMatchObject({ securityId: '402', quantity: 65, side: 'BUY', source: 'isxx' });
     expect(state.blocked).toEqual([]);
   });
 

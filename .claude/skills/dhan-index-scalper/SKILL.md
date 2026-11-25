@@ -6,7 +6,7 @@ description: Use when touching the Index Scalper terminal (/index-scalper) outsi
 # Index Scalper terminal (`/index-scalper`)
 
 ## Overview
-A TradingView-style scalping terminal for **NIFTY and CRUDEOILM** (index/future + options), built 2026-11-24/25 in
+A TradingView-style scalping terminal for **NIFTY, CRUDEOILM and CRUDEOIL** (index/future + options), built 2026-11-24/25 in
 ~45 commits (`8b63453d` .. `47cbbaa6`). This skill is the terminal around the chart; the chart is
 `dhan-trading-chart`. Read both before a change that crosses them (an order placed from the chart, an exit from a
 chip).
@@ -18,9 +18,10 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
 
 | Concern | Where |
 |---|---|
-| Instruments (segment, tick, strike step, lot units per broker) | `lib/indexScalperInstrument.ts` `INSTRUMENTS`, `qtyLots`, `lotUnits`, `pnlMultiplier` |
+| Instruments (segment, tick, strike step, lot units per broker, per-order cap, order tag) | `lib/indexScalperInstrument.ts` `INSTRUMENTS` (`maxLots`, `orderSource`), `isMcx`, `mcxBarrels`, `qtyLots`, `lotUnits`, `pnlMultiplier` |
 | Prices: chain, index/future ticks, feed age | `useIndexScalperFeed.ts` over the shared options bridge (`live_options_ws.py`, WS :8765) |
 | Chain panel; SNAPSHOT fallback | `OptionChainPanel.tsx`; `lib/indexScalperChain.ts` over `/api/options/chain` (display only) |
+| NIFTY future chart (FUT pane) | chart only, never traded from here: see `dhan-trading-chart` "NIFTY FUT pane" |
 | Candle backfill | `api/index-scalper/candles/` -> `scripts/tools/index_scalper_candles.py` (cold ≈1.5-2 s, then cached); intervals 1/3/5/15/30/60: 3 resampled from Dhan's 1 m, 30 / 60 from 15 m, anchored to the session open; bars carry `v` (volume) for futures / options, never for the index |
 | Orders (SIM ledger, REAL send, exits, brackets) | `IndexScalperTerminal.tsx`: `placeContract`, `sendReal`, `exitRealRow`, `readExitState`, `exitLeg`, `exitAll`, `adjustLeg` |
 | Broker rows -> legs | `legsFromDhanPositions` (`lib/indexScalperPositions.ts`), `legsFromKotakPositions` (`lib/indexScalperKotak.ts`) |
@@ -37,6 +38,24 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
 - The positions table and chart show **the mode's book**: SIM = paper legs, REAL = the broker's whole book for the
   underlying (polled every 3 s). After a reload the page is in SIM, so broker positions are not shown until REAL is
   re-armed.
+
+### MCX crude: CRUDEOILM and CRUDEOIL (added 2026-11-25)
+- Every crude branch is `isMcx(u)`, never `=== 'CRUDEOILM'`; barrels per lot come from `mcxBarrels(u)` (MCX_LOT_MULTIPLIER:
+  10 / 100). Dhan quantity = lots, Kotak = barrels, Dhan P&L multiplier = barrels per lot (`dhan-crudeoil-trading`).
+- **CRUDEOIL caps an order at 5 lots** (`INSTRUMENTS.CRUDEOIL.maxLots`, the owner's choice: 500 bbl). The server cap is
+  keyed by the order tag, which cannot tell the two crudes apart, so CRUDEOIL orders carry `isxc` (Dhan
+  `SOURCE_QTY_CAPS_MCX.isxc` 5 lots; Kotak `SOURCE_LOT_CAPS.isxc` 5, the Kotak route picks it from the contract, never the
+  browser). `isxc` starts with `isx`, so own-order checks still match.
+- **Closes are never capped:** Dhan closes (Exit, Exit All, "-", TP / SL brackets: `sendReal(..., 'close')`) carry
+  `isxx`, which has no cap entry; `placeContract` skips the lot cap for `closesLeg`. Tagging closes with the opening tag
+  left a 10-lot CRUDEOIL position (two 5-lot clicks, or a strategy's) impossible to exit (review 2026-11-25). A modify
+  sends the cap tag only when this page changes its own order's lots; a price-only move is never capped.
+- Lot counts follow the instrument's cap: Quick Trade shows / sends `min(saved, maxLots)` (saved settings untouched), the
+  widget's steppers are clamped on a switch.
+- **Never read one crude as the other:** `parseScalperContract` needs the exact root then "-" or a digit (the shared
+  `symbolMatchesUnderlying` files CRUDEOILM under CRUDEOIL on purpose: a mini future read as full-size is 10x); Kotak
+  rows by `startsWith(u)` + digit; the chart's order filter by `^ROOT(?=[\s\d-]|$)` (a "contains CRUDE" match drew a
+  CRUDEOIL order on the CRUDEOILM chart).
 
 ### Opening orders
 - Dhan: `/api/scalper/fast-order` with `source: 'isx'` (server cap `SOURCE_QTY_CAPS.isx` in `lib/dhanSourceCaps.ts`),

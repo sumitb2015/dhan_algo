@@ -33,10 +33,10 @@ import {
 } from '@/lib/indexScalperIndicators';
 import { istDateIso, isRegularSession } from '@/lib/nseHolidays';
 import {
-  INSTRUMENTS, dhanOrderQty, kotakOrderQty, pnlMultiplier, lotUnits, qtyLots, nrmlOnly, openingProduct, type Underlying,
+  INSTRUMENTS, dhanOrderQty, isMcx, kotakOrderQty, pnlMultiplier, lotUnits, qtyLots, nrmlOnly, openingProduct, type Underlying,
 } from '@/lib/indexScalperInstrument';
 import {
-  MAX_LOTS, applyFill, brokerCloseOrder, legsFromDhanPositions, legsKey, legsOpenedElsewhere, orderUnits, pageFilledQty, type ScalperLeg,
+  applyFill, brokerCloseOrder, legsFromDhanPositions, legsKey, legsOpenedElsewhere, orderUnits, pageFilledQty, type ScalperLeg,
 } from '@/lib/indexScalperPositions';
 import { closeOrderProduct } from '@/lib/positionProduct';
 import {
@@ -59,6 +59,8 @@ const GRID_KEY = 'indexScalper.grid';
 // The old scale-bar volume switch (read once, to add the Volume indicator hidden for a viewer who had turned it off).
 const VOL_KEY = 'indexScalper.volume';
 const VOL_ADDED_KEY = 'indexScalper.volumeIndicatorAdded';
+/** Dhan tag for this page's CLOSING orders: no per-order cap (none is listed for it), still an 'isx…' order. */
+const CLOSE_SOURCE = 'isxx';
 const OI_MODE_KEY = 'indexScalper.oiMode';
 /** Default panes: the underlying, and its ATM CE (strike 0 resolves to ATM once, then stays pinned). */
 const DEFAULT_PANES: [PaneCfg, PaneCfg] = [
@@ -73,7 +75,7 @@ function validPane(x: unknown, fallback: PaneCfg): PaneCfg {
   const iv = c?.interval;
   const interval = iv === '1' || iv === '3' || iv === '5' || iv === '15' || iv === '30' || iv === '60' ? iv : fallback.interval;
   const src = c?.source as PaneCfg['source'] | undefined;
-  if (src?.kind === 'underlying') return { source: src, interval };
+  if (src?.kind === 'underlying' || src?.kind === 'future') return { source: { kind: src.kind }, interval };
   if (src?.kind === 'option' && (src.type === 'CE' || src.type === 'PE') && Number.isFinite(src.strike)) {
     return { source: { kind: 'option', type: src.type, strike: src.auto ? 0 : src.strike }, interval };
   }
@@ -109,11 +111,12 @@ interface Toast { ok: boolean; text: string }
 const UNDERLYING_KEY = 'indexScalper.underlying';
 
 export default function IndexScalperTerminal() {
-  // Underlying instrument (NIFTY index or CRUDEOILM mini crude). Switching is locked while REAL is armed.
+  // Underlying instrument (NIFTY index, CRUDEOILM mini crude or CRUDEOIL full-size crude). Switching is locked while REAL
+  // is armed.
   const [underlying, setUnderlying] = useState<Underlying>('NIFTY');
   useEffect(() => {
     const u = readPref(UNDERLYING_KEY);
-    if (u === 'NIFTY' || u === 'CRUDEOILM') setUnderlying(u);
+    if (u === 'NIFTY' || u === 'CRUDEOILM' || u === 'CRUDEOIL') setUnderlying(u);
   }, []);
   const selectUnderlying = (u: Underlying) => {
     if (real) return;
@@ -261,10 +264,24 @@ export default function IndexScalperTerminal() {
     return next;
   });
   // The pane prop: null when off, else the settings (identity changes only when a setting does).
-  const quickProp = useMemo(() => (quickOn ? quickSettings : null), [quickOn, quickSettings]);
+  // The saved settings capped at this instrument's per-order lots (CRUDEOIL 5): what Quick Trade shows and sends. The
+  // saved values are left alone, so going back to NIFTY keeps its 10 lots.
+  const quickMax = INSTRUMENTS[underlying].maxLots;
+  const quickEff = useMemo<QuickSettings>(() => ({
+    ...quickSettings,
+    buyLots: Math.min(quickSettings.buyLots, quickMax),
+    sellLots: Math.min(quickSettings.sellLots, quickMax),
+    stepLots: Math.min(quickSettings.stepLots, quickMax),
+  }), [quickSettings, quickMax]);
+  const quickProp = useMemo(() => (quickOn ? quickEff : null), [quickOn, quickEff]);
   // The chip's + / - step, read at click time (a settings change must not rebuild the order callbacks).
-  const stepLotsRef = useRef(quickSettings.stepLots);
-  useEffect(() => { stepLotsRef.current = quickSettings.stepLots; }, [quickSettings.stepLots]);
+  const stepLotsRef = useRef(quickEff.stepLots);
+  useEffect(() => { stepLotsRef.current = quickEff.stepLots; }, [quickEff.stepLots]);
+  // The widget's one-click lots, capped the same way when the instrument changes (10 on CRUDEOILM -> 5 on CRUDEOIL).
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setScalpLots(l => Math.min(l, INSTRUMENTS[underlying].maxLots));
+  }, [underlying]);
   // An ATM pin the pane made itself is saved as ATM (0), so the next session resolves today's ATM; a picked strike is kept.
   useEffect(() => {
     if (!layoutReady) return;
@@ -493,7 +510,7 @@ export default function IndexScalperTerminal() {
           drvStrikePrice: l.strike,
           drvOptionType: isFut ? 'FUT' : (l.type === 'CE' ? 'CALL' : 'PUT'),
         }),
-        exchange: underlying === 'CRUDEOILM' ? 'MCX' : 'NSE',
+        exchange: isMcx(underlying) ? 'MCX' : 'NSE',
         product: 'Intraday (SIM)', productCode: '', netQty: l.netQty, buyQty: null, sellQty: null, buyAvg: null, sellAvg: null,
         avg: l.netQty !== 0 ? l.avg : null, ltp, realized, unrealized, pnl: unrealized === null ? realized : realized + unrealized,
       };
@@ -520,7 +537,9 @@ export default function IndexScalperTerminal() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(kotak
           ? { ...body, intent, idempotencyKey: newKey() }
-          : { exchangeSegment: INSTRUMENTS[underlying].dhanSegment, ...body, source: 'isx', idempotencyKey: newKey() }),
+          // Opens carry the instrument's capped tag (isx / isxc); closes the uncapped 'isxx', so a position larger than
+          // one order's cap (10 CRUDEOIL lots vs its 5-lot cap) can always be closed. Every tag starts with 'isx'.
+          : { exchangeSegment: INSTRUMENTS[underlying].dhanSegment, ...body, source: intent === 'close' ? CLOSE_SOURCE : INSTRUMENTS[underlying].orderSource, idempotencyKey: newKey() }),
       });
       const j = await res.json() as { success: boolean; order_id?: string; error?: string; unknown?: boolean; warning?: string };
       if (kotak) void loadKotakRecords();
@@ -564,8 +583,10 @@ export default function IndexScalperTerminal() {
     // The lookup that gives the lot size must have landed for the expiry on screen (f.lotSize is null until then):
     // no guessed lot size, the order is refused instead.
     const unitsPerLot = f.lotSize === null ? null : lotUnits(underlying, f.lotSize);
-    const size = orderUnits(req.lots, unitsPerLot);
-    if (!size.ok) return { ok: false, text: size.error };
+    // Per-instrument cap on OPENING orders (CRUDEOIL 5 lots, else 20); the server re-checks it through the source tag.
+    // An order that closes a leg (TP / SL bracket, the chip's "-") is never refused for its size.
+    const size = orderUnits(req.lots, unitsPerLot, req.closesLeg ? Number.MAX_SAFE_INTEGER : INSTRUMENTS[underlying].maxLots);
+    if (!size.ok) return { ok: false, text: `${underlying}: ${size.error}` };
     const c = req.contract;
     if (!c.securityId && !c.tradingSymbol) return { ok: false, text: 'No contract identifier for this order' };
     // MCX crude opens NRML (MARGIN) only, whatever the caller asked. An order closing an existing leg (TP / SL bracket)
@@ -584,7 +605,7 @@ export default function IndexScalperTerminal() {
       if (req.orderType !== 'MARKET' && req.orderType !== 'LIMIT') return { ok: false, text: 'SIM fills market and marketable limit orders only' };
       if (!(live && live > 0) || f.feedAgeSec === null) return { ok: false, text: 'No live price to fill the paper order' };
       if (f.stale) return { ok: false, text: 'Live prices are stale: not filling a paper order on an old price' };
-      if (!f.marketOpen) return { ok: false, text: `${underlying === 'CRUDEOILM' ? 'MCX' : 'NSE'} is closed: paper orders fill only during the session` };
+      if (!f.marketOpen) return { ok: false, text: `${isMcx(underlying) ? 'MCX' : 'NSE'} is closed: paper orders fill only during the session` };
       let fillPx = live;
       if (req.orderType === 'LIMIT') {
         const lim = req.price ?? 0;
@@ -597,7 +618,7 @@ export default function IndexScalperTerminal() {
     }
 
     // A market order needs a live feed: stale ticks, or none at all (the chain may be a REST snapshot then), refuse it.
-    if (req.orderType === 'MARKET' && !f.marketOpen) return { ok: false, text: `${underlying === 'CRUDEOILM' ? 'MCX' : 'NSE'} is closed: refusing a market order` };
+    if (req.orderType === 'MARKET' && !f.marketOpen) return { ok: false, text: `${isMcx(underlying) ? 'MCX' : 'NSE'} is closed: refusing a market order` };
     if (req.orderType === 'MARKET' && (f.stale || f.feedAgeSec === null)) return { ok: false, text: f.stale ? 'Live prices are stale: refusing a market order' : 'No live prices (tick feed not running): refusing a market order' };
     if (!brokerLoadedRef.current) return { ok: false, text: 'Broker not loaded yet' };
     if (brokerRef.current === 'kotak') {
@@ -631,7 +652,7 @@ export default function IndexScalperTerminal() {
       securityId: c.securityId, quantity: dQty, side: req.side, orderType: req.orderType,
       exchangeSegment: INSTRUMENTS[underlying].dhanSegment,
       price: req.price ?? undefined, triggerPrice: req.trigger ?? undefined, productType: product,
-    });
+    }, req.closesLeg ? 'close' : 'open');
     if (out.ok && before === 0) rememberSpot(c.securityId, f.spot);
     loadPositions();
     void loadOrders();
@@ -651,7 +672,7 @@ export default function IndexScalperTerminal() {
     if (leg.ltp === null || feedRef.current.feedAgeSec === null) return { ok: false, text: 'No live price to close the paper position' };
     // Same rule as a paper entry: never book P&L on a price the feed stopped updating.
     if (feedRef.current.stale) return { ok: false, text: 'Live prices are stale: not closing a paper position on an old price' };
-    if (!feedRef.current.marketOpen) return { ok: false, text: `${underlying === 'CRUDEOILM' ? 'MCX' : 'NSE'} is closed: paper positions close only during the session` };
+    if (!feedRef.current.marketOpen) return { ok: false, text: `${isMcx(underlying) ? 'MCX' : 'NSE'} is closed: paper positions close only during the session` };
     const sl = sim.legs[leg.id];
     if (!sl || sl.netQty === 0) return { ok: true, text: 'Already flat' };
     simFill({ strike: sl.strike, type: sl.type, securityId: sl.securityId, ltp: leg.ltp, expiry: '' }, sl.netQty > 0 ? 'SELL' : 'BUY', Math.abs(sl.netQty), leg.ltp, sl.symbol);
@@ -702,7 +723,7 @@ export default function IndexScalperTerminal() {
           : { ...out, text: `${label}: ${sent} of ${order.units} closed, then: ${out.text}` };
       }
     } else {
-      out = await sendReal({ securityId: leg.securityId, quantity: order.units, side: order.side, orderType: 'MARKET', ...product.fields });
+      out = await sendReal({ securityId: leg.securityId, quantity: order.units, side: order.side, orderType: 'MARKET', ...product.fields }, 'close');
     }
     return out;
   }, [sendReal]);
@@ -890,21 +911,20 @@ export default function IndexScalperTerminal() {
   }, [broker, futDhanId, futKotakSymbol, futExpiry, feed.expiry]);
 
   const chartContractName = useMemo(() => {
-    if (underlying === 'CRUDEOILM') {
+    if (isMcx(underlying)) {
       const exp = feed.future?.expiry
         ? new Date(feed.future.expiry).toLocaleString('en-US', { month: 'short' }).toUpperCase()
         : 'DEC';
-      return `CRUDEOILM ${exp} FUT`;
+      return `${underlying} ${exp} FUT`;
     }
     return `${underlying} FUT`;
   }, [underlying, feed.future?.expiry]);
 
   const chartOpenOrders = useMemo(() => {
-    return panelOrders.filter(o => o.bucket === 'open' && (
-      o.symbol.toUpperCase().includes(underlying) ||
-      (underlying === 'CRUDEOILM' && (o.symbol.toUpperCase().includes('CRUDE') || o.exchange === 'MCX')) ||
-      (underlying === 'NIFTY' && o.symbol.toUpperCase().includes('NIFTY'))
-    ));
+    // The exact root, then a space / dash / digit: CRUDEOIL and CRUDEOILM never draw each other's orders (a "contains
+    // CRUDE" match put a CRUDEOIL future order on the CRUDEOILM chart), NIFTY never NIFTYNXT50's.
+    const root = new RegExp(`^${underlying}(?=[\\s\\d-]|$)`);
+    return panelOrders.filter(o => o.bucket === 'open' && root.test(o.symbol.toUpperCase()));
   }, [panelOrders, underlying]);
 
   // `contract` is the pane's: the option it plots, or the underlying's future (ChartPane binds it).
@@ -1076,7 +1096,7 @@ export default function IndexScalperTerminal() {
     const unitsPerLot = lotUnits(underlying, lotSize);
     let quantity = row.qty ?? 0;
     if (req.lots !== undefined) {
-      const lotsErr = editLotsError(req.lots, row.tradedQty);
+      const lotsErr = editLotsError(req.lots, row.tradedQty, INSTRUMENTS[underlying].maxLots);
       if (lotsErr) { flash({ ok: false, text: `Order ${row.id}: ${lotsErr}` }); return false; }
       if (unitsPerLot === null) { flash({ ok: false, text: 'Lot size unknown: nothing sent' }); return false; }
       quantity = kotak ? kotakOrderQty(underlying, req.lots, unitsPerLot) : dhanOrderQty(underlying, req.lots, unitsPerLot);
@@ -1089,7 +1109,10 @@ export default function IndexScalperTerminal() {
         body: JSON.stringify({
           orderId: row.id, broker: kotak ? 'kotak' : 'dhan', orderType: row.rawType, quantity,
           price: levels.price, triggerPrice: levels.trigger, validity: 'DAY',
-          source: 'isx', exchangeSegment: row.segment || INSTRUMENTS[underlying].dhanSegment, tradingSymbol: row.securityId, underlying,
+          // The cap tag only when this page changes the size of its own order: a price-only move (another placer's
+          // 10-lot stop on CRUDEOIL, a bracket) must never be refused by the 5-lot cap.
+          ...(req.lots !== undefined && row.own ? { source: INSTRUMENTS[underlying].orderSource } : {}),
+          exchangeSegment: row.segment || INSTRUMENTS[underlying].dhanSegment, tradingSymbol: row.securityId, underlying,
         }),
       });
       const j = await r.json() as { success: boolean; error?: string };
@@ -1341,15 +1364,19 @@ export default function IndexScalperTerminal() {
             >
               NIFTY
             </button>
-            <button
-              type="button"
-              aria-pressed={underlying === 'CRUDEOILM'}
-              disabled={real}
-              onClick={() => selectUnderlying('CRUDEOILM')}
-              className={cn('h-7 px-2 text-xs font-bold transition-colors disabled:opacity-50', underlying === 'CRUDEOILM' ? 'bg-amber-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}
-            >
-              CRUDEOILM
-            </button>
+            {(['CRUDEOILM', 'CRUDEOIL'] as const).map(u => (
+              <button
+                key={u}
+                type="button"
+                aria-pressed={underlying === u}
+                disabled={real}
+                title={u === 'CRUDEOIL' ? 'Full-size crude: 100 barrels a lot, max 5 lots per order' : 'Mini crude: 10 barrels a lot'}
+                onClick={() => selectUnderlying(u)}
+                className={cn('h-7 px-2 text-xs font-bold transition-colors disabled:opacity-50', underlying === u ? 'bg-amber-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}
+              >
+                {u}
+              </button>
+            ))}
           </div>
           {sep}
           <div role="group" aria-label="Chart layout" className="flex items-center">
@@ -1380,8 +1407,8 @@ export default function IndexScalperTerminal() {
               <Settings2 className="w-4 h-4" />
             </button>
             {quickMenu && quickOn && (
-              <QuickSettingsMenu settings={quickSettings} onPatch={patchQuick} nrmlLocked={nrmlOnly(underlying)}
-                maxLots={MAX_LOTS} onClose={() => setQuickMenu(false)} />
+              <QuickSettingsMenu settings={quickEff} onPatch={patchQuick} nrmlLocked={nrmlOnly(underlying)}
+                maxLots={INSTRUMENTS[underlying].maxLots} onClose={() => setQuickMenu(false)} />
             )}
           </div>
           {sep}
@@ -1399,7 +1426,7 @@ export default function IndexScalperTerminal() {
             <BarChart3 className="w-4 h-4" />Indicators{indicators.length > 0 && <span className="text-sky-400">{indicators.length}</span>}
           </button>
           {sep}
-          {underlying === 'CRUDEOILM' && (
+          {isMcx(underlying) && (
             <>
               <button
                 type="button"
@@ -1458,7 +1485,7 @@ export default function IndexScalperTerminal() {
           {candleErr && <span className="mr-3">Candles: {candleErr}</span>}
           {posErr && <span className="mr-3">Positions: {posErr}</span>}
           {feed.kotakError && <span data-testid="kotak-error" className="mr-3">{feed.kotakError}: Kotak orders and exits wait for it.</span>}
-          {!feed.marketOpen && <span data-testid="market-closed" className="mr-3">{underlying === 'CRUDEOILM' ? 'MCX is closed (session 09:00-23:30/23:55 IST)' : 'NSE F&O is closed (session 09:15-15:40 IST)'}: paper fills and market orders are off.</span>}
+          {!feed.marketOpen && <span data-testid="market-closed" className="mr-3">{isMcx(underlying) ? 'MCX is closed (session 09:00-23:30/23:55 IST)' : 'NSE F&O is closed (session 09:15-15:40 IST)'}: paper fills and market orders are off.</span>}
           {notLive && <span className="mr-3">No live ticks (market closed or the tick bridge is not running): the option chain is Dhan&apos;s last snapshot, and market orders are refused.</span>}
           {feed.stale && <span>Live ticks are stale ({Math.round(feed.feedAgeSec ?? 0)}s): market closed or bridge down. Market orders are refused.</span>}
         </div>
@@ -1623,7 +1650,7 @@ export default function IndexScalperTerminal() {
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-oncolor-dark/70">
           <div role="alertdialog" aria-label="Arm real orders" className="w-[380px] rounded-lg border border-rose-500/70 bg-zinc-900 p-5 shadow-2xl">
             <h2 className="text-sm font-bold text-rose-300 mb-2">Arm REAL orders on {brokerName}?</h2>
-            <p className="text-xs text-zinc-300 mb-4">Buy/Sell, Scalper and Exit will place live orders with real money on your {brokerName} account (max {MAX_LOTS} lots per order). The chart then shows your {brokerName} {underlying} positions; prices stay Dhan&apos;s live feed. REAL is switched off again whenever this page reloads.</p>
+            <p className="text-xs text-zinc-300 mb-4">Buy/Sell, Scalper and Exit will place live orders with real money on your {brokerName} account (max {INSTRUMENTS[underlying].maxLots} lots per order on {underlying}). The chart then shows your {brokerName} {underlying} positions; prices stay Dhan&apos;s live feed. REAL is switched off again whenever this page reloads.</p>
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setArmOpen(false)} className="h-8 px-3 rounded text-xs font-semibold text-zinc-300 hover:bg-zinc-800">Cancel</button>
               <button type="button" autoFocus disabled={!brokerLoaded} onClick={() => { if (brokerLoaded) { setReal(true); setArmOpen(false); } }} className="h-8 px-3 rounded bg-rose-600 hover:bg-rose-500 text-oncolor text-xs font-bold disabled:opacity-50">Arm REAL on {brokerName}</button>

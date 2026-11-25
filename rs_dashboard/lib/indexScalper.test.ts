@@ -501,3 +501,16 @@ test('CPR and pivots: TradingView Traditional levels from the previous IST day, 
   const cpr = computeIndicator(bars, newIndicator('cpr', 'c'));
   assert.deepEqual(cpr.series.map(s => s.axisLabel), ['TC', 'P', 'BC']);
 });
+
+test('CRUDEOIL and CRUDEOILM never read each other\'s contracts; CRUDEOIL\'s 5-lot cap', async () => {
+  const { parseScalperContract } = await import('./indexScalperPositions.ts');
+  assert.deepEqual(parseScalperContract('CRUDEOIL-18Dec2026-FUT', 'CRUDEOIL'), { strike: 0, type: 'FUT' });
+  assert.equal(parseScalperContract('CRUDEOILM-18Dec2026-FUT', 'CRUDEOIL'), null);
+  assert.equal(parseScalperContract('CRUDEOIL-18Dec2026-FUT', 'CRUDEOILM'), null);
+  assert.deepEqual(parseScalperContract('CRUDEOIL-16Dec2026-7500-CE', 'CRUDEOIL'), { strike: 7500, type: 'CE' });
+  assert.equal(parseScalperContract('CRUDEOILM-16Dec2026-7500-CE', 'CRUDEOIL'), null);
+  assert.equal(parseScalperContract('CRUDEOIL-16Dec2026-7500-CE', 'CRUDEOILM'), null);
+  assert.deepEqual(orderUnits(5, 1, 5), { ok: true, units: 5 });
+  assert.deepEqual(orderUnits(6, 1, 5), { ok: false, error: 'Max 5 lots per order' });
+  assert.deepEqual(orderUnits(20, 65), { ok: true, units: 1300 }); // default cap 20
+});

@@ -68,9 +68,9 @@ export function orderEditError(type: string, side: 'BUY' | 'SELL', price: number
 
 /** Why the lots cannot be changed to `lots` (null = they can): whole lots within 1..MAX_LOTS, and not on an order that has
  *  already part-filled (its remaining quantity and the broker's view of the total would then disagree). */
-export function editLotsError(lots: number, tradedQty: number | null): string | null {
+export function editLotsError(lots: number, tradedQty: number | null, maxLots: number = MAX_LOTS): string | null {
   if (!Number.isInteger(lots) || lots < 1) return 'Lots must be a whole number from 1';
-  if (lots > MAX_LOTS) return `Max ${MAX_LOTS} lots per order`;
+  if (lots > maxLots) return `Max ${maxLots} lots per order`;
   if (tradedQty !== null && tradedQty > 0) return 'This order has part-filled: cancel it and place a new one to change its size';
   return null;
 }

@@ -10,6 +10,14 @@ const CRUDE_IDS: Record<string, [string, string]> = {
   '6150': ['502', '602'],
   '6200': ['503', '603'],
 };
+// Full-size CRUDEOIL: its own contract ids, future 9101, Kotak symbols CRUDEOIL... (never the mini's).
+const CRUDEOIL_IDS: Record<string, [string, string]> = {
+  '6100': ['701', '801'],
+  '6150': ['702', '802'],
+  '6200': ['703', '803'],
+};
+const isCrude = (u: string) => u === 'CRUDEOILM' || u === 'CRUDEOIL';
+const idsFor = (u: string) => (u === 'CRUDEOIL' ? CRUDEOIL_IDS : CRUDE_IDS);
 
 function crudeCandles() {
   const start = Date.UTC(2026, 10, 20, 3, 45, 0) / 1000;
@@ -43,21 +51,21 @@ async function mockCrudeApi(page: Page, state: MockState) {
     if (p === '/api/options/expiries') {
       const und = u.searchParams.get('underlying') ?? 'NIFTY';
       state.underlyingCalls.push(und);
-      if (und === 'CRUDEOILM') {
+      if (isCrude(und)) {
         return json(route, { success: true, data: ['2026-12-15'] });
       }
       return json(route, { success: true, data: ['2026-12-01'] });
     }
     if (p === '/api/scalper/lookup') {
       const und = u.searchParams.get('underlying') ?? 'NIFTY';
-      if (und === 'CRUDEOILM') {
-        const strikes = Object.fromEntries(Object.entries(CRUDE_IDS).map(([k, [ce, pe]]) => [k, { ceId: ce, peId: pe }]));
+      if (isCrude(und)) {
+        const strikes = Object.fromEntries(Object.entries(idsFor(und)).map(([k, [ce, pe]]) => [k, { ceId: ce, peId: pe }]));
         return json(route, {
           success: true,
           data: {
             lotSize: 1,
             // the shape scripts/tools/scalper_api.py `lookup` returns
-            future: { securityId: '9001', expiry: '2026-12-18' },
+            future: { securityId: und === 'CRUDEOIL' ? '9101' : '9001', expiry: '2026-12-18' },
             strikes,
           },
         });
@@ -83,7 +91,7 @@ async function mockCrudeApi(page: Page, state: MockState) {
         status: { status: 'RUNNING' },
         quotes: {
           underlying: und,
-          expiry: und === 'CRUDEOILM' ? '2026-12-15' : '2026-12-01',
+          expiry: isCrude(und) ? '2026-12-15' : '2026-12-01',
           spot: CRUDE_SPOT,
           atm: 6100,
           updated_at: sessionIso(),
@@ -107,16 +115,21 @@ async function mockCrudeApi(page: Page, state: MockState) {
     }
     // Kotak contracts, in the shapes /api/scalper/kotak/lookup and /symbol-lookup return
     if (p === '/api/scalper/kotak/lookup') {
+      const und = u.searchParams.get('underlying') ?? 'CRUDEOILM';
+      const root = und === 'CRUDEOIL' ? 'CRUDEOIL' : 'CRUDEOILM';
       return json(route, {
         success: true,
         data: {
-          lotSize: 10, exchangeSegment: 'mcx_fo', future: { trading_symbol: 'CRUDEOILM26DECFUT' },
-          strikes: Object.fromEntries(Object.keys(CRUDE_IDS).map(k => [k, { ceSymbol: `CRUDEOILM26DEC${k}CE`, peSymbol: `CRUDEOILM26DEC${k}PE` }])),
+          lotSize: und === 'CRUDEOIL' ? 100 : 10, exchangeSegment: 'mcx_fo', future: { trading_symbol: `${root}26DECFUT` },
+          strikes: Object.fromEntries(Object.keys(CRUDE_IDS).map(k => [k, { ceSymbol: `${root}26DEC${k}CE`, peSymbol: `${root}26DEC${k}PE` }])),
         },
       });
     }
     if (p === '/api/scalper/kotak/symbol-lookup') {
-      return json(route, { success: true, data: { CRUDEOILM26DECFUT: { expiry: '2026-12-18', strike: 0, side: 'FUT' } } });
+      return json(route, { success: true, data: {
+        CRUDEOILM26DECFUT: { expiry: '2026-12-18', strike: 0, side: 'FUT' },
+        CRUDEOIL26DECFUT: { expiry: '2026-12-18', strike: 0, side: 'FUT' },
+      } });
     }
     if (p === '/api/scalper/kotak/funds') return json(route, { success: true, data: { availabelBalance: 1000000, availableBalance: 1000000, utilizedAmount: 0 } });
     if (p === '/api/scalper/kotak/positions' || p === '/api/index-scalper/kotak-positions') return json(route, { success: true, data: [] });
@@ -151,7 +164,7 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
     await expect(page.locator('[data-testid="index-scalper"]')).toBeVisible();
 
     // Select CRUDEOILM
-    const crudeBtn = page.getByRole('button', { name: 'CRUDEOILM' });
+    const crudeBtn = page.getByRole('button', { name: 'CRUDEOILM', exact: true });
     await expect(crudeBtn).toBeVisible();
     await crudeBtn.click();
 
@@ -204,7 +217,7 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
     await brokerSel.selectOption('kotak');
 
     // Select CRUDEOILM
-    await page.getByRole('button', { name: 'CRUDEOILM' }).click();
+    await page.getByRole('button', { name: 'CRUDEOILM', exact: true }).click();
 
     // Arm REAL
     await page.getByRole('button', { name: 'REAL' }).click();
@@ -218,5 +231,103 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
     expect(kotakCall.path).toBe('/api/index-scalper/kotak-order');
     expect(kotakCall.body?.tradingSymbol).toBe('CRUDEOILM26DECFUT');
     expect(kotakCall.body?.quantity).toBe(10); // 10 barrels on Kotak (1 lot * 10)
+  });
+
+  test('CRUDEOIL (full-size) on Dhan: 1 lot = quantity 1 tagged isxc; P&L x100 per point; the mini\'s position stays off its chart', async ({ page, context }) => {
+    const state: MockState = {
+      calls: [], blocked: [], underlyingCalls: [], candleCalls: [],
+      positions: [
+        // Dhan MCX netQty is in LOTS: 2 CRUDEOIL lots = 200 bbl, opened 10 points below the live 6120
+        { tradingSymbol: 'CRUDEOIL-18Dec2026-FUT', securityId: '9101', exchangeSegment: 'MCX_COMM', productType: 'MARGIN', netQty: 2, buyAvg: CRUDE_SPOT - 10, costPrice: CRUDE_SPOT - 10, sellAvg: 0, positionType: 'LONG' },
+        // a CRUDEOILM future in the same book: never on the CRUDEOIL chart
+        { tradingSymbol: 'CRUDEOILM-18Dec2026-FUT', securityId: '9001', exchangeSegment: 'MCX_COMM', productType: 'MARGIN', netQty: 3, buyAvg: CRUDE_SPOT - 10, costPrice: CRUDE_SPOT - 10, sellAvg: 0, positionType: 'LONG' },
+      ],
+    };
+    await signIn(context);
+    await mockCrudeApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('[data-testid="index-scalper"]')).toBeVisible();
+    await expect(page.getByLabel('Broker for new orders')).toBeEnabled({ timeout: 30_000 }); // hydrated: clicks land
+    await page.getByRole('button', { name: 'CRUDEOIL', exact: true }).click();
+    await expect.poll(() => state.underlyingCalls.includes('CRUDEOIL'), { timeout: 15_000 }).toBe(true);
+    await expect(page.getByTestId('chart-pane-0')).toContainText('CRUDEOIL FUT', { timeout: 30_000 }); // not 'CRUDEOILM FUT'
+    await page.getByRole('button', { name: 'REAL' }).click();
+    await page.getByRole('button', { name: /Arm REAL on Dhan/i }).click();
+    await expect(page.getByRole('alertdialog')).toHaveCount(0);
+
+    const chips = page.getByTestId('chart-pane-0').getByTestId('position-chip');
+    await expect(chips).toHaveCount(1, { timeout: 15_000 });
+    await expect(chips.getByTestId('position-lots')).toHaveText('2');
+    await expect(chips).toContainText('+2,000 INR'); // 2 lots x 100 bbl x 10 points
+
+    await page.getByRole('button', { name: 'Scalper', exact: true }).click();
+    await page.getByRole('button', { name: 'Buy FUT', exact: true }).first().click();
+    await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
+    expect(state.calls[0].path).toBe('/api/scalper/fast-order');
+    expect(state.calls[0].body).toMatchObject({ securityId: '9101', exchangeSegment: 'MCX_COMM', quantity: 1, source: 'isxc' });
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('CRUDEOIL on Dhan: a 10-lot position (above the 5-lot cap) still exits in full, tagged isxx (uncapped close)', async ({ page, context }) => {
+    const state: MockState = {
+      calls: [], blocked: [], underlyingCalls: [], candleCalls: [],
+      positions: [{ tradingSymbol: 'CRUDEOIL-18Dec2026-FUT', securityId: '9101', exchangeSegment: 'MCX_COMM', productType: 'MARGIN', netQty: 10, buyAvg: CRUDE_SPOT - 10, costPrice: CRUDE_SPOT - 10, sellAvg: 0, positionType: 'LONG' }],
+    };
+    await signIn(context);
+    await mockCrudeApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByLabel('Broker for new orders')).toBeEnabled({ timeout: 30_000 });
+    await page.getByRole('button', { name: 'CRUDEOIL', exact: true }).click();
+    await expect(page.getByTestId('chart-pane-0')).toContainText('CRUDEOIL FUT', { timeout: 30_000 });
+    await page.getByRole('button', { name: 'REAL' }).click();
+    await page.getByRole('button', { name: /Arm REAL on Dhan/i }).click();
+    const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
+    await expect(chip.getByTestId('position-lots')).toHaveText('10', { timeout: 15_000 });
+    await chip.getByRole('button', { name: /^Exit / }).click(); // the chip's own x, not Exit All
+    await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
+    expect(state.calls[0].body).toMatchObject({ securityId: '9101', side: 'SELL', quantity: 10, source: 'isxx' });
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('CRUDEOIL on Kotak: 1 lot = 100 barrels', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], underlyingCalls: [], candleCalls: [], positions: [] };
+    await signIn(context);
+    await mockCrudeApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('[data-testid="index-scalper"]')).toBeVisible();
+    const brokerSel = page.getByLabel('Broker for new orders');
+    await expect(brokerSel).toBeEnabled({ timeout: 30_000 });
+    await brokerSel.selectOption('kotak');
+    await page.getByRole('button', { name: 'CRUDEOIL', exact: true }).click();
+    await page.getByRole('button', { name: 'REAL' }).click();
+    await page.getByRole('button', { name: /Arm REAL on Kotak/i }).click();
+    await page.getByRole('button', { name: 'Scalper', exact: true }).click();
+    await page.getByRole('button', { name: 'Buy FUT', exact: true }).first().click();
+    await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
+    expect(state.calls[0].path).toBe('/api/index-scalper/kotak-order');
+    expect(state.calls[0].body).toMatchObject({ tradingSymbol: 'CRUDEOIL26DECFUT', quantity: 100 });
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('CRUDEOIL caps an order at 5 lots: 6 is refused and nothing is sent', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], underlyingCalls: [], candleCalls: [], positions: [] };
+    await signIn(context);
+    await mockCrudeApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('[data-testid="index-scalper"]')).toBeVisible();
+    await expect(page.getByLabel('Broker for new orders')).toBeEnabled({ timeout: 30_000 });
+    await page.getByRole('button', { name: 'CRUDEOIL', exact: true }).click();
+    await expect(page.getByTestId('chart-pane-0')).toContainText('CRUDEOIL FUT', { timeout: 30_000 });
+    await page.getByRole('button', { name: 'REAL' }).click();
+    await page.getByRole('button', { name: /Arm REAL on Dhan/i }).click();
+    // without one-click mode, Buy FUT opens the ticket
+    await page.getByRole('button', { name: 'Buy FUT', exact: true }).first().click();
+    const ticket = page.getByTestId('order-ticket');
+    await expect(ticket).toContainText('max 5');
+    await ticket.getByLabel(/Lots/).fill('6');
+    await ticket.getByRole('button', { name: /^Buy / }).click();
+    await expect(ticket).toContainText('Max 5 lots per order');
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
   });
 });

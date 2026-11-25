@@ -44,6 +44,7 @@ Related skills:
 | Autoscale including overlays | `autoscaleInfoProvider` on the candle series, plus `scaleLevelsRef` |
 | Price-scale "+" button and context menu; hotkeys | the `price scale hover` and `context menu events & keyboard shortcuts` sections |
 | 1 / 2 chart layout, per-pane instrument + timeframe | `ChartPane.tsx` (pane header, filters, contract binding); layout + panes in `indexScalper.layout.v1` |
+| NIFTY FUT pane (chart only: volume, VWAP) | `ChartSource { kind: 'future' }` -> `resolveSource(..., futureDhanId)` (the lookup's `data.future`); live price / volume from the bridge's `future` only when its expiry matches (`feed.indexFuture`); candles `kind=future` (NSE_FNO / FUTIDX); `ordersEnabled={false}` hides the "+" menu; no legs, orders, brackets, Quick Trade or OI profile on it |
 | What a pane plots; which legs / orders / TP-SL belong on it | `lib/indexScalperChartSource.ts`: `resolveSource` (strike pinned once resolved, ATM fallback), `legOnChart`, `bracketsOnChart`, `orderOnChart` (by `OrderRowView.securityId`, `isOption`) |
 | Quick Trade (live C / P chips on every strike in view, Buy / Sell in one click) | `QuickStrikeOverlay.tsx` over underlying panes; pure rules `lib/indexScalperQuickTrade.ts` (`visibleStrikeRows`, `clampQuickSettings`); header switch, off by default |
 | Call / Put OI profile (Total or Chg) | `lib/indexScalperOiProfile.ts` (`oiProfileKey`, label placement, `fmtOI`); one overlay canvas in `ScalperChart.tsx`; header OI switch + Total / Chg |
@@ -62,6 +63,9 @@ Related skills:
 - **Line width** is a per-indicator setting (`IndicatorInstance.width`, 1-4 px; Auto = each line's own default: 2 on the
   price pane, 3 for a coloured Supertrend, 1 for Bollinger / daily levels and in an oscillator pane). `computeIndicator`
   applies it to every line, never a histogram; it is part of the series signature so a change rebuilds the series.
+- **Drawings are per price axis** (`drawKey`): an option by its id, the NIFTY future `:fut:NIFTY`, each crude contract
+  `:CRUDEOILM` / `:CRUDEOIL`; the NIFTY index keeps the bare key. A shared key drew index-level lines on the future (~100
+  pts off).
 - **Volume bars:** a `HistogramSeries` on the price pane with its own hidden scale (`priceScaleId: 'vol'`, bottom 20 %),
   created with the chart, plus a thin Volume MA line on the same scale (`volumeMa`, SMA of `v`, default 20, 0 = off);
   candles get a 22 % bottom margin while it shows. It is the `volume` indicator (`fixedStyle`: no colour / width

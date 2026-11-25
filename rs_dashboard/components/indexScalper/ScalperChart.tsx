@@ -16,7 +16,7 @@ import { useChartChrome } from '@/lib/chartTheme';
 import { computeIndicator, indicatorLabel, tailUnchanged, volumeMa, type Bar, type IndicatorInstance, pointColor, flipsAtLast, type OutSeries } from '@/lib/indexScalperIndicators';
 import { bracketKind, fmtRupees, legAnchor, legPnl, type ScalperLeg } from '@/lib/indexScalperPositions';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
-import { INSTRUMENTS, displayLotUnits, qtyUnits, type Underlying } from '@/lib/indexScalperInstrument';
+import { INSTRUMENTS, displayLotUnits, isMcx, qtyUnits, type Underlying } from '@/lib/indexScalperInstrument';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
 import { fmtOI, fmtOIChange, oiBars, placeOiLabels, type OiMode, type OiProfile } from '@/lib/indexScalperOiProfile';
@@ -24,7 +24,6 @@ import { legPremiumPnl, premiumBracketsFor } from '@/lib/indexScalperPremiumBrac
 import PremiumBracketControls from './PremiumBracketControls';
 import OrderEditPopover, { type OrderEditDraft } from './OrderEditPopover';
 import { isEditable } from '@/lib/indexScalperOrderEdit';
-import { MAX_LOTS } from '@/lib/indexScalperPositions';
 
 export type DrawTool = 'cursor' | 'hline' | 'trend' | 'ruler';
 
@@ -102,6 +101,8 @@ interface Props {
   /** Edit one of this page's working orders: `level` = where its line was dragged / typed, `lots` = new size. Resolves
    *  true when the broker accepted the modify. */
   onModifyOrder?: (req: { orderId: string; level?: number; lots?: number }) => Promise<boolean>;
+  /** false = a chart-only pane (the NIFTY future): no price-axis "+" order menu. */
+  ordersEnabled?: boolean;
   onPlaceLimitOrder?: (req: { side: 'BUY' | 'SELL'; price: number; lots: number; orderType?: 'LIMIT' | 'STOP_LOSS' }) => void;
   onOpenTicket?: (req: { price: number; lots: number; orderType: 'LIMIT' }) => void;
   onAlert?: (symbol: string, price: number) => void;
@@ -168,12 +169,12 @@ function ScalperChart(props: Props) {
   const {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, showGrid = true, showVolume = true, volumeMaLen = 20, legs, entrySpots,
     onExitLeg, onAdjustLeg, adjustLots = 1, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
-    contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
+    contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, ordersEnabled = true, onPlaceLimitOrder, onOpenTicket, onAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
     premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, resetSeq = 0, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false, premiumOrders,
   } = props;
   const drawKeyRef = useRef(drawKeyProp);
-  const tickSize = tickProp ?? (underlying === 'CRUDEOILM' ? 1.0 : 0.05);
+  const tickSize = tickProp ?? (isMcx(underlying) ? 1.0 : 0.05);
   const canBracket = useCallback((leg: ScalperLeg) => premium || leg.type === 'FUT', [premium]);
   const chrome = useChromeStable();
   const boxRef = useRef<HTMLDivElement>(null);
@@ -1036,6 +1037,7 @@ function ScalperChart(props: Props) {
     const box = boxRef.current;
     if (!box) return;
     const onMove = (e: MouseEvent) => {
+      if (!ordersEnabled) return; // chart-only pane: no "+" order menu
       const rect = box.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
@@ -1067,7 +1069,7 @@ function ScalperChart(props: Props) {
       box.removeEventListener('mousemove', onMove);
       box.removeEventListener('mouseleave', onLeave);
     };
-  }, [menu, tickSize]);
+  }, [menu, tickSize, ordersEnabled]);
 
   // ── context menu events & keyboard shortcuts ────────────────────────
   useEffect(() => {
@@ -1379,7 +1381,7 @@ function ScalperChart(props: Props) {
               )}
             </div>
             {ordEdit?.id === ord.id && (
-              <OrderEditPopover top={top + 14} ord={ord} draft={ordEdit} onDraft={setOrdEdit} maxLots={MAX_LOTS}
+              <OrderEditPopover top={top + 14} ord={ord} draft={ordEdit} onDraft={setOrdEdit} maxLots={INSTRUMENTS[underlying].maxLots}
                 onClose={() => setOrdEdit(null)}
                 onSave={async (lots, level) => {
                   const req = { orderId: ord.id, ...(lots !== ordLots ? { lots } : {}), ...(level !== null ? { level } : {}) };

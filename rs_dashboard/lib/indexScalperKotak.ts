@@ -140,7 +140,8 @@ export function legsFromKotakPositions(
 ): ScalperLeg[] {
   const out: ScalperLeg[] = [];
   const seen = new Set<string>();
-  const isTarget = (s: string) => (underlying === 'CRUDEOILM' ? /^CRUDEOILM\d/.test(s) : /^NIFTY\d/.test(s));
+  // The exact root followed by a digit: CRUDEOIL never takes CRUDEOILM's rows (its next letter is M), NIFTY not NIFTYNXT50.
+  const isTarget = (s: string) => s.startsWith(underlying) && /\d/.test(s.charAt(underlying.length));
   for (const r of rows) {
     const sym = String(r.tradingSymbol ?? '');
     const info = symbols[sym];

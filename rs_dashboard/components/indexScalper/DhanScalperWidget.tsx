@@ -17,8 +17,7 @@ import { ChevronDown, ChevronUp, Settings, X, Zap } from 'lucide-react';
 import type { IndexScalperFeed } from './useIndexScalperFeed';
 import type { PickedContract } from './OptionChainPanel';
 import { useDraggable } from './useDraggable';
-import { MAX_LOTS } from '@/lib/indexScalperPositions';
-import { nrmlOnly } from '@/lib/indexScalperInstrument';
+import { INSTRUMENTS, isMcx, nrmlOnly } from '@/lib/indexScalperInstrument';
 import {
   calcOptionBuyReq, computeAtmStrikes, formatDhanExpiry, formatManageScripExpiry, getStrikeOffsetLabel,
 } from '@/lib/dhanScalperMath';
@@ -50,7 +49,7 @@ export interface DhanScalperWidgetProps {
 const inr = (n: number | null | undefined): string =>
   n === null || n === undefined || !Number.isFinite(n) || n <= 0 ? '—' : `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-function Stepper({ lots, lotSize, onChange, label }: { lots: number; lotSize: number | null; onChange: (n: number) => void; label: string }) {
+function Stepper({ lots, lotSize, onChange, label, maxLots }: { lots: number; lotSize: number | null; onChange: (n: number) => void; label: string; maxLots: number }) {
   return (
     <div className="flex flex-col w-[100px]">
       <div className="flex justify-between items-center text-[10px] text-zinc-400 font-medium px-1 mb-0.5">
@@ -61,7 +60,7 @@ function Stepper({ lots, lotSize, onChange, label }: { lots: number; lotSize: nu
         <button type="button" aria-label={`Fewer lots (${label})`} disabled={lots <= 1} onClick={() => onChange(Math.max(1, lots - 1))}
           className={cn('w-7 h-7 flex items-center justify-center rounded hover:bg-zinc-700 text-zinc-300 hover:text-zinc-100 font-bold text-base disabled:opacity-30', FOCUS)}>−</button>
         <span className="text-xs font-bold tabular-nums text-zinc-100 text-center flex-1">{lotSize ? lots * lotSize : '—'}</span>
-        <button type="button" aria-label={`More lots (${label})`} disabled={lots >= MAX_LOTS} onClick={() => onChange(Math.min(MAX_LOTS, lots + 1))}
+        <button type="button" aria-label={`More lots (${label})`} disabled={lots >= maxLots} onClick={() => onChange(Math.min(maxLots, lots + 1))}
           className={cn('w-7 h-7 flex items-center justify-center rounded hover:bg-zinc-700 text-zinc-300 hover:text-zinc-100 font-bold text-base disabled:opacity-30', FOCUS)}>+</button>
       </div>
     </div>
@@ -115,6 +114,12 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
   const [ceLots, setCeLots] = useState(1);
   const [peLots, setPeLots] = useState(1);
   const [futLots, setFutLots] = useState(1);
+  // Cap the steppers at the new instrument's per-order lots on a switch (CRUDEOIL 5).
+  useEffect(() => {
+    const max = INSTRUMENTS[feed.underlying].maxLots;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCeLots(l => Math.min(l, max)); setPeLots(l => Math.min(l, max)); setFutLots(l => Math.min(l, max));
+  }, [feed.underlying]);
   // Manage Scrips: strike offsets in steps from the ATM pair, so the strikes follow the spot.
   const [ceOffset, setCeOffset] = useState(0);
   const [peOffset, setPeOffset] = useState(0);
@@ -217,7 +222,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
           className={cn('w-full flex items-center justify-between py-0.5 rounded', FOCUS)}>
           <span className="flex items-center gap-2">
             <span className={cn('text-[10px] font-bold px-1.5 py-0.5 rounded border', ce ? 'text-sky-400 bg-sky-500/10 border-sky-500/30' : 'text-rose-400 bg-rose-500/10 border-rose-500/30')}>{type}</span>
-            <span className="text-xs font-bold text-zinc-100">{feed.underlying === 'CRUDEOILM' ? 'CRUDEOILM' : 'NIFTY'} {expiryLabel} {strike ?? '—'}</span>
+            <span className="text-xs font-bold text-zinc-100">{feed.underlying} {expiryLabel} {strike ?? '—'}</span>
           </span>
           <span className="text-zinc-400">{open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}</span>
         </button>
@@ -226,7 +231,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
             <div className="grid grid-cols-[1fr_100px_1fr] gap-2 items-center">
               <button type="button" disabled={busy || !ready} onClick={() => trade(type, 'SELL', lots)} aria-label={`Sell ${strike ?? ''} ${type}`}
                 className={cn(tradeBtn, 'h-9 text-xs bg-rose-600 hover:bg-rose-500')}>Sell</button>
-              <div className="flex justify-center"><Stepper lots={lots} lotSize={lotSize} onChange={ce ? setCeLots : setPeLots} label={type} /></div>
+              <div className="flex justify-center"><Stepper lots={lots} lotSize={lotSize} onChange={ce ? setCeLots : setPeLots} label={type} maxLots={INSTRUMENTS[feed.underlying].maxLots} /></div>
               <button type="button" disabled={busy || !ready} onClick={() => trade(type, 'BUY', lots)} aria-label={`Buy ${strike ?? ''} ${type}`}
                 className={cn(tradeBtn, 'h-9 text-xs bg-sky-600 hover:bg-sky-500')}>Buy</button>
             </div>
@@ -247,7 +252,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
         <div {...handle} className="flex items-center justify-between px-3 py-2.5 border-b border-zinc-800 cursor-move">
           <div className="flex items-center gap-2 min-w-0">
             <Zap className="w-4 h-4 text-sky-400 fill-sky-400 shrink-0" />
-            <span className="text-sm font-bold text-zinc-100 tracking-tight">{feed.underlying === 'CRUDEOILM' ? 'CRUDEOILM (MCX)' : 'NIFTY 50'}</span>
+            <span className="text-sm font-bold text-zinc-100 tracking-tight">{INSTRUMENTS[feed.underlying].displayName}</span>
             <span className={cn('text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border',
               real ? 'bg-rose-500/10 text-rose-400 border-rose-500/30' : 'bg-amber-500/10 text-amber-400 border-amber-500/30')}>{real ? `REAL · ${broker === 'kotak' ? 'Kotak' : 'Dhan'}` : 'SIM'}</span>
             <span className="text-[9px] font-bold text-amber-300" title="Buttons here send a market order at once">ONE-CLICK</span>
@@ -282,7 +287,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
                 </button>
                 <span className="text-[11px] text-zinc-400 text-center mt-1 tabular-nums" title={marginTitle}>Margin: {kotakReal ? '—' : inr(atmPeSellReq)}</span>
               </div>
-              <div className="flex justify-center"><Stepper lots={topLots} lotSize={lotSize} onChange={onTopLotsChange} label="ATM" /></div>
+              <div className="flex justify-center"><Stepper lots={topLots} lotSize={lotSize} onChange={onTopLotsChange} label="ATM" maxLots={INSTRUMENTS[feed.underlying].maxLots} /></div>
               <div className="flex flex-col items-center">
                 <button type="button" disabled={busy || !ready} aria-label={`Sell ATM call ${base?.ceStrike ?? ''}`}
                   title={`Sell ATM Call ${base?.ceStrike ?? ''}`}
@@ -296,7 +301,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
           </div>
           {card('CE')}
           {card('PE')}
-          {feed.underlying === 'CRUDEOILM' && futContract && (
+          {isMcx(feed.underlying) && futContract && (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-2.5 shadow-sm">
               <div className="flex items-center justify-between py-0.5">
                 <span className="text-xs font-bold text-amber-300">
@@ -314,7 +319,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
                   Sell FUT
                 </button>
                 <div className="flex justify-center">
-                  <Stepper lots={futLots} lotSize={lotSize} onChange={setFutLots} label="FUT" />
+                  <Stepper lots={futLots} lotSize={lotSize} onChange={setFutLots} label="FUT" maxLots={INSTRUMENTS[feed.underlying].maxLots} />
                 </div>
                 <button
                   type="button"

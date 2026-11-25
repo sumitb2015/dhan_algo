@@ -3,7 +3,16 @@
 
 import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
 
-export type Underlying = 'NIFTY' | 'CRUDEOILM';
+export type Underlying = 'NIFTY' | 'CRUDEOILM' | 'CRUDEOIL';
+
+/** MCX crude (mini CRUDEOILM, 10 barrels a lot; full-size CRUDEOIL, 100): futures + options, quantities in lots on Dhan
+ *  and barrels on Kotak. Everything that was "CRUDEOILM" on this page is "isMcx" now. */
+export const isMcx = (u: Underlying): boolean => u === 'CRUDEOILM' || u === 'CRUDEOIL';
+
+/** Barrels per lot of an MCX crude contract (MCX_LOT_MULTIPLIER, the repo's one source: 10 / 100); 1 elsewhere. */
+export function mcxBarrels(u: Underlying): number {
+  return isMcx(u) ? (MCX_LOT_MULTIPLIER[u] ?? (u === 'CRUDEOIL' ? 100 : 10)) : 1;
+}
 
 export interface InstrumentSpec {
   underlying: Underlying;
@@ -17,7 +26,11 @@ export interface InstrumentSpec {
   candleSegment: 'IDX_I' | 'MCX_COMM';
   candleInstrument: 'INDEX' | 'FUTCOM';
   defaultLots: number;
+  /** Per-order lot cap on this page (the client check; the server applies `orderSource`'s cap too). */
   maxLots: number;
+  /** Order tag (correlationId prefix / source cap key): 'isx', or 'isxc' for CRUDEOIL so its own 5-lot cap applies on
+   *  the server. Every tag starts with 'isx', which is how the page tells its own orders. */
+  orderSource: 'isx' | 'isxc';
 }
 
 export const INSTRUMENTS: Record<Underlying, InstrumentSpec> = {
@@ -32,7 +45,8 @@ export const INSTRUMENTS: Record<Underlying, InstrumentSpec> = {
     candleSegment: 'IDX_I',
     candleInstrument: 'INDEX',
     defaultLots: 1,
-    maxLots: 50,
+    maxLots: 20,
+    orderSource: 'isx',
   },
   CRUDEOILM: {
     underlying: 'CRUDEOILM',
@@ -46,27 +60,43 @@ export const INSTRUMENTS: Record<Underlying, InstrumentSpec> = {
     candleInstrument: 'FUTCOM',
     defaultLots: 1,
     maxLots: 20,
+    orderSource: 'isx',
+  },
+  // Full-size crude: 100 barrels a lot (10x the mini), so a 5-lot per-order cap (the owner's choice, 2026-11-25).
+  CRUDEOIL: {
+    underlying: 'CRUDEOIL',
+    displayName: 'CRUDEOIL (MCX)',
+    dhanSegment: 'MCX_COMM',
+    kotakExchange: 'mcx_fo',
+    strikeStep: 50,
+    futTick: 1.0,
+    optTick: 0.1,
+    candleSegment: 'MCX_COMM',
+    candleInstrument: 'FUTCOM',
+    defaultLots: 1,
+    maxLots: 5,
+    orderSource: 'isxc',
   },
 };
 
 /** Dhan order quantity:
  *  - NIFTY: lots * dhanLot (e.g. 1 lot * 65 = 65 units)
- *  - CRUDEOILM: lots (Dhan order quantity for MCX is LOTS, master list LOT_SIZE is 1)
+ *  - CRUDEOILM / CRUDEOIL: lots (Dhan order quantity for MCX is LOTS, master list LOT_SIZE is 1)
  */
 export function dhanOrderQty(underlying: Underlying, lots: number, lotSize: number): number {
   if (lots <= 0) return 0;
-  if (underlying === 'CRUDEOILM') return lots;
+  if (isMcx(underlying)) return lots;
   // No guessed lot size: 0 (refused by the caller) while the lookup has not answered.
   return lotSize > 0 ? lots * lotSize : 0;
 }
 
 /** Kotak order quantity:
  *  - NIFTY: lots * 65 units
- *  - CRUDEOILM: lots * 10 barrels (Kotak order quantity for MCX is absolute units)
+ *  - CRUDEOILM: lots * 10 barrels, CRUDEOIL: lots * 100 (Kotak order quantity for MCX is absolute units)
  */
 export function kotakOrderQty(underlying: Underlying, lots: number, lotSize: number): number {
   if (lots <= 0) return 0;
-  if (underlying === 'CRUDEOILM') return lots * (MCX_LOT_MULTIPLIER.CRUDEOILM ?? 10);
+  if (isMcx(underlying)) return lots * mcxBarrels(underlying);
   return lotSize > 0 ? lots * lotSize : 0;
 }
 
@@ -77,9 +107,8 @@ export function kotakOrderQty(underlying: Underlying, lots: number, lotSize: num
  *    We standardize SIM paper ledger on display units (NIFTY 65 units, CRUDEOILM 10 barrels, mult 1).
  */
 export function pnlMultiplier(underlying: Underlying, broker: string): number {
-  if (underlying === 'CRUDEOILM' && broker.toLowerCase() === 'dhan') {
-    return MCX_LOT_MULTIPLIER.CRUDEOILM ?? 10;
-  }
+  // Dhan MCX netQty is in lots: x barrels per lot (CRUDEOILM 10, CRUDEOIL 100).
+  if (isMcx(underlying) && broker.toLowerCase() === 'dhan') return mcxBarrels(underlying);
   return 1;
 }
 
@@ -88,14 +117,14 @@ export function pnlMultiplier(underlying: Underlying, broker: string): number {
  *  - CRUDEOILM: 10 barrels
  */
 export function displayLotUnits(underlying: Underlying, lotSize?: number | null): number {
-  if (underlying === 'CRUDEOILM') return 10;
+  if (isMcx(underlying)) return mcxBarrels(underlying);
   return lotSize && lotSize > 0 ? lotSize : 65;
 }
 
 /** Contract units per lot for ORDER SIZING: CRUDEOILM 10 barrels; NIFTY the lot size the lookup returned for the expiry
  *  on screen, null while it is unknown (no guessed lot size: the order is refused instead). */
 export function lotUnits(underlying: Underlying, lotSize: number | null | undefined): number | null {
-  if (underlying === 'CRUDEOILM') return MCX_LOT_MULTIPLIER.CRUDEOILM ?? 10;
+  if (isMcx(underlying)) return mcxBarrels(underlying);
   return lotSize && lotSize > 0 ? lotSize : null;
 }
 
