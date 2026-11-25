@@ -34,9 +34,9 @@ interface Props {
  *  (right-[84px]) and the OI profile's bars + labels. A row whose strike holds a position (Quick Trade anchors it on the
  *  strike line) measures that chip, which grows with its TP / SL badges, and sits just left of it. */
 const CHIPS_RIGHT = 430;
-/** Width of one row's label + C + P chips: a narrow pane (two charts on a laptop) pulls the chips right so they never
- *  leave the plot on the left. */
-const ROW_W = 240;
+/** Width of one row's label + C + P chips (every cell has a fixed width so the ladder lines up in columns): a narrow
+ *  pane (two charts on a laptop) pulls the chips right so they never leave the plot on the left. */
+const ROW_W = 210;
 
 export default function QuickStrikeOverlay({ viewportRef, underlying, feed, settings, real, onTrade }: Props) {
   const strikes = useMemo(() => [...feed.strikeIds.keys()].sort((a, b) => a - b), [feed.strikeIds]);
@@ -140,7 +140,10 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
   const fmt = (n: number | null) => (n === null ? '—' : n.toFixed(2));
   const { rows, step, plotW, rights } = layout;
   if (rows.length === 0) return null;
-  const right = Math.max(84, Math.min(CHIPS_RIGHT, plotW + 65 - ROW_W - 8));
+  // One right edge for the whole ladder, so the C and P columns stay aligned: a row whose position chip reaches further
+  // left moves every row with it, instead of only its own row jumping out of the column.
+  const baseRight = Math.max(84, Math.min(CHIPS_RIGHT, plotW + 65 - ROW_W - 8));
+  const right = Math.max(baseRight, ...rows.map(r => rights[r.strike] ?? 0));
 
   return (
     <div ref={rootRef} className="absolute inset-0 z-[3] pointer-events-none" data-testid="quick-overlay">
@@ -155,8 +158,8 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
           <div key={r.strike} data-testid="quick-strike-row" data-strike={r.strike} data-y={r.y.toFixed(1)}>
             {/* strike line: violet data colour, the ATM line a little stronger */}
             <div className={cn('absolute left-0 h-px', r.atm ? 'bg-violet-400/70' : 'bg-violet-500/30')} style={{ top: r.y, width: Math.max(0, plotW) }} />
-            <div className="absolute flex items-center gap-1.5 -translate-y-1/2 pointer-events-auto" style={{ top: r.y, right: Math.max(right, rights[r.strike] ?? 0) }}>
-              <span className={cn('text-[10px] font-mono pr-0.5 whitespace-nowrap', r.atm ? 'text-violet-300 font-bold' : 'text-violet-400')}>{r.strike}{r.atm ? ' ATM' : ''}</span>
+            <div className="absolute flex items-center gap-1.5 -translate-y-1/2 pointer-events-auto" style={{ top: r.y, right }}>
+              <span className={cn('w-[54px] text-right text-[10px] font-mono whitespace-nowrap', r.atm ? 'text-violet-300 font-bold' : 'text-violet-400')}>{r.strike}{r.atm ? ' ATM' : ''}</span>
               {(['CE', 'PE'] as const).map(t => {
                 const { ltp, shown, live } = t === 'CE' ? ce : pe;
                 const why = blocked(ltp);
@@ -174,8 +177,8 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
                       className={cn('flex items-stretch h-[22px] rounded overflow-hidden border text-[11px] font-mono tabular-nums shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
                         t === 'CE' ? 'border-sky-500/70' : 'border-violet-500/70', isOpen && 'ring-2 ring-offset-0 ring-sky-400')}
                     >
-                      <span className={cn('px-1.5 flex items-center font-bold text-oncolor', t === 'CE' ? 'bg-sky-600' : 'bg-violet-600')}>{t === 'CE' ? 'C' : 'P'}</span>
-                      <span data-live={live ? '1' : '0'} className={cn('px-1.5 flex items-center bg-zinc-900', live && !why ? 'text-zinc-100' : shown !== null ? 'text-zinc-400 italic' : 'text-zinc-500')}>{fmt(shown)}</span>
+                      <span className={cn('w-4 flex items-center justify-center font-bold text-oncolor', t === 'CE' ? 'bg-sky-600' : 'bg-violet-600')}>{t === 'CE' ? 'C' : 'P'}</span>
+                      <span data-live={live ? '1' : '0'} className={cn('w-[52px] pr-1 flex items-center justify-end bg-zinc-900', live && !why ? 'text-zinc-100' : shown !== null ? 'text-zinc-400 italic' : 'text-zinc-500')}>{fmt(shown)}</span>
                     </button>
                     {isOpen && (
                       // Compact: two small B / S buttons LEFT of the chip (lots and any reason in the tooltip). Not right of
