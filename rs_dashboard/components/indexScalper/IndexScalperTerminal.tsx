@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BarChart3, CandlestickChart, Columns2, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Trash2, TrendingUp, Zap,
+  BarChart3, CandlestickChart, Columns2, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Scaling, Trash2, TrendingUp, Zap,
 } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import DataChip from '@/components/DataChip';
@@ -147,6 +147,7 @@ export default function IndexScalperTerminal() {
   const [days, setDays] = useState(15);
   // Range-button request; `seq` makes a repeat click of the same range a new request.
   const [focus, setFocus] = useState<{ seconds: number; seq: number } | null>(null);
+  const [resetSeq, setResetSeq] = useState(0);
   // Bumped to reload every pane's REST backfill (refresh button, a stale feed coming back, the tab shown again).
   const [refreshTick, setRefreshTick] = useState(0);
 
@@ -1307,6 +1308,8 @@ export default function IndexScalperTerminal() {
           </button>
           {sep}
           <button type="button" aria-pressed={chainOpen} aria-label="Option chain" title="Option chain" onClick={() => setChainOpen(v => !v)} className={cn(btn, chainOpen && 'bg-zinc-800 text-white')}><LayoutList className="w-4 h-4" /></button>
+          <button type="button" aria-label="Reset scale" title="Reset scale: auto-scale the price axis and fit the time axis (undo a manual zoom)"
+            onClick={() => { setAutoScale(true); setResetSeq(n => n + 1); }} className={btn}><Scaling className="w-4 h-4" /></button>
           <button type="button" aria-label="Refresh candles" title="Refresh candles" onClick={() => setRefreshTick(n => n + 1)} className={btn}><RefreshCw className={cn('w-4 h-4', loadingBars && 'animate-spin')} /></button>
           <button type="button" disabled={legs.length === 0 || exitingId !== null} onClick={exitAll}
             className="h-7 px-2 rounded border border-rose-500/70 text-rose-300 hover:bg-rose-500/10 text-xs font-bold disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400">
@@ -1364,7 +1367,7 @@ export default function IndexScalperTerminal() {
               logScale={logScale} pctScale={pctScale} autoScale={autoScale}
               legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} onAdjustLeg={adjustLeg} exitingId={exitingId}
               onToggleIndicator={onToggleIndicator} onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
-              focus={focus} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder}
+              focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
               onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
@@ -1380,7 +1383,7 @@ export default function IndexScalperTerminal() {
               logScale={logScale} pctScale={pctScale} autoScale={autoScale}
               legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} onAdjustLeg={adjustLeg} exitingId={exitingId}
               onToggleIndicator={onToggleIndicator} onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
-              focus={focus} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder}
+              focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
               onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}

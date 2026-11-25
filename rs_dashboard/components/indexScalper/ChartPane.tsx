@@ -63,6 +63,8 @@ interface Props {
   onRemoveIndicator: (id: string) => void;
   onEditIndicator: (id: string) => void;
   focus: { seconds: number; seq: number } | null;
+  /** Bumped by the header's Reset scale button: the chart goes back to auto-scale and its default time frame. */
+  resetSeq: number;
   lots: number;
   openOrders: OrderRowView[];
   onCancelOrder: (orderId: string) => void;
@@ -224,7 +226,7 @@ function ChartPane(p: Props) {
           legs={paneLegs} entrySpots={p.entrySpots} onExitLeg={p.onExitLeg} onAdjustLeg={quickOn ? p.onAdjustLeg : undefined} adjustLots={p.quick?.stepLots ?? 1} exitingId={p.exitingId}
           onToggleIndicator={p.onToggleIndicator} onRemoveIndicator={p.onRemoveIndicator} onEditIndicator={p.onEditIndicator}
           symbolLabel={isOption ? `${label} · ${tfLabel}` : (underlying === 'CRUDEOILM' ? `CRUDEOILM · ${tfLabel} · FUT` : `NIFTY · ${tfLabel} · IDX`)}
-          focus={p.focus}
+          focus={p.focus} resetSeq={p.resetSeq}
           contractName={isOption ? label : p.futureName}
           lots={p.lots}
           openOrders={paneOrders}

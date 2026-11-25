@@ -125,9 +125,13 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
   and a limit is the TP. Only an unknown type falls back to which side of the entry it sits. Deciding by side alone
   showed a stop below a long as "TP +3,65,700".
 - **Keep overlays in view:** the candle series' `autoscaleInfoProvider` widens the range with `scaleLevelsRef`
-  (anchors, TP, SL, order prices). After the levels change, call
-  `chart.priceScale('right').applyOptions({ autoScale: true })`. Leave the drag line out, or the scale chases the
-  mouse. Without this, a target above the candles sat off-screen and could not be dragged. Note that
+  (anchors, TP, SL, order prices). After the levels change, re-apply `autoScale: true` **only if the scale is still
+  auto-scaling** (`priceScale('right').options().autoScale`). Leave the drag line out, or the scale chases the mouse.
+  Without the re-apply, a target above the candles sat off-screen and could not be dragged; forcing it
+  unconditionally reset the user's hand-scaled axis on every new trade (fixed 2026-11-25, e2e "a new trade keeps a
+  price axis the user scaled by hand").
+- **Reset scale** (header button, `Scaling` icon): bumps `resetSeq` -> the chart turns price auto-scale back on and
+  re-frames time on the chosen range (else `fitContent`), like a fresh instrument. It is the way back after a hand zoom. Note that
   `base.priceRange` can be null.
 - **Chip placement:** price lines live on the canvas and chips are absolutely positioned HTML (`right-[84px]`, clear
   of the price axis). Poll `priceToCoordinate` every 150 ms, because zoom, pan and autoscale fire no event. Sort the
@@ -305,6 +309,7 @@ so the page itself re-renders on every frame that has a push. Everything below k
 | Anchor a future at its strike | No position line or chip after a reload; every order shows as a TP | `legAnchor`: future -> avg |
 | Classify TP / SL by side only | A stop shows as "TP +3,65,700 (+0.00%)" | `bracketKind` by order type |
 | Overlay prices not in autoscale | TP off-screen, cannot drag | `autoscaleInfoProvider` + `scaleLevelsRef` |
+| Forcing `autoScale: true` when levels change | Hand-scaled axis resets on every trade | re-apply only while `options().autoScale` |
 | `title` only in `createChart` | "NIFTY" label on crude | `applyOptions({ title })` effect |
 | `lots = abs(netQty)` | 10x orders / P&L on Kotak and SIM | `qtyLots(…, leg.mult, …)` |
 | Hard-coded 0.05 tick | Off-tick limit from the "+" menu or a drag | the instrument's tick |

@@ -104,6 +104,9 @@ interface Props {
   /** What is plotted (instrument | contract | interval). When it changes, the view is fitted once its bars land: price
    *  axis back on auto-scale, time axis on the chosen range (1D / 1W ... button) or, with none chosen, all the bars. */
   viewKey?: string;
+  /** Each change (the header's Reset scale button) puts the price axis back on auto-scale and the time axis on the
+   *  chosen range, or all the bars: the same view a fresh instrument gets. 0 / unchanged = nothing. */
+  resetSeq?: number;
   /** Call / Put open interest per strike, drawn as horizontal bars at each strike's level (underlying chart only; null
    *  hides it). Display only. */
   oiProfile?: OiProfile | null;
@@ -148,7 +151,7 @@ function ScalperChart(props: Props) {
     onExitLeg, onAdjustLeg, adjustLots = 1, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
-    premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false, premiumOrders,
+    premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, resetSeq = 0, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false, premiumOrders,
   } = props;
   const drawKeyRef = useRef(drawKeyProp);
   const tickSize = tickProp ?? (underlying === 'CRUDEOILM' ? 1.0 : 0.05);
@@ -477,6 +480,26 @@ function ScalperChart(props: Props) {
     } catch { ts.fitContent(); }
   }, [viewKey, hasBars, focus]);
 
+  // Reset scale (header button): auto-scale the price axis (undoing a hand drag / zoom) and re-frame the time axis.
+  const resetDoneRef = useRef(resetSeq);
+  useEffect(() => {
+    const chart = chartRef.current;
+    const b = barsRef.current;
+    if (!chart || resetDoneRef.current === resetSeq) return;
+    resetDoneRef.current = resetSeq;
+    chart.priceScale('right').applyOptions({ autoScale: true });
+    if (b.length === 0) return;
+    const ts = chart.timeScale();
+    try {
+      if (focus) {
+        const end = b[b.length - 1].t + IST_SHIFT;
+        ts.setVisibleRange({ from: (end - focus.seconds) as UTCTimestamp, to: (end + 20 * 60) as UTCTimestamp });
+      } else {
+        ts.fitContent();
+      }
+    } catch { ts.fitContent(); }
+  }, [resetSeq, focus]);
+
   // ── position lines ────────────────────────────────────────────────
   const placed = useMemo(() => legs.map(leg => ({ leg, anchor: legAnchor(leg, entrySpots[leg.securityId], { premium, atStrike: strikeAnchor }), pnl: legPnl(leg) })), [legs, entrySpots, premium, strikeAnchor]);
 
@@ -556,7 +579,9 @@ function ScalperChart(props: Props) {
   }, [placed, simBrackets, tentativeBrackets, openOrders, underlying, canBracket]);
 
   // Autoscale levels: positions, TP / SL and working orders (the drag line is left out so the scale does not chase the
-  // mouse). Changing them re-fits the price scale.
+  // mouse). Changing them re-fits the price scale, but only while it is still auto-scaling: a price axis the user has
+  // dragged / zoomed (lightweight-charts then turns its autoScale off) keeps its scale when a trade adds or moves a level.
+  // Forcing autoScale back on here reset the user's zoom on every new trade.
   useEffect(() => {
     const lv: number[] = [];
     for (const p of placed) {
@@ -569,7 +594,8 @@ function ScalperChart(props: Props) {
     const key = lv.join(',');
     if (key === scaleLevelsRef.current.join(',')) return;
     scaleLevelsRef.current = lv;
-    chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
+    const scale = chartRef.current?.priceScale('right');
+    if (scale?.options().autoScale) scale.applyOptions({ autoScale: true });
   }, [placed, activeBrackets, openOrders]);
 
   // The last-price label names the instrument on screen: it follows an underlying switch (it was set once at mount).

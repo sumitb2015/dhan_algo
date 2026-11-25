@@ -235,6 +235,41 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('a new trade keeps a price axis the user scaled by hand; Reset scale returns it to auto-scale', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    const pane = page.getByTestId('chart-pane-0');
+    await expect(pane.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    const overlay = pane.getByTestId('quick-overlay');
+    const strikeY = async () => (await overlay.getByRole('button', { name: 'Quick 25350 CE' }).boundingBox())!.y;
+    await expect(overlay.getByRole('button', { name: 'Quick 25350 CE' })).toBeVisible({ timeout: 15_000 });
+    const before = await strikeY();
+    // drag the price axis to scale it by hand (lightweight-charts turns its auto-scale off)
+    const box = (await pane.locator('canvas').first().boundingBox())!;
+    const ax = box.x + box.width + 30;
+    const ay = box.y + box.height / 3;
+    await page.mouse.move(ax, ay);
+    await page.mouse.down();
+    for (let i = 1; i <= 10; i++) await page.mouse.move(ax, ay + i * 12);
+    await page.mouse.up();
+    await expect.poll(strikeY).not.toBeCloseTo(before, 0);
+    await page.waitForTimeout(500);
+    const scaled = await strikeY();
+    // a SIM trade adds a position level: the hand-made scale must stay
+    await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
+    await overlay.getByRole('button', { name: 'Quick sell 25350 CE 1 lot' }).click();
+    await expect(pane.getByTestId('position-chip')).toHaveCount(1, { timeout: 15_000 });
+    await page.waitForTimeout(1_000);
+    expect(Math.abs((await strikeY()) - scaled)).toBeLessThan(2);
+    // the header's Reset scale button puts the axis back on auto-scale
+    await page.getByRole('button', { name: 'Reset scale' }).click();
+    await expect.poll(async () => Math.abs((await strikeY()) - scaled), { timeout: 5_000 }).toBeGreaterThan(5);
+    expect(state.blocked).toEqual([]);
+  });
+
   test('Quick Trade is off by default: no strike chips, nothing changes', async ({ page, context }) => {
     const state = newState();
     await signIn(context);
