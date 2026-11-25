@@ -20,7 +20,7 @@ function bars(level: number, swing: number) {
   });
 }
 
-interface State { calls: Call[]; blocked: Call[]; candleReqs: string[]; positions: Record<string, unknown>[]; orders: Record<string, unknown>[]; noSpot?: boolean; noPrevOi?: boolean; noLtpStrike?: number; snapChain?: boolean; ce25350?: number }
+interface State { calls: Call[]; blocked: Call[]; candleReqs: string[]; positions: Record<string, unknown>[]; orders: Record<string, unknown>[]; noSpot?: boolean; noPrevOi?: boolean; noLtpStrike?: number; snapChain?: boolean; ce25350?: number; optVolume?: boolean }
 
 async function mockApi(page: Page, state: State) {
   await page.route('**/api/**', async (route: Route) => {
@@ -32,7 +32,9 @@ async function mockApi(page: Page, state: State) {
     if (p === '/api/index-scalper/candles') {
       state.candleReqs.push(u.search);
       const opt = u.searchParams.get('kind') === 'option';
-      return json(route, { success: true, candles: opt ? bars(210, 20) : bars(SPOT, 40), interval: u.searchParams.get('interval') });
+      const cs = opt ? bars(210, 20) : bars(SPOT, 40);
+      // option bars carry volume when asked (the index never does)
+      return json(route, { success: true, candles: opt && state.optVolume ? cs.map((b, i) => ({ ...b, v: 1000 + (i % 9) * 400 })) : cs, interval: u.searchParams.get('interval') });
     }
     if (p === '/api/options/expiries') return json(route, { success: true, data: ['2026-12-01'] });
     if (p === '/api/scalper/lookup') {
@@ -339,6 +341,28 @@ test.describe('Index Scalper layout + option charts', () => {
     if (process.env.ISX_SHOT) await page.getByTestId('chart-pane-0').screenshot({ path: process.env.ISX_SHOT });
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(page.getByRole('button', { name: 'Grid', exact: true })).toHaveAttribute('aria-pressed', 'false', { timeout: 60_000 });
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('volume bars: on an option chart (it has volume), toggled from the scale bar, remembered; the index has none', async ({ page, context }) => {
+    const state = newState();
+    state.optVolume = true;
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0')).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'Two charts side by side' }).click();
+    const right = page.getByTestId('chart-pane-1');
+    await expect(right).toContainText('NIFTY 25350 CE', { timeout: 30_000 });
+    const vol = page.getByRole('button', { name: 'Volume', exact: true });
+    await expect(vol).toHaveAttribute('aria-pressed', 'true');
+    await page.waitForTimeout(800);
+    if (process.env.ISX_SHOT) await page.screenshot({ path: process.env.ISX_SHOT });
+    await vol.click();
+    await expect(vol).toHaveAttribute('aria-pressed', 'false');
+    if (process.env.ISX_SHOT2) { await page.waitForTimeout(500); await page.screenshot({ path: process.env.ISX_SHOT2 }); }
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('button', { name: 'Volume', exact: true })).toHaveAttribute('aria-pressed', 'false', { timeout: 60_000 });
     expect(state.blocked).toEqual([]);
   });
 

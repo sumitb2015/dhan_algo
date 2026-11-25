@@ -62,6 +62,10 @@ Related skills:
 - **Line width** is a per-indicator setting (`IndicatorInstance.width`, 1-4 px; Auto = each line's own default: 2 on the
   price pane, 3 for a coloured Supertrend, 1 for Bollinger / daily levels and in an oscillator pane). `computeIndicator`
   applies it to every line, never a histogram; it is part of the series signature so a change rebuilds the series.
+- **Volume bars:** a `HistogramSeries` on the price pane with its own hidden scale (`priceScaleId: 'vol'`, bottom 20 %),
+  created with the chart; candles get a 22 % bottom margin while it shows. Drawn only when the bars carry `v` (futures,
+  options; never the index) and the `vol` toggle (`indexScalper.volume`) is on. A tick updates the forming bar only
+  when the previous tail is unchanged, else everything is re-sent. Live volume needs the bridge's `future.volume`.
 - **EMA Cross:** two `emaSmaSeeded` lines (9 / 20) and circles where they cross (`crosses`: Pine `ta.crossover` /
   `ta.crossunder`, so touching then moving on is a cross). Circles ride on the fast series as `OutSeries.markers`, drawn by
   lightweight-charts' `createSeriesMarkers` at `atPriceMiddle` between the lines, green up / red down; re-sent only

@@ -29,6 +29,9 @@ import { MAX_LOTS } from '@/lib/indexScalperPositions';
 export type DrawTool = 'cursor' | 'hline' | 'trend' | 'ruler';
 
 const IST_SHIFT = 19800;
+/** Volume bar colours: the candle colours, translucent (data colours, not chrome). */
+const VOL_UP = '#22c55e66';
+const VOL_DOWN = '#ef444466';
 const UP = '#10b981';
 const DOWN = '#ef4444';
 /** Drawings of the underlying chart; an option chart stores its own under `${DRAW_KEY}:<securityId>` (drawKey prop). */
@@ -67,6 +70,9 @@ interface Props {
   logScale: boolean;
   /** Background grid lines (a viewer setting, on by default). */
   showGrid?: boolean;
+  /** Volume histogram along the bottom of the price pane (a viewer setting, on by default). Drawn only when the bars
+   *  carry volume (a future, an option): the NIFTY index has none. */
+  showVolume?: boolean;
   pctScale: boolean;
   autoScale: boolean;
   legs: ScalperLeg[];
@@ -156,7 +162,7 @@ function seriesData(s: OutSeries, bars: Bar[]) {
 
 function ScalperChart(props: Props) {
   const {
-    bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, showGrid = true, legs, entrySpots,
+    bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, showGrid = true, showVolume = true, legs, entrySpots,
     onExitLeg, onAdjustLeg, adjustLots = 1, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
@@ -170,6 +176,8 @@ function ScalperChart(props: Props) {
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const indSeriesRef = useRef<ISeriesApi<SeriesType>[]>([]);
+  const volSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  const volPrevRef = useRef<{ n: number; first: number; lastT: number } | null>(null);
   // Markers (EMA-cross circles) per indicator series index, and what each last drew, so a tick re-sends them only when
   // a cross appears / disappears on the forming bar.
   const markerApisRef = useRef<Map<number, ISeriesMarkersPluginApi<Time>>>(new Map());
@@ -255,6 +263,10 @@ function ScalperChart(props: Props) {
         } };
       },
     });
+    // Volume: its own hidden scale on the price pane, in the bottom 20 % (TradingView's layout).
+    const vol = chart.addSeries(HistogramSeries, { priceScaleId: 'vol', priceFormat: { type: 'volume' }, priceLineVisible: false, lastValueVisible: false }, 0);
+    chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+    volSeriesRef.current = vol;
     chartRef.current = chart;
     candleRef.current = candles;
     const orderLines = orderLinesRef.current;
@@ -310,7 +322,7 @@ function ScalperChart(props: Props) {
     return () => {
       if (viewportRef) viewportRef.current = null;
       chart.remove();
-      chartRef.current = null; candleRef.current = null;
+      chartRef.current = null; candleRef.current = null; volSeriesRef.current = null; volPrevRef.current = null;
       indSeriesRef.current = []; legLines.clear();
       markerApis.clear(); markerSigs.clear();
       for (const [, l] of bracketLinesRef.current) { try { candles.removePriceLine(l); } catch { /* gone */ } }
@@ -377,6 +389,27 @@ function ScalperChart(props: Props) {
     });
     paintDrawings();
   }, [chrome]);
+
+  // Volume bars: drawn when the setting is on and the bars carry volume. The candles then keep out of the bottom 20 %
+  // (where the bars sit), as on TradingView. A tick updates only the forming bar; anything else re-sends them all.
+  const volOn = showVolume && bars.some(b => (b.v ?? 0) > 0);
+  useEffect(() => {
+    const vol = volSeriesRef.current;
+    const chart = chartRef.current;
+    if (!vol || !chart) return;
+    chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: volOn ? 0.22 : 0.08 } });
+    if (!volOn || bars.length === 0) { vol.setData([]); volPrevRef.current = null; return; }
+    const point = (b: Bar) => ({ time: toTime(b.t), value: b.v ?? 0, color: b.c >= b.o ? VOL_UP : VOL_DOWN });
+    const prev = volPrevRef.current;
+    const last = bars[bars.length - 1];
+    try {
+      const sameTail = !!prev && prev.first === bars[0].t
+        && ((bars.length === prev.n && last.t === prev.lastT) || (bars.length === prev.n + 1 && bars[bars.length - 2].t === prev.lastT));
+      if (sameTail) vol.update(point(last));
+      else vol.setData(bars.map(point));
+    } catch { vol.setData(bars.map(point)); }
+    volPrevRef.current = { n: bars.length, first: bars[0].t, lastT: last.t };
+  }, [bars, volOn]);
 
   // Grid on / off (viewer setting): only the lines' visibility, their colour stays the theme's.
   useEffect(() => {
