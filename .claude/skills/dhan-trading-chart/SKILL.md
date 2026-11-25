@@ -30,7 +30,7 @@ Related skills:
 | Feature | File / function |
 |---|---|
 | Chart, candle series, theme, resize | `ScalperChart.tsx`, the `chart lifecycle` and `theme` sections |
-| Indicators (EMA, SMA, VWAP, Supertrend, BB, CPR, Pivot S1-S4 / R1-R4, RSI, MACD, ADX), catalog, params | `lib/indexScalperIndicators.ts`: `INDICATOR_CATALOG`, `computeIndicator`, `clampParam`; daily levels via `prevDayHlc`, `pivotLevels`, `dayBreaks` |
+| Indicators (EMA, SMA, VWAP, Supertrend, BB, CPR, Pivot S1-S4 / R1-R4, RSI, Stochastic RSI, MACD, ADX), catalog, params | `lib/indexScalperIndicators.ts`: `INDICATOR_CATALOG`, `computeIndicator`, `clampParam`; daily levels via `prevDayHlc`, `pivotLevels`, `dayBreaks` |
 | Saved-settings migration | `migrateIndicatorsV1`; localStorage keys `indexScalper.indicators.v1` -> `v2` |
 | Live candles from ticks; REST history as backfill | `applyTick`, `mergeHistory` (same file); the terminal's live-bars effect |
 | Fast tail update vs full redraw | `tailUnchanged`, `flipsAtLast`, `pointColor`; the chart's `data + indicators` effect |
@@ -59,6 +59,9 @@ Related skills:
 - **Defaults:** match what the user compares against. Dhan's chart is Supertrend **(10, 2)**, not (10, 3). This was
   pinned against a value read off Dhan's chart (25,405.52 at 23 Nov 15:25). When you change a default, version the
   localStorage key and migrate only untouched defaults (`migrateIndicatorsV1`). Never overwrite a user's own setting.
+- **Stochastic RSI:** the shared `stochRsiArray` (lib/indicators.ts, also Signal Orb's): TradingView's K = SMA(stoch(RSI),
+  K), D = SMA(K, D), defaults K 3 / D 3 / RSI 14 / Stoch 14, 20 / 80 guides; a flat RSI window is null, as in Pine.
+  Matched `pandas_ta.stochrsi` on 1,843 NIFTY daily bars (last K / D equal to 1e-13; max 0.075 in the RSI warm-up).
 - **VWAP:** session-anchored hlc3 (`sessionVwap`). An index has no volume, so on an index chart this is an average.
 - **Proof:** a "matches TradingView" claim needs a fixture with candles and the broker chart's printed values.
   A visual check is not proof.

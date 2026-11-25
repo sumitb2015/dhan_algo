@@ -155,6 +155,19 @@ test.describe('Index Scalper', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('Stochastic RSI is in the Indicators menu with TradingView defaults and draws K / D in its own pane', async ({ page, context }) => {
+    const state = { calls: [] as Call[], blocked: [] as Call[], positions: [] as Record<string, unknown>[] };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: /Indicators/ }).click();
+    await page.getByRole('button', { name: /^Stochastic RSI/ }).click();
+    await expect(page.getByText('Stochastic RSI (3, 3, 14, 14)')).toBeVisible();
+    if (process.env.ISX_SHOT) await page.screenshot({ path: process.env.ISX_SHOT });
+    expect(state.blocked).toEqual([]);
+  });
+
   test('REAL: arming is explicit, broker position is drawn, Exit closes the whole broker row (any owner) and tags source isx', async ({ page, context }) => {
     const state: MockState = {
       calls: [], blocked: [],

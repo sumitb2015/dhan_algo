@@ -5,7 +5,7 @@ import {
   type ScalperLeg,
 } from './indexScalperPositions.ts';
 import { applyTick, computeIndicator, flipsAtLast, mergeHistory, migrateIndicatorsV1, pointColor, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
-import { emaSmaSeeded, supertrendSeries } from './indicators.ts';
+import { emaSmaSeeded, stochRsiArray, supertrendSeries } from './indicators.ts';
 import { readFileSync } from 'node:fs';
 
 const leg = (o: Partial<ScalperLeg> = {}): ScalperLeg => ({
@@ -121,9 +121,26 @@ test('VWAP resets at the IST day change', () => {
   assert.equal(v[2], 200);
 });
 
+test('Stochastic RSI: TradingView defaults (K 3, D 3, RSI 14, Stoch 14), own pane, K / D from stochRsiArray, 20 / 80 bands', () => {
+  const bars = Array.from({ length: 120 }, (_, i) => bar(1_790_000_000 + i * 300, 100 + Math.sin(i / 5) * 6 + Math.cos(i / 3) * 2));
+  const ind = newIndicator('stochrsi', 's');
+  assert.deepEqual(ind.params, { k: 3, d: 3, rsi: 14, stoch: 14 });
+  const out = computeIndicator(bars, ind);
+  assert.equal(out.pane, 'sub');
+  assert.deepEqual(out.series.map(x => x.key), ['k', 'd']);
+  assert.deepEqual(out.series[0].guides, [20, 80]);
+  const ref = stochRsiArray(bars.map(b => b.c), 14, 14, 3, 3);
+  assert.deepEqual(out.series[0].values, ref.k);
+  assert.deepEqual(out.series[1].values, ref.d);
+  // first K after the RSI (14) + stoch (14) + K (3) warm-up, and always within 0..100
+  const firstK = out.series[0].values.findIndex(v => v !== null);
+  assert.equal(firstK, 14 + 13 + 2);
+  for (const v of out.series[0].values) if (v !== null) assert.ok(v >= 0 && v <= 100);
+});
+
 test('indicators return one value per bar; warm-up is null', () => {
   const bars = Array.from({ length: 60 }, (_, i) => bar(1_790_000_000 + i * 300, 100 + Math.sin(i / 4) * 5 + i * 0.1));
-  for (const kind of ['ema', 'sma', 'vwap', 'supertrend', 'bbands', 'rsi', 'macd', 'adx'] as const) {
+  for (const kind of ['ema', 'sma', 'vwap', 'supertrend', 'bbands', 'rsi', 'stochrsi', 'macd', 'adx'] as const) {
     const out = computeIndicator(bars, newIndicator(kind, kind));
     for (const s of out.series) assert.equal(s.values.length, bars.length, `${kind}/${s.key}`);
   }

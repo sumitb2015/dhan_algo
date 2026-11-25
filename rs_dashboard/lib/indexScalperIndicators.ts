@@ -2,13 +2,13 @@
 // indicator instance it returns plain series the chart component draws. Maths comes from lib/indicators.ts (never a
 // private copy), except VWAP, which has no shared index-safe version.
 
-import { emaSmaSeeded, smaArray, rsiArray, macdSeries, adxDmiArray, supertrendSeries } from './indicators.ts';
+import { emaSmaSeeded, smaArray, rsiArray, stochRsiArray, macdSeries, adxDmiArray, supertrendSeries } from './indicators.ts';
 import { barAnchorSec, inMarketSession, inOrderSession } from './indexScalperSession.ts';
 import type { Underlying } from './indexScalperInstrument.ts';
 
 export interface Bar { t: number; o: number; h: number; l: number; c: number }
 
-export type IndicatorKind = 'ema' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'rsi' | 'macd' | 'adx';
+export type IndicatorKind = 'ema' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'rsi' | 'stochrsi' | 'macd' | 'adx';
 
 export interface IndicatorInstance {
   id: string;
@@ -47,6 +47,14 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
   { kind: 'cpr', label: 'CPR (central pivot range)', pane: 'price', color: '#a855f7', params: [] },
   { kind: 'pivots', label: 'Pivot S / R (S1-S4, R1-R4)', pane: 'price', color: '#f59e0b', params: [{ key: 'levels', label: 'Levels (1-4)', def: 4, min: 1, max: 4 }] },
   { kind: 'rsi', label: 'RSI', pane: 'sub', color: '#8b5cf6', params: [{ key: 'period', label: 'Length', def: 14, min: 2, max: 100 }] },
+  // TradingView "Stoch RSI" defaults and order: K 3, D 3, RSI length 14, Stochastic length 14 (lib/indicators.ts stochRsiArray).
+  {
+    kind: 'stochrsi', label: 'Stochastic RSI', pane: 'sub', color: '#3b82f6',
+    params: [
+      { key: 'k', label: 'K', def: 3, min: 1, max: 50 }, { key: 'd', label: 'D', def: 3, min: 1, max: 50 },
+      { key: 'rsi', label: 'RSI length', def: 14, min: 2, max: 100 }, { key: 'stoch', label: 'Stochastic length', def: 14, min: 2, max: 100 },
+    ],
+  },
   {
     kind: 'macd', label: 'MACD', pane: 'sub', color: '#06b6d4',
     params: [{ key: 'fast', label: 'Fast', def: 12, min: 2, max: 100 }, { key: 'slow', label: 'Slow', def: 26, min: 3, max: 200 }, { key: 'signal', label: 'Signal', def: 9, min: 2, max: 100 }],
@@ -247,6 +255,16 @@ export function computeIndicator(bars: Bar[], ind: IndicatorInstance): Indicator
     }
     case 'rsi':
       return { pane: 'sub', series: [{ key: 'v', label, axisLabel: `RSI(${p('period')})`, color: ind.color, style: 'line', values: rsiArray(closes, p('period')), guides: [30, 70] }] };
+    case 'stochrsi': {
+      const s = stochRsiArray(closes, p('rsi'), p('stoch'), p('k'), p('d'));
+      return {
+        pane: 'sub',
+        series: [
+          { key: 'k', label: `${label} K`, axisLabel: 'K', color: ind.color, style: 'line', values: s.k, guides: [20, 80] },
+          { key: 'd', label: `${label} D`, axisLabel: 'D', color: '#f97316', style: 'line', values: s.d },
+        ],
+      };
+    }
     case 'macd': {
       const m = macdSeries(closes, p('fast'), p('slow'), p('signal'));
       const warm = p('slow') - 1;
