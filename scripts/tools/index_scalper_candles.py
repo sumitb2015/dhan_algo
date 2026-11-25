@@ -24,7 +24,12 @@ sys.path.insert(0, ROOT)
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
-SUPPORTED = {"1", "3", "5", "15"}  # Dhan serves 1/5/15/25/60; 3 is resampled from 1
+SUPPORTED = {"1", "3", "5", "15", "30", "60"}
+# Fetched from Dhan at this interval, then resampled: 3 from 1; 30 and 60 from 15 so their bars are anchored to the
+# session open (09:15 NSE / 09:00 MCX), exactly like the page's live bars (lib/indexScalperSession.ts barAnchorSec).
+FETCH = {"3": "1", "30": "15", "60": "15"}
+NSE_OPEN_S = 9 * 3600 + 15 * 60
+MCX_OPEN_S = 9 * 3600
 
 
 def fnum(v):
@@ -46,12 +51,14 @@ def to_epoch(v):
     return int(ts.timestamp())
 
 
-def resample_3(rows):
+def resample(rows, minutes, anchor_s):
+    """OHLC buckets of `minutes`, anchored to `anchor_s` seconds after IST midnight (the session open)."""
+    step = minutes * 60
     out = []
     bucket = None
     for r in rows:
-        # 3-minute buckets aligned to the 09:15 IST open: IST epoch offset is 19800
-        key = ((r["t"] + 19800) // 180) * 180 - 19800
+        ist = r["t"] + 19800
+        key = ((ist - anchor_s) // step) * step + anchor_s - 19800
         if bucket is None or bucket["t"] != key:
             if bucket:
                 out.append(bucket)
@@ -111,7 +118,7 @@ def main():
         segment = "IDX_I"
         inst = "INDEX"
 
-    api_interval = "1" if a.interval == "3" else a.interval
+    api_interval = FETCH.get(a.interval, a.interval)
     end = datetime.now() + timedelta(days=1)
     start = datetime.now() - timedelta(days=days)
     df = helper.get_intraday_minute_data(
@@ -147,8 +154,9 @@ def main():
     for r in rows:
         uniq[r["t"]] = r
     rows = list(uniq.values())
-    if a.interval == "3":
-        rows = resample_3(rows)
+    if a.interval in FETCH:
+        anchor = MCX_OPEN_S if str(segment).startswith("MCX") else NSE_OPEN_S
+        rows = resample(rows, int(a.interval), anchor)
 
     print(json.dumps({"candles": rows, "interval": a.interval}))
 

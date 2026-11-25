@@ -21,8 +21,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'underlying must be NIFTY or CRUDEOILM' }, { status: 400 });
   }
   const interval = sp.get('interval') ?? '5';
-  if (!['1', '3', '5', '15'].includes(interval)) {
-    return NextResponse.json({ success: false, error: 'interval must be 1, 3, 5 or 15' }, { status: 400 });
+  if (!['1', '3', '5', '15', '30', '60'].includes(interval)) {
+    return NextResponse.json({ success: false, error: 'interval must be 1, 3, 5, 15, 30 or 60' }, { status: 400 });
   }
   const secIdRaw = sp.get('securityId');
   const secId = secIdRaw && /^\d+$/.test(secIdRaw) ? secIdRaw : null;

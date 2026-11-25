@@ -27,7 +27,8 @@ import { cn } from '@/lib/utils';
 
 export interface PaneCfg { source: ChartSource; interval: Interval }
 
-export const INTERVALS: Interval[] = ['1', '3', '5', '15'];
+export const INTERVALS: Interval[] = ['1', '3', '5', '15', '30', '60'];
+const intervalLabel = (i: Interval) => (i === '60' ? '1h' : `${i}m`);
 const EMPTY_ORDERS: OrderRowView[] = [];
 
 type ChartOrderReq = { side: 'BUY' | 'SELL'; price: number; lots: number; orderType?: 'LIMIT' | 'STOP_LOSS' };
@@ -199,7 +200,7 @@ function ChartPane(p: Props) {
         <div role="group" aria-label={`Chart ${index + 1} timeframe`} className="flex items-center">
           {INTERVALS.map(i => (
             <button key={i} type="button" aria-pressed={interval === i} onClick={() => onCfgChange(index, { ...cfg, interval: i })}
-              className={cn(tf, interval === i && 'bg-zinc-800 text-white')}>{i}m</button>
+              className={cn(tf, interval === i && 'bg-zinc-800 text-white')}>{intervalLabel(i)}</button>
           ))}
         </div>
         <span className="ml-1 text-[11px] font-mono font-semibold text-zinc-300 truncate">{label}</span>

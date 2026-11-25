@@ -66,7 +66,7 @@ const NO_STATUS: PaneStatus = { date: null, loading: true, error: null };
 function validPane(x: unknown, fallback: PaneCfg): PaneCfg {
   const c = x as Partial<PaneCfg> | null;
   const iv = c?.interval;
-  const interval = iv === '1' || iv === '3' || iv === '5' || iv === '15' ? iv : fallback.interval;
+  const interval = iv === '1' || iv === '3' || iv === '5' || iv === '15' || iv === '30' || iv === '60' ? iv : fallback.interval;
   const src = c?.source as PaneCfg['source'] | undefined;
   if (src?.kind === 'underlying') return { source: src, interval };
   if (src?.kind === 'option' && (src.type === 'CE' || src.type === 'PE') && Number.isFinite(src.strike)) {

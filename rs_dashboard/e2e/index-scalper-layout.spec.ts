@@ -224,6 +224,24 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('30m and 1h timeframes: buttons load those candles and are remembered', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    const tf = page.getByRole('group', { name: 'Chart 1 timeframe' });
+    await expect(tf.getByRole('button')).toHaveText(['1m', '3m', '5m', '15m', '30m', '1h']);
+    await tf.getByRole('button', { name: '1h' }).click();
+    await expect(tf.getByRole('button', { name: '1h' })).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(() => state.candleReqs.some(q => q.includes('interval=60'))).toBe(true);
+    await tf.getByRole('button', { name: '30m' }).click();
+    await expect.poll(() => state.candleReqs.some(q => q.includes('interval=30'))).toBe(true);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('group', { name: 'Chart 1 timeframe' }).getByRole('button', { name: '30m' })).toHaveAttribute('aria-pressed', 'true', { timeout: 60_000 });
+    expect(state.blocked).toEqual([]);
+  });
+
   test('header shows the current IST time', async ({ page, context }) => {
     const state = newState();
     await signIn(context);

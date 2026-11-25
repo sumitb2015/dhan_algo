@@ -91,6 +91,10 @@ Related skills:
 - REST history (`/api/index-scalper/candles`) loads only on an interval or range change, after a hidden tab, or after
   a stale feed. `mergeHistory` joins it with the live bars. History is tagged with its interval, so a switch never
   mixes two intervals.
+- **Bars are anchored to the session open** (`barAnchorSec`: NSE 09:15, MCX 09:00), in `applyTick` and in the
+  backend's resample alike. From midnight a 30 m / 1 h bar would start at 09:00 / 09:30 while the history's start at
+  09:15; 1/3/5/15 m are the same either way. A new interval must be added to `Interval`, `INTERVALS`, `validPane`,
+  the candles route's list and the script's `SUPPORTED` / `FETCH`.
 - **Two NSE closes.** The index (cash) stops at 15:30; F&O trades to **15:40** (SEBI close auction, same clock as
   `optionsPricing.ts`). Orders / `feed.marketOpen` and option premium candles use `inOrderSession`; index candles use
   `inMarketSession`. Orders cut at 15:30 used to refuse trades the exchange still takes (fixed 2026-11-25).

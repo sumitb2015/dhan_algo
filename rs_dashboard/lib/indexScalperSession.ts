@@ -28,6 +28,12 @@ export function inNseFnoSession(nowMs: number): boolean {
   return inNseSession(nowMs, NSE_FNO_CLOSE_S);
 }
 
+/** Seconds after IST midnight that bars are anchored to: the session open (NSE 09:15, MCX 09:00). A 30 m / 1 h bar
+ *  then runs 09:15-09:45 / 09:15-10:15 like TradingView's, not 09:00-09:30 from midnight. 1/3/5/15 m are unchanged. */
+export function barAnchorSec(underlying: Underlying): number {
+  return underlying === 'CRUDEOILM' ? 9 * 3600 : NSE_OPEN_S;
+}
+
 export function inMcxSession(nowMs: number): boolean {
   const iso = istDateIso(nowMs);
   const sess = mcxSession(iso);

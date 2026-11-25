@@ -12,7 +12,7 @@ import type { Underlying } from '@/lib/indexScalperInstrument';
 import type { ResolvedSource } from '@/lib/indexScalperChartSource';
 import type { IndexScalperFeed } from './useIndexScalperFeed';
 
-export type Interval = '1' | '3' | '5' | '15';
+export type Interval = '1' | '3' | '5' | '15' | '30' | '60';
 
 const EMPTY: Bar[] = [];
 

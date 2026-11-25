@@ -140,6 +140,21 @@ test('param clamp keeps free-typed values in range', () => {
   assert.equal(clampParam('ema', 'period', NaN), 20);
 });
 
+test('30 m / 1 h live bars are anchored to the session open (09:15 NSE, 09:00 MCX), not to midnight', () => {
+  const at = (iso: string) => Date.parse(`${iso}+05:30`) / 1000;
+  const seed = [{ t: at('2026-11-25T09:15:00'), o: 100, h: 100, l: 100, c: 100 }];
+  // NSE 1 h: 10:20 belongs to the 10:15-11:15 bar
+  assert.equal(applyTick(seed, 101, 60, at('2026-11-25T10:20:00')).at(-1)!.t, at('2026-11-25T10:15:00'));
+  // NSE 30 m: 09:50 belongs to 09:45-10:15
+  assert.equal(applyTick(seed, 101, 30, at('2026-11-25T09:50:00')).at(-1)!.t, at('2026-11-25T09:45:00'));
+  // 1/3/5/15 m unchanged by the anchor: 10:07 -> 10:00 (15 m), 10:05 (5 m)
+  assert.equal(applyTick(seed, 101, 15, at('2026-11-25T10:07:00')).at(-1)!.t, at('2026-11-25T10:00:00'));
+  assert.equal(applyTick(seed, 101, 5, at('2026-11-25T10:07:00')).at(-1)!.t, at('2026-11-25T10:05:00'));
+  // MCX 1 h: anchored at 09:00 -> 18:20 is in the 18:00 bar
+  const crude = [{ t: at('2026-11-25T09:00:00'), o: 100, h: 100, l: 100, c: 100 }];
+  assert.equal(applyTick(crude, 101, 60, at('2026-11-25T18:20:00'), 'CRUDEOILM').at(-1)!.t, at('2026-11-25T18:00:00'));
+});
+
 test('applyTick updates the forming bar, rolls a new one in-session, and never invents after-hours bars', () => {
   // 2026-11-25 10:00:00 IST = 04:30:00 UTC (regular NSE trading day)
   const t0 = Date.UTC(2026, 10, 25, 4, 30, 0) / 1000;

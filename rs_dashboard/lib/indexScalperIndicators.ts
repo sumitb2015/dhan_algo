@@ -3,7 +3,7 @@
 // private copy), except VWAP, which has no shared index-safe version.
 
 import { emaSmaSeeded, smaArray, rsiArray, macdSeries, adxDmiArray, supertrendSeries } from './indicators.ts';
-import { inMarketSession, inOrderSession } from './indexScalperSession.ts';
+import { barAnchorSec, inMarketSession, inOrderSession } from './indexScalperSession.ts';
 import type { Underlying } from './indexScalperInstrument.ts';
 
 export interface Bar { t: number; o: number; h: number; l: number; c: number }
@@ -290,8 +290,10 @@ export function applyTick(
   if (!(option ? inOrderSession(underlying, nowSec * 1000) : inMarketSession(underlying, nowSec * 1000))) return bars;
   const step = intervalMin * 60;
   const last = bars[bars.length - 1];
+  // Buckets anchored to the session open (`barAnchorSec`), so 30 m / 1 h bars start at 09:15 like the history's.
+  const anchor = barAnchorSec(underlying);
   const ist = nowSec + 19800;
-  const bucket = Math.floor(ist / step) * step - 19800;
+  const bucket = Math.floor((ist - anchor) / step) * step + anchor - 19800;
   if (bucket < last.t) return bars;
   if (bucket === last.t) {
     if (last.c === price && price <= last.h && price >= last.l) return bars;
