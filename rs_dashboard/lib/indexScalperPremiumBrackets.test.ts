@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultPremiumLevel, legPremiumPnl, premiumBracketError, premiumBracketsFor, premiumPnlAt, snapPremium } from './indexScalperPremiumBrackets.ts';
+import { defaultPremiumLevel, legPremiumPnl, parseBracketInput, premiumBracketError, premiumBracketsFor, premiumPnlAt, snapPremium } from './indexScalperPremiumBrackets.ts';
 import type { ScalperLeg } from './indexScalperPositions.ts';
 
 const leg = (o: Partial<ScalperLeg> = {}): ScalperLeg => ({
@@ -50,4 +50,27 @@ test('leg P&L from premiums only: null without a live premium', () => {
   assert.equal(s.pnl, -650);
   assert.equal(s.pct, -5);
   assert.equal(legPremiumPnl(leg({ ltp: null })), null);
+});
+
+test('TP / SL box: a premium, or a % of the entry premium (ending in %) on the side that kind needs', () => {
+  // long, entry 200: target +20% = 240, stop 20% = 160
+  assert.deepEqual(parseBracketInput('20%', 'TP', true, 200, 0.05), { price: 240, pct: 20, error: null });
+  assert.deepEqual(parseBracketInput(' 20 % ', 'SL', true, 200, 0.05), { price: 160, pct: 20, error: null });
+  // short, entry 200: target is BELOW entry, stop above
+  assert.equal(parseBracketInput('25%', 'TP', false, 200, 0.05).price, 150);
+  assert.equal(parseBracketInput('25%', 'SL', false, 200, 0.05).price, 250);
+  // snapped to the tick (0.05 NSE, 0.10 crude)
+  assert.equal(parseBracketInput('10%', 'TP', true, 123.45, 0.05).price, 135.8);
+  assert.equal(parseBracketInput('10%', 'TP', true, 123.45, 0.1).price, 135.8);
+  // a plain number stays a premium (tick check is premiumBracketError's)
+  assert.deepEqual(parseBracketInput('245.5', 'TP', true, 200, 0.05), { price: 245.5, pct: null, error: null });
+  // refusals: no number, 0 / negative %, a stop 100 % below entry, no entry premium
+  assert.notEqual(parseBracketInput('', 'TP', true, 200, 0.05).error, null);
+  assert.notEqual(parseBracketInput('abc', 'TP', true, 200, 0.05).error, null);
+  assert.notEqual(parseBracketInput('%', 'TP', true, 200, 0.05).error, null);
+  assert.notEqual(parseBracketInput('0%', 'TP', true, 200, 0.05).error, null);
+  assert.notEqual(parseBracketInput('-5%', 'SL', true, 200, 0.05).error, null);
+  assert.notEqual(parseBracketInput('100%', 'SL', true, 200, 0.05).error, null); // long stop at 0
+  assert.equal(parseBracketInput('150%', 'SL', false, 200, 0.05).price, 500); // a short's stop above entry has no cap
+  assert.notEqual(parseBracketInput('20%', 'TP', true, 0, 0.05).error, null);
 });

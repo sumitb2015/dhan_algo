@@ -201,7 +201,9 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
   hold; see `dhan-index-scalper`): never the last lot, so it is disabled at one lot (Exit closes the leg). SIM fills
   the same lots the other way. Buttons are named "More lots CE 25350" / "Fewer lots CE 25350" (e2e relies on them).
 - **Target / stop on a strike position** (`PremiumBracketControls.tsx`, rules `lib/indexScalperPremiumBrackets.ts`):
-  typed as a PREMIUM on the position chip, never dragged on the index axis. Validated against the LIVE premium (a long's
+  typed on the position chip, never dragged on the index axis: a PREMIUM ("245.50") or a % of the ENTRY (average)
+  premium ending in "%" ("20%"; `parseBracketInput`: a long's target above entry / stop below, a short's the other way;
+  converted to a premium on the tick before Set, so REAL still sends a plain LIMIT / SL-M price). Validated against the LIVE premium (a long's
   target above it, stop below; a short's the other way; none without a live premium) and the option tick
   (`INSTRUMENTS[u].optTick`, not the chart's), then sent through `onSetBracket` (REAL: LIMIT / SL-M on that contract,
   isx; SIM: the paper watcher on `leg.ltp`). Badges read SIM levels or this contract's working orders by security id;

@@ -52,6 +52,29 @@ export function premiumBracketError(kind: 'TP' | 'SL', price: number, isLong: bo
   return null;
 }
 
+/**
+ * What the TP / SL box holds: a premium ("245.50") or, ending in "%", a percentage of the ENTRY (average) premium
+ * ("20%"), applied on the side that kind needs (a long's target above entry and stop below; a short's the other way
+ * round). A percentage becomes a premium snapped to the tick, so the order is still a plain LIMIT / SL-M price; a typed
+ * premium must already be on the tick. `pct` is set only for a percentage. The caller still checks the result against
+ * the live premium (`premiumBracketError`).
+ */
+export function parseBracketInput(text: string, kind: 'TP' | 'SL', isLong: boolean, avg: number, tick: number): { price: number | null; pct: number | null; error: string | null } {
+  const t = text.trim();
+  if (!t.endsWith('%')) {
+    const price = t === '' ? Number.NaN : Number(t);
+    return { price: Number.isFinite(price) ? price : null, pct: null, error: Number.isFinite(price) ? null : 'Enter a premium (245.50) or a % of entry (20%)' };
+  }
+  const pct = Number(t.slice(0, -1).trim());
+  if (t.slice(0, -1).trim() === '' || !Number.isFinite(pct) || pct <= 0) return { price: null, pct: null, error: 'Enter a percentage above 0, like 20%' };
+  if (!(avg > 0)) return { price: null, pct, error: 'No entry premium: type the premium instead' };
+  const up = (kind === 'TP') === isLong;
+  if (!up && pct >= 100) return { price: null, pct, error: 'Below entry by 100 % or more is a premium of 0 or less' };
+  const price = snapPremium(avg * (1 + (up ? pct : -pct) / 100), tick);
+  if (!(price > 0)) return { price: null, pct, error: 'That percentage leaves no premium' };
+  return { price, pct, error: null };
+}
+
 /** Rupees the leg books if it closes at `price` (from its average; `units` in contract units). */
 export function premiumPnlAt(price: number, avg: number, units: number, isLong: boolean): number {
   return (isLong ? price - avg : avg - price) * Math.abs(units);

@@ -453,6 +453,45 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('Quick Trade REAL position: TP / SL typed as a % of entry ("10%") send the premium that percentage gives', async ({ page, context }) => {
+    const state = newState();
+    state.positions = [{
+      tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY',
+      netQty: 65, buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG',
+    }];
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
+    await expect(chip).toContainText('+683 INR', { timeout: 15_000 }); // live premium 210.50, entry 200
+    const orders = () => state.calls.filter(c => c.path === '/api/scalper/fast-order');
+
+    // SL 10% below the 200 entry = 180.00
+    await chip.getByRole('button', { name: 'Stop loss for CE 25350' }).click();
+    const sl = page.getByRole('dialog', { name: 'Stop loss premium for CE 25350' });
+    await sl.getByLabel('SL premium').fill('10%');
+    await expect(sl).toContainText('10% of entry → Books about -1,300 at 180.00');
+    await sl.getByLabel('SL premium').press('Enter');
+    await expect.poll(() => orders().length, { timeout: 15_000 }).toBe(1);
+    expect(orders()[0].body).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 180, quantity: 65 });
+
+    // TP 2% above entry = 204.00 is below the live 210.50: refused, nothing sent; 15% = 230.00 goes as a LIMIT
+    await chip.getByRole('button', { name: 'Target for CE 25350' }).click();
+    const tp = page.getByRole('dialog', { name: 'Target premium for CE 25350' });
+    await tp.getByLabel('TP premium').fill('2%');
+    await expect(tp).toContainText("A long's target must be above the live premium");
+    await expect(tp.getByRole('button', { name: 'Set' })).toBeDisabled();
+    await tp.getByLabel('TP premium').fill('15%');
+    await tp.getByRole('button', { name: 'Set' }).click();
+    await expect.poll(() => orders().length, { timeout: 15_000 }).toBe(2);
+    expect(orders()[1].body).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'LIMIT', price: 230, quantity: 65 });
+    expect(state.blocked).toEqual([]);
+  });
+
   test('Quick Trade straddle: CE and PE sold on one strike are independent legs, each labelled, with its own +/- lots', async ({ page, context }) => {
     const state = newState();
     await signIn(context);
