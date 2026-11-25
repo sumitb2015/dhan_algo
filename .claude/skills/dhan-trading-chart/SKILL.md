@@ -63,8 +63,11 @@ Related skills:
   price pane, 3 for a coloured Supertrend, 1 for Bollinger / daily levels and in an oscillator pane). `computeIndicator`
   applies it to every line, never a histogram; it is part of the series signature so a change rebuilds the series.
 - **Volume bars:** a `HistogramSeries` on the price pane with its own hidden scale (`priceScaleId: 'vol'`, bottom 20 %),
-  created with the chart; candles get a 22 % bottom margin while it shows. Drawn only when the bars carry `v` (futures,
-  options; never the index) and the `vol` toggle (`indexScalper.volume`) is on. A tick updates the forming bar only
+  created with the chart, plus a thin Volume MA line on the same scale (`volumeMa`, SMA of `v`, default 20, 0 = off);
+  candles get a 22 % bottom margin while it shows. It is the `volume` indicator (`fixedStyle`: no colour / width
+  settings; one per chart, picking it again shows it): drawn while that indicator is visible and the bars carry `v`
+  (futures, options; never the index). `computeIndicator` returns no series for it. Saved lists from before it existed
+  get it once (`withVolume`, flag `indexScalper.volumeIndicatorAdded`; hidden if the old `vol` switch was off). A tick updates the forming bar only
   when the previous tail is unchanged, else everything is re-sent. Live volume needs the bridge's `future.volume`.
 - **EMA Cross:** two `emaSmaSeeded` lines (9 / 20) and circles where they cross (`crosses`: Pine `ta.crossover` /
   `ta.crossunder`, so touching then moving on is a cross). Circles ride on the fast series as `OutSeries.markers`, drawn by

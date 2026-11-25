@@ -61,6 +61,8 @@ export default function IndicatorPicker({ open, indicators, editId, onAdd, onCha
               <ParamField key={p.key} label={p.label} value={editing.params[p.key] ?? p.def}
                 onCommit={n => onChange(editing.id, { params: { ...editing.params, [p.key]: clampParam(editing.kind, p.key, n) } })} />
             ))}
+            {catalogEntry(editing.kind).fixedStyle && <div className="text-xs text-zinc-400">Green / red bars by candle direction, along the bottom of the price pane. Futures and options only: the index has no volume.</div>}
+            {!catalogEntry(editing.kind).fixedStyle && <>
             <div className="flex items-center gap-2 text-xs text-zinc-300">Colour
               <div className="flex gap-1">
                 {SWATCHES.map(c => (
@@ -84,6 +86,7 @@ export default function IndicatorPicker({ open, indicators, editId, onAdd, onCha
                 })}
               </div>
             </div>
+            </>}
             <div className="flex justify-between pt-2">
               <button type="button" onClick={() => { onRemove(editing.id); onClose(); }} className="text-xs font-semibold text-rose-400 hover:text-rose-300">Remove</button>
               <button type="button" onClick={onClose} className="h-8 px-3 rounded bg-sky-600 hover:bg-sky-500 text-oncolor text-xs font-bold">Done</button>

@@ -9,7 +9,7 @@ import type { Underlying } from './indexScalperInstrument.ts';
 /** `v` = traded volume in the bar, when the instrument has one (a future, an option); an index has none. */
 export interface Bar { t: number; o: number; h: number; l: number; c: number; v?: number }
 
-export type IndicatorKind = 'ema' | 'emacross' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'rsi' | 'stochrsi' | 'macd' | 'adx';
+export type IndicatorKind = 'volume' | 'ema' | 'emacross' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'rsi' | 'stochrsi' | 'macd' | 'adx';
 
 export interface IndicatorInstance {
   id: string;
@@ -34,9 +34,15 @@ export interface CatalogEntry {
   pane: 'price' | 'sub';
   params: ParamDef[];
   color: string;
+  /** Drawn in fixed colours (Volume: green / red bars): its settings offer no colour or line width. */
+  fixedStyle?: boolean;
 }
 
 export const INDICATOR_CATALOG: CatalogEntry[] = [
+  // Volume bars along the bottom of the price pane (drawn by the chart itself: futures and options only, the index has
+  // no volume). An indicator so it can be hidden or removed like any other.
+  // `ma`: a simple moving average of the volume over that many bars (TradingView's Volume MA, 20); 0 hides it.
+  { kind: 'volume', label: 'Volume', pane: 'price', color: '#64748b', params: [{ key: 'ma', label: 'MA length (0 = off)', def: 20, min: 0, max: 200 }], fixedStyle: true },
   { kind: 'ema', label: 'EMA', pane: 'price', color: '#3b82f6', params: [{ key: 'period', label: 'Length', def: 20, min: 1, max: 500 }] },
   { kind: 'sma', label: 'SMA', pane: 'price', color: '#f59e0b', params: [{ key: 'period', label: 'Length', def: 50, min: 1, max: 500 }] },
   { kind: 'vwap', label: 'VWAP (session, hlc3)', pane: 'price', color: '#ec4899', params: [] },
@@ -86,6 +92,20 @@ export function crosses(a: (number | null)[], b: (number | null)[]): { i: number
     else if (a1 < b1 && a0 >= b0) out.push({ i, up: false });
   }
   return out;
+}
+
+/** Simple moving average of the bars' volume over `len` bars (null until `len` bars; a bar without volume counts 0).
+ *  `len` 0 = off (all null). */
+export function volumeMa(bars: Bar[], len: number): (number | null)[] {
+  if (!(len >= 1)) return bars.map(() => null);
+  return smaArray(bars.map(b => b.v ?? 0), Math.floor(len));
+}
+
+/** The list with a Volume indicator added once (it became an indicator on 2026-11-25; saved lists from before lack it).
+ *  `visible` carries the old scale-bar "vol" switch. A list that has one is returned unchanged. */
+export function withVolume(list: IndicatorInstance[], id: string, visible = true): IndicatorInstance[] {
+  if (list.some(i => i.kind === 'volume')) return list;
+  return [...list, { ...newIndicator('volume', id), visible }];
 }
 
 export function catalogEntry(kind: IndicatorKind): CatalogEntry {
@@ -310,6 +330,9 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
     }
     case 'rsi':
       return { pane: 'sub', series: [{ key: 'v', label, axisLabel: `RSI(${p('period')})`, color: ind.color, style: 'line', values: rsiArray(closes, p('period')), guides: [30, 70] }] };
+    case 'volume':
+      // No line series: the chart draws its own volume histogram (own scale, bottom band) while this is visible.
+      return { pane: 'price', series: [] };
     case 'emacross': {
       const fast = emaSmaSeeded(closes, p('fast'));
       const slow = emaSmaSeeded(closes, p('slow'));

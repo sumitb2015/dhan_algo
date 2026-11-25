@@ -4,7 +4,7 @@ import {
   applyFill, tickError, legAnchor, legPnl, legsFromDhanPositions, orderUnits, brokerCloseOrder, legsOpenedElsewhere, pageFilledQty, parseNiftyOption, pnlSummary, totalPnl,
   type ScalperLeg,
 } from './indexScalperPositions.ts';
-import { applyTick, computeIndicator, crosses, flipsAtLast, mergeHistory, migrateIndicatorsV1, pointColor, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
+import { applyTick, computeIndicator, crosses, volumeMa, withVolume, flipsAtLast, mergeHistory, migrateIndicatorsV1, pointColor, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
 import { emaSmaSeeded, stochRsiArray, supertrendSeries } from './indicators.ts';
 import { readFileSync } from 'node:fs';
 
@@ -126,6 +126,26 @@ test('EMA Cross: EMA 9 / 20 by default (TradingView ema), a green circle on a cr
   const f = out.series[0].values as number[], sl = out.series[1].values as number[];
   for (const x of m) assert.equal(x.price, (f[x.i] + sl[x.i]) / 2);
   assert.equal(out.series[1].markers, undefined); // one set of circles, on the fast line
+});
+
+test('Volume is an indicator: MA 20 by default, no line series of its own, added once to an older saved list', () => {
+  const v = newIndicator('volume', 'v');
+  assert.deepEqual(v.params, { ma: 20 });
+  const bars = Array.from({ length: 30 }, (_, i) => ({ ...bar(1_790_000_000 + i * 300, 100), v: i + 1 }));
+  assert.deepEqual(computeIndicator(bars, v).series, []); // the chart draws the bars itself
+  // added once, hidden when the old "vol" switch was off; a list that has one is unchanged
+  const old = [newIndicator('ema', 'e')];
+  assert.deepEqual(withVolume(old, 'x').map(i => [i.kind, i.visible]), [['ema', true], ['volume', true]]);
+  assert.equal(withVolume(old, 'x', false).at(-1)!.visible, false);
+  const has = withVolume(old, 'x');
+  assert.equal(withVolume(has, 'y'), has);
+  // MA: simple average of the last `len` volumes; 0 = off
+  const ma = volumeMa(bars, 20);
+  assert.equal(ma[18], null);
+  assert.equal(ma[19], 10.5); // mean of 1..20
+  assert.equal(ma[29], 20.5); // mean of 11..30
+  assert.ok(volumeMa(bars, 0).every(x => x === null));
+  assert.equal(clampParam('volume', 'ma', 0), 0);
 });
 
 test('applyFill blends adds, keeps avg on reduce, resets on flip and flat', () => {

@@ -344,7 +344,7 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
-  test('volume bars: on an option chart (it has volume), toggled from the scale bar, remembered; the index has none', async ({ page, context }) => {
+  test('Volume is an indicator: on by default with MA 20, its settings set the MA, hidden from the legend and remembered', async ({ page, context }) => {
     const state = newState();
     state.optVolume = true;
     await signIn(context);
@@ -354,15 +354,37 @@ test.describe('Index Scalper layout + option charts', () => {
     await page.getByRole('button', { name: 'Two charts side by side' }).click();
     const right = page.getByTestId('chart-pane-1');
     await expect(right).toContainText('NIFTY 25350 CE', { timeout: 30_000 });
-    const vol = page.getByRole('button', { name: 'Volume', exact: true });
-    await expect(vol).toHaveAttribute('aria-pressed', 'true');
+    await expect(right.getByText('Volume (20)', { exact: true })).toBeVisible();
+    // the old scale-bar switch is gone
+    await expect(page.getByRole('button', { name: 'Volume', exact: true })).toHaveCount(0);
     await page.waitForTimeout(800);
-    if (process.env.ISX_SHOT) await page.screenshot({ path: process.env.ISX_SHOT });
-    await vol.click();
-    await expect(vol).toHaveAttribute('aria-pressed', 'false');
-    if (process.env.ISX_SHOT2) { await page.waitForTimeout(500); await page.screenshot({ path: process.env.ISX_SHOT2 }); }
+    if (process.env.ISX_SHOT) await right.screenshot({ path: process.env.ISX_SHOT });
+
+    // settings: the MA length (no colour / width rows: fixed green / red bars)
+    const row = right.locator('div', { has: page.getByText('Volume (20)', { exact: true }) }).last();
+    await row.hover();
+    await row.getByRole('button', { name: 'Indicator settings' }).click({ force: true });
+    const dlg = page.getByRole('dialog', { name: 'Indicators' });
+    await expect(dlg.getByText('MA length (0 = off)')).toBeVisible();
+    await expect(dlg.getByRole('group', { name: 'Line width' })).toHaveCount(0);
+    const len = dlg.getByRole('textbox').first();
+    await len.fill('10');
+    await len.blur();
+    await page.getByRole('button', { name: 'Done' }).click();
+    await expect(right.getByText('Volume (10)', { exact: true })).toBeVisible();
+
+    // hide it from the legend: remembered after a reload
+    const row10 = right.locator('div', { has: page.getByText('Volume (10)', { exact: true }) }).last();
+    await row10.hover();
+    await row10.getByRole('button', { name: 'Hide indicator' }).click({ force: true });
+    await expect(row10.getByRole('button', { name: 'Show indicator' })).toHaveCount(1);
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await expect(page.getByRole('button', { name: 'Volume', exact: true })).toHaveAttribute('aria-pressed', 'false', { timeout: 60_000 });
+    const after = page.getByTestId('chart-pane-1');
+    await expect(after.getByText('Volume (10)', { exact: true })).toBeVisible({ timeout: 60_000 });
+    await expect(after.locator('div', { has: page.getByText('Volume (10)', { exact: true }) }).last().getByRole('button', { name: 'Show indicator' })).toHaveCount(1);
+    // listed in the Indicators menu
+    await page.getByRole('button', { name: /Indicators/ }).click();
+    await expect(page.getByRole('button', { name: /^Volume/ })).toBeVisible();
     expect(state.blocked).toEqual([]);
   });
 

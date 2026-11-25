@@ -29,7 +29,7 @@ import {
 import IndicatorPicker from './IndicatorPicker';
 import { useIndexScalperFeed } from './useIndexScalperFeed';
 import {
-  migrateIndicatorsV1, newIndicator, type IndicatorInstance, type IndicatorKind,
+  migrateIndicatorsV1, newIndicator, withVolume, type IndicatorInstance, type IndicatorKind,
 } from '@/lib/indexScalperIndicators';
 import { istDateIso, isRegularSession } from '@/lib/nseHolidays';
 import {
@@ -56,7 +56,9 @@ const LAYOUT_KEY = 'indexScalper.layout.v2';
 const LAYOUT_KEY_V1 = 'indexScalper.layout.v1';
 const OI_KEY = 'indexScalper.oiProfile';
 const GRID_KEY = 'indexScalper.grid';
+// The old scale-bar volume switch (read once, to add the Volume indicator hidden for a viewer who had turned it off).
 const VOL_KEY = 'indexScalper.volume';
+const VOL_ADDED_KEY = 'indexScalper.volumeIndicatorAdded';
 const OI_MODE_KEY = 'indexScalper.oiMode';
 /** Default panes: the underlying, and its ATM CE (strike 0 resolves to ATM once, then stays pinned). */
 const DEFAULT_PANES: [PaneCfg, PaneCfg] = [
@@ -99,7 +101,7 @@ function loadJson<T>(key: string, fallback: T): T {
 }
 
 function defaultIndicators(): IndicatorInstance[] {
-  return [newIndicator('supertrend', nextId()), newIndicator('ema', nextId())];
+  return [newIndicator('supertrend', nextId()), newIndicator('ema', nextId()), newIndicator('volume', nextId())];
 }
 
 interface Toast { ok: boolean; text: string }
@@ -141,7 +143,6 @@ export default function IndexScalperTerminal() {
   // Call / Put OI bars at each strike on the underlying chart(s). Per viewer, on by default.
   const [showOi, setShowOi] = useState(true);
   const [showGrid, setShowGridState] = useState(true);
-  const [showVolume, setShowVolumeState] = useState(true);
   // Quick Trade (strike lines with live C / P chips, Buy / Sell in one click). OFF by default: off, the page is exactly
   // what it was before the feature existed.
   const [quickOn, setQuickOnState] = useState(false);
@@ -221,7 +222,11 @@ export default function IndexScalperTerminal() {
   useEffect(() => {
     const v2 = loadJson<IndicatorInstance[] | null>(IND_KEY, null);
     const v1 = v2 ? null : loadJson<IndicatorInstance[] | null>(IND_KEY_V1, null);
-    const saved = v2 ?? (Array.isArray(v1) ? migrateIndicatorsV1(v1) : null);
+    let saved = v2 ?? (Array.isArray(v1) ? migrateIndicatorsV1(v1) : null);
+    // Volume became an indicator: add it once to a list saved before (hidden if the old "vol" switch was off). Once
+    // only, so a viewer who later removes it keeps it removed.
+    if (Array.isArray(saved) && readPref(VOL_ADDED_KEY) !== '1') saved = withVolume(saved, nextId(), readPref(VOL_KEY) !== '0');
+    savePref(VOL_ADDED_KEY, '1');
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setIndicators(Array.isArray(saved) ? saved : defaultIndicators());
     setIndReady(true);
@@ -241,7 +246,6 @@ export default function IndexScalperTerminal() {
     }
     if (readPref(OI_KEY) === '0') setShowOi(false);
     if (readPref(GRID_KEY) === '0') setShowGridState(false);
-    if (readPref(VOL_KEY) === '0') setShowVolumeState(false);
     if (readPref(OI_MODE_KEY) === 'change') setOiModeState('change');
     if (readPref(QUICK_ON_KEY) === '1') setQuickOnState(true);
     setQuickSettingsState(clampQuickSettings(loadJson<unknown>(QUICK_SETTINGS_KEY, null)));
@@ -249,7 +253,6 @@ export default function IndexScalperTerminal() {
   }, []);
   const setOi = (on: boolean) => { setShowOi(on); savePref(OI_KEY, on ? '1' : '0'); };
   const toggleGrid = () => { const on = !showGrid; setShowGridState(on); savePref(GRID_KEY, on ? '1' : '0'); };
-  const toggleVolume = () => { const on = !showVolume; setShowVolumeState(on); savePref(VOL_KEY, on ? '1' : '0'); };
   const setOiMode = (m: OiMode) => { setOiModeState(m); savePref(OI_MODE_KEY, m); };
   const setQuickOn = (on: boolean) => { setQuickOnState(on); savePref(QUICK_ON_KEY, on ? '1' : '0'); if (!on) setQuickMenu(false); };
   const patchQuick = (patch: Partial<QuickSettings>) => setQuickSettingsState(prev => {
@@ -1261,7 +1264,15 @@ export default function IndexScalperTerminal() {
   const goSim = () => { setReal(false); };
 
   // ── indicators ─────────────────────────────────────────────────────
-  const addIndicator = (k: IndicatorKind) => { setIndicators(p => [...p, newIndicator(k, nextId())]); setPickerOpen(false); };
+  // Volume is one per chart: picking it again just shows the one there is.
+  const addIndicator = (k: IndicatorKind) => {
+    setIndicators(p => (k === 'volume' && p.some(i => i.kind === 'volume') ? p.map(i => (i.kind === 'volume' ? { ...i, visible: true } : i)) : [...p, newIndicator(k, nextId())]));
+    setPickerOpen(false);
+  };
+  // Volume bars show while the Volume indicator is visible.
+  const volumeInd = indicators.find(i => i.kind === 'volume' && i.visible);
+  const showVolume = !!volumeInd;
+  const volumeMaLen = volumeInd ? (volumeInd.params.ma ?? 20) : 20;
   const patchIndicator = (id: string, patch: Partial<IndicatorInstance>) => setIndicators(p => p.map(i => (i.id === id ? { ...i, ...patch } : i)));
   const removeIndicator = useCallback((id: string) => setIndicators(p => p.filter(i => i.id !== id)), []);
 
@@ -1472,7 +1483,7 @@ export default function IndexScalperTerminal() {
               underlying={underlying} feed={feed} days={days} refreshTick={refreshTick}
               futureContract={chartContract} futureName={chartContractName}
               indicators={indicators} tool={tool} onToolDone={onToolDone} clearToken={clearToken}
-              logScale={logScale} pctScale={pctScale} autoScale={autoScale} showGrid={showGrid} showVolume={showVolume}
+              logScale={logScale} pctScale={pctScale} autoScale={autoScale} showGrid={showGrid} showVolume={showVolume} volumeMaLen={volumeMaLen}
               legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} onAdjustLeg={adjustLeg} exitingId={exitingId}
               onToggleIndicator={onToggleIndicator} onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
               focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder} onModifyOrder={onModifyOrder}
@@ -1488,7 +1499,7 @@ export default function IndexScalperTerminal() {
               underlying={underlying} feed={feed} days={days} refreshTick={refreshTick}
               futureContract={chartContract} futureName={chartContractName}
               indicators={indicators} tool={tool} onToolDone={onToolDone} clearToken={clearToken}
-              logScale={logScale} pctScale={pctScale} autoScale={autoScale} showGrid={showGrid} showVolume={showVolume}
+              logScale={logScale} pctScale={pctScale} autoScale={autoScale} showGrid={showGrid} showVolume={showVolume} volumeMaLen={volumeMaLen}
               legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} onAdjustLeg={adjustLeg} exitingId={exitingId}
               onToggleIndicator={onToggleIndicator} onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
               focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder} onModifyOrder={onModifyOrder}
@@ -1520,7 +1531,6 @@ export default function IndexScalperTerminal() {
           <button type="button" aria-pressed={logScale} onClick={() => { setLogScale(v => !v); setPctScale(false); }} className={cn('hover:text-white', logScale && 'text-sky-400')}>log</button>
           <button type="button" aria-pressed={autoScale} onClick={() => setAutoScale(v => !v)} className={cn('hover:text-white', autoScale && 'text-sky-400')}>auto</button>
           <button type="button" aria-pressed={showGrid} aria-label="Grid" title="Background grid lines on / off (remembered)" onClick={toggleGrid} className={cn('hover:text-white', showGrid && 'text-sky-400')}>grid</button>
-          <button type="button" aria-pressed={showVolume} aria-label="Volume" title="Volume bars on / off (futures and options; the index has no volume)" onClick={toggleVolume} className={cn('hover:text-white', showVolume && 'text-sky-400')}>vol</button>
         </div>
       </div>
 
