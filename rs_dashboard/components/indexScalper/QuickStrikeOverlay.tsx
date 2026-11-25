@@ -6,15 +6,16 @@
 //
 // It sits over the chart and reads the chart's geometry from `viewportRef` on its own 150 ms timer, so live premiums
 // re-render this small overlay only, never the memoised chart. Only a LIVE bridge tick (`ltpById`) can trade. Without one
-// (closed market, stale feed, outside the bridge window) the chip shows the chain snapshot's last price, dimmed and marked
-// "not live" (display only, as the chain panel does), else "—"; its Buy / Sell stay disabled.
+// (closed market, stale feed, outside the bridge window, or a contract with no trade yet today: deep-ITM MCX strikes often
+// have none for hours) the chip shows the chain's last price, else its previous close, dimmed and marked "not live"
+// (display only, as the chain panel does), else "—"; its Buy / Sell stay disabled.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import type { ChartViewport } from './ScalperChart';
 import type { PickedContract } from './OptionChainPanel';
 import type { IndexScalperFeed } from './useIndexScalperFeed';
 import { nearestStrike, resolveSource } from '@/lib/indexScalperChartSource';
-import { visibleStrikeRows, type QuickSettings, type StrikeRow } from '@/lib/indexScalperQuickTrade';
+import { strikesAroundAtm, visibleStrikeRows, type QuickSettings, type StrikeRow } from '@/lib/indexScalperQuickTrade';
 import type { Underlying } from '@/lib/indexScalperInstrument';
 import { cn } from '@/lib/utils';
 
@@ -47,9 +48,11 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
   // when something moved, so an idle chart costs nothing.
   const [layout, setLayout] = useState<{ rows: StrikeRow[]; step: number; plotW: number; rights: Record<number, number> }>({ rows: [], step: 1, plotW: 0, rights: {} });
   const rootRef = useRef<HTMLDivElement>(null);
-  const strikesRef = useRef(strikes);
+  // Only ATM ± `settings.range` strikes get a ladder row.
+  const shownStrikes = useMemo(() => strikesAroundAtm(strikes, atm, settings.range), [strikes, atm, settings.range]);
+  const strikesRef = useRef(shownStrikes);
   const atmRef = useRef(atm);
-  useEffect(() => { strikesRef.current = strikes; atmRef.current = atm; });
+  useEffect(() => { strikesRef.current = shownStrikes; atmRef.current = atm; });
   useEffect(() => {
     const tick = () => {
       const vp = viewportRef.current;
@@ -96,26 +99,30 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
     return () => { document.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey); };
   }, [open]);
 
-  // `ltp`: the live tick (the only price that may trade). `shown`: what the chip displays: the live tick, else the snapshot
-  // chain's last price (display only, `live: false`).
-  const contractFor = useCallback((strike: number, type: Opt): { c: PickedContract | null; ltp: number | null; shown: number | null; live: boolean } => {
-    const snapSide = feed.chainSource === 'snapshot' ? feed.chain?.strikes?.[String(strike)]?.[type === 'CE' ? 'ce' : 'pe'] : undefined;
-    const snap = snapSide && snapSide.ltp > 0 ? snapSide.ltp : null;
+  // `ltp`: the live tick (the only price that may trade). `shown`: what the chip displays: the live tick, else the chain's
+  // last price (snapshot only: a live chain's last price IS the tick), else its previous close (display only, `live: false`;
+  // `prev` marks a previous close, i.e. no trade yet today).
+  const contractFor = useCallback((strike: number, type: Opt): { c: PickedContract | null; ltp: number | null; shown: number | null; live: boolean; prev: boolean } => {
+    const side = feed.chain?.strikes?.[String(strike)]?.[type === 'CE' ? 'ce' : 'pe'];
+    const snapLtp = feed.chainSource === 'snapshot' && side && side.ltp > 0 ? side.ltp : null;
+    const prevClose = side?.prev_close && side.prev_close > 0 ? side.prev_close : null;
+    const fallback = snapLtp ?? prevClose;
+    const prev = snapLtp === null && prevClose !== null;
     const r = resolveSource({ kind: 'option', type, strike }, underlying, feed.strikeIds, spot, feed.kotak?.strikes ?? null);
-    if (r.strike !== strike) return { c: null, ltp: null, shown: snap, live: false }; // not listed for this expiry
+    if (r.strike !== strike) return { c: null, ltp: null, shown: fallback, live: false, prev }; // not listed for this expiry
     const ltp = r.dhanId ? feed.ltpById.get(r.dhanId) ?? null : null;
-    const shown = ltp ?? snap;
+    const shown = ltp ?? fallback;
     const live = ltp !== null;
     const securityId = r.dhanId ?? r.kotakSymbol;
-    if (!securityId) return { c: null, ltp, shown, live };
-    return { c: { strike, type, securityId, ltp, expiry: feed.expiry, tradingSymbol: r.kotakSymbol }, ltp, shown, live };
+    if (!securityId) return { c: null, ltp, shown, live, prev: !live && prev };
+    return { c: { strike, type, securityId, ltp, expiry: feed.expiry, tradingSymbol: r.kotakSymbol }, ltp, shown, live, prev: !live && prev };
   }, [underlying, feed.strikeIds, feed.kotak?.strikes, feed.ltpById, feed.expiry, feed.chain, feed.chainSource, spot]);
 
   // Why a chip cannot trade right now (null = it can). Live price only: never a snapshot or a previous close.
   const blocked = (ltp: number | null): string | null => {
     if (!feed.marketOpen) return `${underlying === 'CRUDEOILM' ? 'MCX' : 'NSE'} is closed`;
     if (feed.feedAgeSec === null || feed.stale) return 'No live ticks: the feed is stale or not running';
-    if (ltp === null || !(ltp > 0)) return 'No live price for this strike (the live feed covers the strikes around ATM)';
+    if (ltp === null || !(ltp > 0)) return 'No live price for this strike: no trade yet today, or outside the strikes the live feed covers';
     return null;
   };
 
@@ -161,9 +168,11 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
             <div className="absolute flex items-center gap-1.5 -translate-y-1/2 pointer-events-auto" style={{ top: r.y, right }}>
               <span className={cn('w-[54px] text-right text-[10px] font-mono whitespace-nowrap', r.atm ? 'text-violet-300 font-bold' : 'text-violet-400')}>{r.strike}{r.atm ? ' ATM' : ''}</span>
               {(['CE', 'PE'] as const).map(t => {
-                const { ltp, shown, live } = t === 'CE' ? ce : pe;
+                const { ltp, shown, live, prev } = t === 'CE' ? ce : pe;
                 const why = blocked(ltp);
-                const shownTitle = live ? '' : shown !== null ? ` · ${fmt(shown)} is the last price from Dhan's chain snapshot, not live` : '';
+                const shownTitle = live || shown === null ? ''
+                  : prev ? ` · ${fmt(shown)} is the previous close (no trade today), not live`
+                  : ` · ${fmt(shown)} is the last price from Dhan's chain snapshot, not live`;
                 const isOpen = open?.strike === r.strike && open.type === t;
                 return (
                   <div key={t} className="relative">

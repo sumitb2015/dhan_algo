@@ -56,7 +56,7 @@ async function mockApi(page: Page, state: State) {
         const peOi = Math.round(3_500_000 * Math.exp(-(((k - 25100) / 180) ** 2))) + 200_000;
         return [String(k), {
           strike: k,
-          ce: { ltp: state.noLtpStrike === k ? 0 : k === 25350 && state.ce25350 ? state.ce25350 : IDS[String(k)] ? 210.5 : 100, change_pct: -3, buildup: 'SB', ...side(ceOi, k >= SPOT) },
+          ce: { ...(state.noLtpStrike === k ? { prev_close: 88.4 } : {}), ltp: state.noLtpStrike === k ? 0 : k === 25350 && state.ce25350 ? state.ce25350 : IDS[String(k)] ? 210.5 : 100, change_pct: -3, buildup: 'SB', ...side(ceOi, k >= SPOT) },
           pe: { ltp: IDS[String(k)] ? 229.95 : 100, change_pct: 5, buildup: 'LB', ...side(peOi, k < SPOT) },
         }];
       }));
@@ -251,8 +251,10 @@ test.describe('Index Scalper layout + option charts', () => {
     await expect(overlay.getByRole('button', { name: 'Quick 25350 PE' })).toContainText('229.95');
     await expect(overlay.locator('[data-strike="25350"]')).toContainText('ATM');
 
-    // no live price: shows a dash, and its Buy / Sell are disabled with the reason
-    await expect(overlay.getByRole('button', { name: 'Quick 25400 CE' })).toContainText('—');
+    // no trade today: shows the previous close, dimmed and not live, and its Buy / Sell are disabled with the reason
+    await expect(overlay.getByRole('button', { name: 'Quick 25400 CE' })).toContainText('88.40');
+    await expect(overlay.getByRole('button', { name: 'Quick 25400 CE' }).locator('[data-live]')).toHaveAttribute('data-live', '0');
+    await expect(overlay.getByRole('button', { name: 'Quick 25400 CE' })).toHaveAttribute('title', /previous close \(no trade today\), not live/);
     await overlay.getByRole('button', { name: 'Quick 25400 CE' }).click();
     await expect(overlay.getByRole('button', { name: /^Quick buy 25400 CE/ })).toBeDisabled();
     await expect(overlay.getByRole('group', { name: 'Trade 25400 CE' })).toHaveAttribute('data-reason', /No live price for this strike/);
@@ -273,6 +275,26 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(Math.abs(chipBox.y + chipBox.height / 2 - (paneBox.y + rowY))).toBeLessThan(6); // on its strike line
     expect(state.calls).toEqual([]); // SIM: no order route touched
     expect(state.blocked).toEqual([]);
+  });
+
+  test('Quick Trade strikes around ATM: only ATM ± n rows, default 10', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    const overlay = page.getByTestId('chart-pane-0').getByTestId('quick-overlay');
+    await expect(overlay).toBeVisible({ timeout: 15_000 });
+    await page.getByRole('button', { name: 'Quick Trade settings' }).click();
+    await expect(page.getByLabel('Strikes around ATM')).toHaveValue('10');
+    await page.getByLabel('Strikes around ATM').selectOption('1');
+    await page.keyboard.press('Escape');
+    await expect(overlay.getByTestId('quick-strike-row')).toHaveCount(3);
+    for (const k of ['25300', '25350', '25400']) await expect(overlay.locator(`[data-strike="${k}"]`)).toHaveCount(1);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Quick Trade settings' }).click({ timeout: 60_000 });
+    await expect(page.getByLabel('Strikes around ATM')).toHaveValue('1'); // kept across reloads
   });
 
   test('Quick Trade with no live ticks: chips show the snapshot last price (dimmed, not live) and cannot trade', async ({ page, context }) => {

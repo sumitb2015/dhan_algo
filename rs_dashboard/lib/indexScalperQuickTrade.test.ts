@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clampQuickSettings, DEFAULT_QUICK, visibleStrikeRows } from './indexScalperQuickTrade.ts';
+import { clampQuickSettings, DEFAULT_QUICK, strikesAroundAtm, visibleStrikeRows } from './indexScalperQuickTrade.ts';
 
 const STRIKES = Array.from({ length: 41 }, (_, i) => 24500 + i * 50); // 24500..26500
 
 test('settings: whole lots within 1..20, fractions round down, junk falls back to defaults', () => {
-  assert.deepEqual(clampQuickSettings({ buyLots: 2, sellLots: 5, product: 'MARGIN' }), { buyLots: 2, sellLots: 5, product: 'MARGIN' });
-  assert.deepEqual(clampQuickSettings({ buyLots: 99, sellLots: 0 }), { buyLots: 20, sellLots: 1, product: 'INTRADAY' });
+  assert.deepEqual(clampQuickSettings({ buyLots: 2, sellLots: 5, product: 'MARGIN', range: 4 }), { buyLots: 2, sellLots: 5, product: 'MARGIN', range: 4 });
+  assert.deepEqual(clampQuickSettings({ buyLots: 99, sellLots: 0 }), { buyLots: 20, sellLots: 1, product: 'INTRADAY', range: 10 });
   assert.equal(clampQuickSettings({ buyLots: 2.9 }).buyLots, 2); // never a bigger order than asked
   assert.equal(clampQuickSettings({ sellLots: '3' }).sellLots, 3);
   assert.deepEqual(clampQuickSettings(null), DEFAULT_QUICK);
@@ -40,4 +40,15 @@ test('no ATM known: counts from the middle strike in view; nothing in view -> em
   assert.equal(rows.some(r => r.atm), false);
   assert.deepEqual(visibleStrikeRows(STRIKES, () => null, 600, 25350), { rows: [], step: 1 });
   assert.deepEqual(visibleStrikeRows([], () => 10, 600, 25350), { rows: [], step: 1 });
+});
+
+test('Quick Trade range: clamped to 1..50, default 10; ATM ± n listed strikes', () => {
+  assert.equal(clampQuickSettings({}).range, 10);
+  assert.equal(clampQuickSettings({ range: 0 }).range, 1);
+  assert.equal(clampQuickSettings({ range: 500 }).range, 50);
+  assert.equal(clampQuickSettings({ range: '7' }).range, 7);
+  const s = [25500, 25300, 25350, 25400, 25450, 25250, 25200];
+  assert.deepEqual(strikesAroundAtm(s, 25350, 1), [25300, 25350, 25400]);
+  assert.deepEqual(strikesAroundAtm(s, 25250, 2), [25200, 25250, 25300, 25350]); // clipped at the low end
+  assert.deepEqual(strikesAroundAtm(s, null, 1), [...s].sort((a, b) => a - b));
 });

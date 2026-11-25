@@ -44,7 +44,7 @@ import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
 import { Switch } from '@/components/ui/switch';
 import type { OiMode } from '@/lib/indexScalperOiProfile';
-import { QUICK_ON_KEY, QUICK_SETTINGS_KEY, DEFAULT_QUICK, clampQuickSettings, type QuickSettings } from '@/lib/indexScalperQuickTrade';
+import { QUICK_ON_KEY, QUICK_SETTINGS_KEY, DEFAULT_QUICK, MAX_QUICK_RANGE, clampQuickSettings, type QuickSettings } from '@/lib/indexScalperQuickTrade';
 
 // v2: v1 could hold an ATM pin taken before any spot was known (the middle of the strike list, e.g. 24200). v1 is
 // read for the layout, instruments and timeframes only; its option strikes go back to ATM.
@@ -1530,6 +1530,12 @@ function QuickSettingsMenu({ settings, onPatch, nrmlLocked, maxLots, onClose }: 
         <span>Sell lots per click</span>
         <select aria-label="Sell lots per click" value={settings.sellLots} onChange={e => onPatch({ sellLots: Number(e.target.value) })} className={sel}>
           {opts.map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
+      </label>
+      <label className="flex items-center justify-between gap-2 text-zinc-300">
+        <span>Strikes around ATM (±)</span>
+        <select aria-label="Strikes around ATM" value={settings.range} onChange={e => onPatch({ range: Number(e.target.value) })} className={sel}>
+          {Array.from({ length: MAX_QUICK_RANGE }, (_, i) => i + 1).map(n => <option key={n} value={n}>{n}</option>)}
         </select>
       </label>
       <div className="flex items-center justify-between gap-2 text-zinc-300">
