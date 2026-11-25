@@ -211,7 +211,8 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
   target above it, stop below; a short's the other way; none without a live premium) and the option tick
   (`INSTRUMENTS[u].optTick`, not the chart's), then sent through `onSetBracket` (REAL: LIMIT / SL-M on that contract,
   isx; SIM: the paper watcher on `leg.ltp`). Badges read SIM levels or this contract's working orders by security id;
-  × cancels. Those orders are not drawn as lines on the index axis.
+  × cancels; a click on the badge re-opens the editor prefilled with that level (Set replaces this page's order:
+  cancel + place; the same level sends nothing). Those orders are not drawn as lines on the index axis.
 - **Option P&L on the index chart** comes from premiums (`legPremiumPnl`), "—" without a live premium. It used to fall
   back to index points x units, and its % was an index-point ratio.
 

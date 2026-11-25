@@ -53,7 +53,11 @@ export default function PremiumBracketControls({ leg, units, tick, brackets, onS
   const err = edit && parsed ? (parsed.error ?? premiumBracketError(edit, price, isLong, leg.ltp, tick)) : null;
   const submit = () => {
     if (!edit || err || !(price > 0)) return;
-    onSet(edit, snapPremium(price, tick));
+    const level = snapPremium(price, tick);
+    // Editing to the level already set changes nothing: no cancel + re-place of the same order.
+    const current = edit === 'TP' ? brackets.tp?.price : brackets.sl?.price;
+    if (current !== undefined && Math.abs(current - level) < 1e-9) { setEdit(null); return; }
+    onSet(edit, level);
     setEdit(null);
   };
 
@@ -63,10 +67,14 @@ export default function PremiumBracketControls({ leg, units, tick, brackets, onS
     const pnl = premiumPnlAt(b.price, leg.avg, units, isLong);
     return (
       <span data-testid={kind === 'TP' ? 'premium-tp' : 'premium-sl'}
-        title={`${kind === 'TP' ? 'Target' : 'Stop loss'} at premium ${b.price.toFixed(2)}${leg.avg > 0 ? ` (${fmtPct((b.price - leg.avg) / leg.avg * 100)} from entry ${leg.avg.toFixed(2)})` : ''}${b.sim ? ' (SIM)' : ` (order ${b.orderId})`}: books about ${inr(pnl)}`}
+        title={`${kind === 'TP' ? 'Target' : 'Stop loss'} at premium ${b.price.toFixed(2)}${leg.avg > 0 ? ` (${fmtPct((b.price - leg.avg) / leg.avg * 100)} from entry ${leg.avg.toFixed(2)})` : ''}${b.sim ? ' (SIM)' : ` (order ${b.orderId})`}: books about ${inr(pnl)}. Click to edit, x to cancel`}
         className={cn('h-[18px] pl-1 pr-0.5 flex items-center gap-1 rounded border text-[10px] font-semibold',
           kind === 'TP' ? 'border-emerald-500/60 text-emerald-400' : 'border-rose-500/60 text-rose-400')}>
-        {kind} {b.price.toFixed(2)} <span className="text-zinc-400">{inr(pnl)}</span>
+        <button type="button" aria-label={`Edit ${kind} ${leg.type} ${leg.strike}`} aria-expanded={edit === kind}
+          onClick={e => { e.stopPropagation(); open(kind); }}
+          className={cn('flex items-center gap-1 rounded px-0.5 hover:bg-zinc-800', edit === kind && 'ring-1 ring-sky-400')}>
+          {kind} {b.price.toFixed(2)} <span className="text-zinc-400">{inr(pnl)}</span>
+        </button>
         <button type="button" aria-label={`Cancel ${kind} ${leg.type} ${leg.strike}`} onClick={e => { e.stopPropagation(); onCancel(kind, b.orderId); }}
           className="w-3.5 h-3.5 flex items-center justify-center rounded text-zinc-400 hover:text-white hover:bg-zinc-700"><X className="w-2.5 h-2.5" /></button>
       </span>

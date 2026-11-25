@@ -549,6 +549,48 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('Quick Trade REAL: a set SL is edited from its badge (prefilled), replacing this page\'s order; same level sends nothing', async ({ page, context }) => {
+    const state = newState();
+    state.positions = [{
+      tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY',
+      netQty: 65, buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG',
+    }];
+    state.orders = [{
+      orderId: 'SL1', correlationId: 'isxsl', securityId: '302', tradingSymbol: 'NIFTY-Dec2026-25350-CE', productType: 'INTRADAY',
+      transactionType: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 190, price: 0, quantity: 65, filledQty: 0, orderStatus: 'PENDING',
+      drvOptionType: 'CALL', drvStrikePrice: 25350, drvExpiryDate: '2026-12-01', exchangeSegment: 'NSE_FNO',
+    }];
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
+    await expect(chip.getByTestId('premium-sl')).toContainText('SL 190.00', { timeout: 15_000 });
+    const sends = () => state.calls.filter(c => c.path === '/api/scalper/fast-order');
+    const cancels = () => state.calls.filter(c => c.path === '/api/scalper/orders').map(c => c.body?.orderId);
+
+    // open from the badge: prefilled with the current level; Set on the same level sends nothing
+    await chip.getByRole('button', { name: 'Edit SL CE 25350' }).click();
+    const sl = page.getByRole('dialog', { name: 'Stop loss premium for CE 25350' });
+    await expect(sl.getByLabel('SL premium')).toHaveValue('190.00');
+    await sl.getByLabel('SL premium').press('Enter');
+    await expect(sl).toHaveCount(0);
+    expect(sends()).toEqual([]);
+    expect(cancels()).toEqual([]);
+
+    // edit to 10% of entry (180.00): this page's SL1 is cancelled and a new SL-M at 180 placed
+    await chip.getByRole('button', { name: 'Edit SL CE 25350' }).click();
+    await sl.getByLabel('SL premium').fill('10%');
+    await sl.getByLabel('SL premium').press('Enter');
+    await expect.poll(() => sends().length, { timeout: 15_000 }).toBe(1);
+    expect(cancels()).toEqual(['SL1']);
+    expect(sends()[0].body).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 180, quantity: 65 });
+    expect(state.blocked).toEqual([]);
+  });
+
   test('Quick Trade straddle: CE and PE sold on one strike are independent legs, each labelled, with its own +/- lots', async ({ page, context }) => {
     const state = newState();
     await signIn(context);
