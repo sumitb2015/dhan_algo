@@ -55,6 +55,7 @@ import { QUICK_ON_KEY, QUICK_SETTINGS_KEY, DEFAULT_QUICK, MAX_QUICK_RANGE, clamp
 const LAYOUT_KEY = 'indexScalper.layout.v2';
 const LAYOUT_KEY_V1 = 'indexScalper.layout.v1';
 const OI_KEY = 'indexScalper.oiProfile';
+const GRID_KEY = 'indexScalper.grid';
 const OI_MODE_KEY = 'indexScalper.oiMode';
 /** Default panes: the underlying, and its ATM CE (strike 0 resolves to ATM once, then stays pinned). */
 const DEFAULT_PANES: [PaneCfg, PaneCfg] = [
@@ -138,6 +139,7 @@ export default function IndexScalperTerminal() {
   const [paneStatus, setPaneStatus] = useState<[PaneStatus, PaneStatus]>([NO_STATUS, NO_STATUS]);
   // Call / Put OI bars at each strike on the underlying chart(s). Per viewer, on by default.
   const [showOi, setShowOi] = useState(true);
+  const [showGrid, setShowGridState] = useState(true);
   // Quick Trade (strike lines with live C / P chips, Buy / Sell in one click). OFF by default: off, the page is exactly
   // what it was before the feature existed.
   const [quickOn, setQuickOnState] = useState(false);
@@ -236,12 +238,14 @@ export default function IndexScalperTerminal() {
       }
     }
     if (readPref(OI_KEY) === '0') setShowOi(false);
+    if (readPref(GRID_KEY) === '0') setShowGridState(false);
     if (readPref(OI_MODE_KEY) === 'change') setOiModeState('change');
     if (readPref(QUICK_ON_KEY) === '1') setQuickOnState(true);
     setQuickSettingsState(clampQuickSettings(loadJson<unknown>(QUICK_SETTINGS_KEY, null)));
     setLayoutReady(true);
   }, []);
   const setOi = (on: boolean) => { setShowOi(on); savePref(OI_KEY, on ? '1' : '0'); };
+  const toggleGrid = () => { const on = !showGrid; setShowGridState(on); savePref(GRID_KEY, on ? '1' : '0'); };
   const setOiMode = (m: OiMode) => { setOiModeState(m); savePref(OI_MODE_KEY, m); };
   const setQuickOn = (on: boolean) => { setQuickOnState(on); savePref(QUICK_ON_KEY, on ? '1' : '0'); if (!on) setQuickMenu(false); };
   const patchQuick = (patch: Partial<QuickSettings>) => setQuickSettingsState(prev => {
@@ -1464,7 +1468,7 @@ export default function IndexScalperTerminal() {
               underlying={underlying} feed={feed} days={days} refreshTick={refreshTick}
               futureContract={chartContract} futureName={chartContractName}
               indicators={indicators} tool={tool} onToolDone={onToolDone} clearToken={clearToken}
-              logScale={logScale} pctScale={pctScale} autoScale={autoScale}
+              logScale={logScale} pctScale={pctScale} autoScale={autoScale} showGrid={showGrid}
               legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} onAdjustLeg={adjustLeg} exitingId={exitingId}
               onToggleIndicator={onToggleIndicator} onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
               focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder} onModifyOrder={onModifyOrder}
@@ -1480,7 +1484,7 @@ export default function IndexScalperTerminal() {
               underlying={underlying} feed={feed} days={days} refreshTick={refreshTick}
               futureContract={chartContract} futureName={chartContractName}
               indicators={indicators} tool={tool} onToolDone={onToolDone} clearToken={clearToken}
-              logScale={logScale} pctScale={pctScale} autoScale={autoScale}
+              logScale={logScale} pctScale={pctScale} autoScale={autoScale} showGrid={showGrid}
               legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} onAdjustLeg={adjustLeg} exitingId={exitingId}
               onToggleIndicator={onToggleIndicator} onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
               focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder} onModifyOrder={onModifyOrder}
@@ -1511,6 +1515,7 @@ export default function IndexScalperTerminal() {
           <button type="button" aria-pressed={pctScale} onClick={() => { setPctScale(v => !v); setLogScale(false); }} className={cn('hover:text-white', pctScale && 'text-sky-400')}>%</button>
           <button type="button" aria-pressed={logScale} onClick={() => { setLogScale(v => !v); setPctScale(false); }} className={cn('hover:text-white', logScale && 'text-sky-400')}>log</button>
           <button type="button" aria-pressed={autoScale} onClick={() => setAutoScale(v => !v)} className={cn('hover:text-white', autoScale && 'text-sky-400')}>auto</button>
+          <button type="button" aria-pressed={showGrid} aria-label="Grid" title="Background grid lines on / off (remembered)" onClick={toggleGrid} className={cn('hover:text-white', showGrid && 'text-sky-400')}>grid</button>
         </div>
       </div>
 

@@ -326,6 +326,22 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('background grid: on by default, toggled off from the scale bar, remembered after a reload', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    const grid = page.getByRole('button', { name: 'Grid', exact: true });
+    await expect(grid).toHaveAttribute('aria-pressed', 'true');
+    await grid.click();
+    await expect(grid).toHaveAttribute('aria-pressed', 'false');
+    if (process.env.ISX_SHOT) await page.getByTestId('chart-pane-0').screenshot({ path: process.env.ISX_SHOT });
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('button', { name: 'Grid', exact: true })).toHaveAttribute('aria-pressed', 'false', { timeout: 60_000 });
+    expect(state.blocked).toEqual([]);
+  });
+
   test('header shows the current IST time', async ({ page, context }) => {
     const state = newState();
     await signIn(context);

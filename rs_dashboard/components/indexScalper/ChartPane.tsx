@@ -52,6 +52,7 @@ interface Props {
   onToolDone: () => void;
   clearToken: number;
   logScale: boolean;
+  showGrid: boolean;
   pctScale: boolean;
   autoScale: boolean;
   legs: ScalperLeg[];
@@ -224,7 +225,7 @@ function ChartPane(p: Props) {
         <ScalperChart
           key={drawKey}
           bars={bars} indicators={p.indicators} tool={p.tool} onToolDone={p.onToolDone} clearToken={p.clearToken}
-          logScale={p.logScale} pctScale={p.pctScale} autoScale={p.autoScale}
+          logScale={p.logScale} pctScale={p.pctScale} autoScale={p.autoScale} showGrid={p.showGrid}
           legs={paneLegs} entrySpots={p.entrySpots} onExitLeg={p.onExitLeg} onAdjustLeg={quickOn ? p.onAdjustLeg : undefined} adjustLots={p.quick?.stepLots ?? 1} exitingId={p.exitingId}
           onToggleIndicator={p.onToggleIndicator} onRemoveIndicator={p.onRemoveIndicator} onEditIndicator={p.onEditIndicator}
           symbolLabel={isOption ? `${label} · ${tfLabel}` : (underlying === 'CRUDEOILM' ? `CRUDEOILM · ${tfLabel} · FUT` : `NIFTY · ${tfLabel} · IDX`)}

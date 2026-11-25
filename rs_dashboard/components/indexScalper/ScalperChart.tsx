@@ -64,6 +64,8 @@ interface Props {
   onToolDone: () => void;
   clearToken: number;
   logScale: boolean;
+  /** Background grid lines (a viewer setting, on by default). */
+  showGrid?: boolean;
   pctScale: boolean;
   autoScale: boolean;
   legs: ScalperLeg[];
@@ -153,7 +155,7 @@ function seriesData(s: OutSeries, bars: Bar[]) {
 
 function ScalperChart(props: Props) {
   const {
-    bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, legs, entrySpots,
+    bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, showGrid = true, legs, entrySpots,
     onExitLeg, onAdjustLeg, adjustLots = 1, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
@@ -367,6 +369,11 @@ function ScalperChart(props: Props) {
     });
     paintDrawings();
   }, [chrome]);
+
+  // Grid on / off (viewer setting): only the lines' visibility, their colour stays the theme's.
+  useEffect(() => {
+    chartRef.current?.applyOptions({ grid: { vertLines: { visible: showGrid }, horzLines: { visible: showGrid } } });
+  }, [showGrid]);
 
   useEffect(() => {
     chartRef.current?.applyOptions({
