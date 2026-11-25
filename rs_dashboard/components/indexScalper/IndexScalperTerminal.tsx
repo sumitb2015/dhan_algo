@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import DataChip from '@/components/DataChip';
+import IstClock from './IstClock';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import { scalperRoute } from '@/hooks/useBrokerSelector';
 import { type DrawTool } from './ScalperChart';
@@ -196,7 +197,6 @@ export default function IndexScalperTerminal() {
   const [toast, setToast] = useState<Toast | null>(null);
   // One-click size: the widget's top stepper sets it; Buy CE / Buy PE and the chain's B / S use it too.
   const [scalpLots, setScalpLots] = useState(1);
-  const [clock, setClock] = useState('');
 
   const rootRef = useRef<HTMLDivElement>(null);
   const feedRef = useRef(feed);
@@ -284,11 +284,6 @@ export default function IndexScalperTerminal() {
       savePref(SPOT_KEY, JSON.stringify({ day: istDayKey(), spots: next }));
       return next;
     });
-  }, []);
-
-  useEffect(() => {
-    const t = setInterval(() => setClock(new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false })), 1000);
-    return () => clearInterval(t);
   }, []);
 
   // ── candles: each ChartPane loads its own (useChartBars); these only ask every pane to backfill again ──
@@ -1319,6 +1314,7 @@ export default function IndexScalperTerminal() {
           </button>
         </div>
         <div className="flex items-center gap-2 shrink-0 ml-auto">
+          <IstClock suffix=" IST" title="Current time (IST)" className="h-7 px-2 flex items-center rounded border border-zinc-700 bg-zinc-900 text-xs font-bold tabular-nums font-mono text-zinc-100" />
           <span className={cn('text-[11px] tabular-nums font-mono', feed.stale ? 'text-amber-400' : 'text-zinc-400')} title="Live tick bridge">
             {spotDisplay ? spotDisplay.toFixed(2) : '—'} <span className={cn('inline-block w-1.5 h-1.5 rounded-full align-middle', feed.feedAgeSec === null ? 'bg-zinc-600' : feed.stale ? 'bg-amber-400' : 'bg-emerald-400')} />
           </span>
@@ -1408,7 +1404,7 @@ export default function IndexScalperTerminal() {
           ))}
         </div>
         <div className="flex items-center gap-3 tabular-nums font-mono">
-          <span>{clock} (UTC+05:30)</span>
+          <IstClock suffix=" (UTC+05:30)" />
           <button type="button" aria-pressed={pctScale} onClick={() => { setPctScale(v => !v); setLogScale(false); }} className={cn('hover:text-white', pctScale && 'text-sky-400')}>%</button>
           <button type="button" aria-pressed={logScale} onClick={() => { setLogScale(v => !v); setPctScale(false); }} className={cn('hover:text-white', logScale && 'text-sky-400')}>log</button>
           <button type="button" aria-pressed={autoScale} onClick={() => setAutoScale(v => !v)} className={cn('hover:text-white', autoScale && 'text-sky-400')}>auto</button>

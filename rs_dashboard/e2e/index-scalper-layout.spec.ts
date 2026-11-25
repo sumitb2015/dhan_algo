@@ -224,6 +224,17 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('header shows the current IST time', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTitle('Current time (IST)')).toHaveText(/^\d{2}:\d{2}:\d{2} IST$/);
+    if (process.env.ISX_SHOT) await page.screenshot({ path: process.env.ISX_SHOT, clip: { x: 0, y: 0, width: 1600, height: 80 } });
+    expect(state.blocked).toEqual([]);
+  });
+
   test('Quick Trade is off by default: no strike chips, nothing changes', async ({ page, context }) => {
     const state = newState();
     await signIn(context);
