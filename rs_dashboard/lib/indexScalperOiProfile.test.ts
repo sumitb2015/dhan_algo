@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildOiProfile, fmtOI, fmtOIChange, oiBars, oiChange, oiProfileKey, placeOiLabels, type OiBar } from './indexScalperOiProfile.ts';
+import { buildOiProfile, fmtOI, fmtOIChange, oiBars, oiChange, oiProfileKey, placeOiLabels, oiBarsBelowChips, type OiBar } from './indexScalperOiProfile.ts';
 
 const chain = {
   '25300': { strike: 25300, ce: { oi: 1_000_000 }, pe: { oi: 4_000_000 } },
@@ -133,4 +133,21 @@ test('labels never overlap: the highlighted max first, then the largest OI; thin
     const overlapX = (A.x - 3 - 36) < (B.x - 3) && (A.x - 3) > (B.x - 3 - 36);
     assert.ok(!(overlapX && overlapY), `labels ${a} and ${b} overlap`);
   }
+});
+
+test('oiBarsBelowChips: a strike under a position chip gets its Call / Put bars just below the chip', () => {
+  const bar = (strike: number, side: 'CE' | 'PE', y: number, h = 10): OiBar => ({ strike, side, x: 100, y, w: 50, h, oi: 1000, max: false, neg: false });
+  // strike 25800 at y=200 (CE 190-200, PE 200-210), 25850 at y=130 (no chip)
+  const bars = [bar(25850, 'CE', 120), bar(25850, 'PE', 130), bar(25800, 'CE', 190), bar(25800, 'PE', 200)];
+  const out = oiBarsBelowChips(bars, [{ top: 189, bottom: 213 }]);
+  assert.deepEqual(out.map(b => [b.strike, b.side, b.y]), [[25850, 'CE', 120], [25850, 'PE', 130], [25800, 'CE', 215], [25800, 'PE', 225]]);
+  assert.equal(out[2].h, 10); assert.equal(out[2].w, 50); // size kept
+  // no chip: unchanged (same array)
+  assert.equal(oiBarsBelowChips(bars, []), bars);
+  // two chips stacked (CE and PE positions on one strike, pushed 26 px apart): below both
+  const two = oiBarsBelowChips(bars, [{ top: 189, bottom: 213 }, { top: 215, bottom: 239 }]);
+  assert.deepEqual(two.slice(2).map(b => b.y), [241, 251]);
+  // only a Put bar on the strike, touching the chip's lower edge: moved too
+  const pe = oiBarsBelowChips([bar(25800, 'PE', 200)], [{ top: 180, bottom: 204 }]);
+  assert.equal(pe[0].y, 206);
 });

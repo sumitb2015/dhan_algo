@@ -127,6 +127,35 @@ export function oiBars(
 }
 
 /**
+ * A strike's Call / Put bars (and their labels) that a position chip covers, moved to just below that chip: the Call
+ * bar first, the Put bar under it, both keeping their size. `chips` are the chips' vertical bands in the same pixels
+ * as the bars (top / bottom). A bar pair is moved when either of its bars touches a band; a strike no chip covers is
+ * left where it is. The bars' order is unchanged, so labels are placed afterwards on the moved bars.
+ */
+export function oiBarsBelowChips(bars: OiBar[], chips: { top: number; bottom: number }[], gap = 2): OiBar[] {
+  if (!chips.length || !bars.length) return bars;
+  const bands = [...chips].sort((a, b) => a.top - b.top);
+  const byStrike = new Map<number, OiBar[]>();
+  for (const b of bars) byStrike.set(b.strike, [...(byStrike.get(b.strike) ?? []), b]);
+  const moved = new Map<OiBar, OiBar>();
+  for (const pair of byStrike.values()) {
+    const top = Math.min(...pair.map(b => b.y));
+    const bottom = Math.max(...pair.map(b => b.y + b.h));
+    const hit = bands.find(c => top < c.bottom && bottom > c.top);
+    if (!hit) continue;
+    // Several chips stacked one under another (pushed apart 26 px): go below the whole run, not into the next chip.
+    let below = hit.bottom;
+    for (const c of bands) if (c.top <= below + gap && c.bottom > below) below = c.bottom;
+    let y = below + gap;
+    for (const b of [...pair].sort((a, c) => (a.side === 'CE' ? 0 : 1) - (c.side === 'CE' ? 0 : 1))) {
+      moved.set(b, { ...b, y });
+      y += b.h;
+    }
+  }
+  return moved.size ? bars.map(b => moved.get(b) ?? b) : bars;
+}
+
+/**
  * Which bars get a text label so that no two labels overlap. A label sits just left of its bar, vertically centred on it,
  * `lineH` px tall and `widthOf(bar)` px wide. Priority: the highlighted largest Call / Put first, then by |OI| (the walls
  * a trader reads first); a label that would touch one already placed is dropped. Bars thinner than `minH` get none

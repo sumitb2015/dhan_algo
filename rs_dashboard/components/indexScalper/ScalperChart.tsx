@@ -19,7 +19,7 @@ import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { INSTRUMENTS, displayLotUnits, isMcx, qtyUnits, type Underlying } from '@/lib/indexScalperInstrument';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
-import { fmtOI, fmtOIChange, oiBars, placeOiLabels, type OiMode, type OiProfile } from '@/lib/indexScalperOiProfile';
+import { fmtOI, fmtOIChange, oiBars, oiBarsBelowChips, placeOiLabels, type OiMode, type OiProfile } from '@/lib/indexScalperOiProfile';
 import { legPremiumPnl, premiumBracketsFor } from '@/lib/indexScalperPremiumBrackets';
 import PremiumBracketControls from './PremiumBracketControls';
 import TrailControl from './TrailControl';
@@ -655,6 +655,10 @@ function ScalperChart(props: Props) {
 
   // ── position lines ────────────────────────────────────────────────
   const placed = useMemo(() => legs.map(leg => ({ leg, anchor: legAnchor(leg, entrySpots[leg.securityId], { premium, atStrike: strikeAnchor }), pnl: legPnl(leg) })), [legs, entrySpots, premium, strikeAnchor]);
+  // The OI canvas reads where the position chips sit (its 150 ms repaint moves a covered strike's bars below its chip).
+  const placedRef = useRef(placed);
+  const chipTopsRef = useRef(chipTops);
+  useEffect(() => { placedRef.current = placed; chipTopsRef.current = chipTops; }, [placed, chipTops]);
 
   useEffect(() => {
     const candles = candleRef.current;
@@ -1045,7 +1049,13 @@ function ScalperChart(props: Props) {
       // The main pane only: an oscillator pane below it has its own price scale.
       const plotH = chart.panes()[0]?.getHeight() ?? H;
       const right = W - axisW;
-      const bars = oiProfile ? oiBars(oiProfile, p => candles.priceToCoordinate(p), right, plotH, Math.min(260, right * 0.3), oiMode) : [];
+      // A strike with a position chip on it gets its bars just below the chip: drawn on the line, the chip hid them.
+      const chipBands = placedRef.current.flatMap(p => {
+        const top = chipTopsRef.current[p.leg.id];
+        return top === undefined ? [] : [{ top: top - 11, bottom: top + 13 }];
+      });
+      const raw = oiProfile ? oiBars(oiProfile, p => candles.priceToCoordinate(p), right, plotH, Math.min(260, right * 0.3), oiMode) : [];
+      const bars = oiBarsBelowChips(raw, chipBands);
       const sig = `${W}x${H}|${oiMode}|${chromeRef.current.textSecondary}|` + bars.map(b => `${b.side}${b.strike}:${b.y.toFixed(1)}:${b.w.toFixed(1)}:${b.h.toFixed(1)}`).join(',');
       if (sig === oiSigRef.current) return;
       oiSigRef.current = sig;
