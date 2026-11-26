@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BarChart3, Building2, CandlestickChart, Columns2, Gauge, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Scaling, Target, Trash2, TrendingUp, Volume2, VolumeX, Zap,
+  AreaChart, BarChart3, Building2, CandlestickChart, Columns2, Gauge, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Scaling, Target, Trash2, TrendingUp, Volume2, VolumeX, Zap,
 } from 'lucide-react';
 import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { useTabLeader } from '@/hooks/useTabLeader';
@@ -37,6 +37,9 @@ import {
   fundsView, holdingRows, orderRows, positionRows, symbolLabel, type FundsView, type OrderRowView, type PositionRowView,
 } from '@/lib/indexScalperAccount';
 import IndicatorPicker from './IndicatorPicker';
+import dynamic from 'next/dynamic';
+
+const CumulativeOIModal = dynamic(() => import('@/components/CumulativeOIModal'), { ssr: false });
 import { useIndexScalperFeed } from './useIndexScalperFeed';
 import {
   migrateIndicatorsV1, newIndicator, withVolume, type IndicatorInstance, type IndicatorKind,
@@ -133,6 +136,7 @@ export default function IndexScalperTerminal() {
   // Underlying instrument (NIFTY index, CRUDEOILM mini crude or CRUDEOIL full-size crude). Switching is locked while REAL
   // is armed.
   const [underlying, setUnderlying] = useState<Underlying>('NIFTY');
+  const [cumOiOpen, setCumOiOpen] = useState(false);
   useEffect(() => {
     const u = readPref(UNDERLYING_KEY);
     if (u === 'NIFTY' || u === 'CRUDEOILM' || u === 'CRUDEOIL') setUnderlying(u);
@@ -2097,6 +2101,10 @@ export default function IndexScalperTerminal() {
             onClick={() => setWatchStk(v => !v)} className={cn(btn, 'flex items-center gap-1', watchStk && 'bg-zinc-800 text-white')}>
             <Building2 className="w-4 h-4" aria-hidden />Top 10
           </button>
+          <button type="button" aria-pressed={cumOiOpen} aria-label="Cumulative OI"
+            onClick={() => setCumOiOpen(v => !v)} className={cn(btn, 'flex items-center gap-1', cumOiOpen && 'bg-zinc-800 text-white')}>
+            <AreaChart className="w-4 h-4" aria-hidden />Cum OI
+          </button>
           {sep}
           <button type="button" aria-pressed={chainOpen} aria-label="Option chain" title="Option chain" onClick={() => setChainOpen(v => !v)} className={cn(btn, chainOpen && 'bg-zinc-800 text-white')}><LayoutList className="w-4 h-4" /></button>
           <button type="button" aria-label="Reset scale" title="Reset scale: auto-scale the price axis and fit the time axis (undo a manual zoom)"
@@ -2124,6 +2132,8 @@ export default function IndexScalperTerminal() {
           <NavBar compact />
         </div>
       </div>
+
+      {cumOiOpen && <CumulativeOIModal crude={underlying !== 'NIFTY'} zClass="z-[80]" onClose={() => setCumOiOpen(false)} />}
 
       {(candleErr || posErr || feed.stale || notLive || !feed.marketOpen || feed.kotakError) && (
         <div role="alert" className="px-3 py-1 text-[11px] text-amber-300 bg-amber-500/10 border-b border-amber-500/30">
