@@ -420,19 +420,37 @@ export default function IndexScalperTerminal() {
   }, []);
 
   /** `fresh`: a live read for exit sizing. Display polls on Kotak go through the shared Kotak positions cache. */
+  // Only a reply newer than the last one shown is drawn: a display poll sent before an order can land after the post-order
+  // read (a Kotak cached read waits out the order's priority window) and would put the pre-order book back on screen.
+  const posSeqRef = useRef(0);
+  const posShownSeqRef = useRef(0);
   const loadPositions = useCallback(async (fresh = false): Promise<Record<string, unknown>[] | null> => {
+    const seq = ++posSeqRef.current;
     try {
       if (!brokerLoadedRef.current) return null;
       const kotakCached = brokerRef.current === 'kotak' && fresh !== true;
       const r = await fetch(kotakCached ? '/api/index-scalper/kotak-positions' : scalperRoute(brokerRef.current, 'positions'));
       const j = await r.json() as { success: boolean; data?: Record<string, unknown>[]; error?: string };
-      if (!j.success || !j.data) { setPosErr(j.error ?? 'Could not load positions'); return null; }
-      setPosErr(null);
-      setRealRows(j.data);
-      setRealLoaded(true);
+      if (!j.success || !j.data) { if (seq > posShownSeqRef.current) setPosErr(j.error ?? 'Could not load positions'); return null; }
+      // The caller still gets its own (fresh) rows for sizing; only the screen skips an out-of-date reply.
+      if (seq > posShownSeqRef.current) {
+        posShownSeqRef.current = seq;
+        setPosErr(null);
+        setRealRows(j.data);
+        setRealLoaded(true);
+      }
       return j.data;
-    } catch (e) { setPosErr(String((e as Error).message ?? e)); return null; }
+    } catch (e) { if (seq > posShownSeqRef.current) setPosErr(String((e as Error).message ?? e)); return null; }
   }, []);
+  /** After this page's own REAL order or exit. Dhan's positions read is already live. Kotak's display read goes through the
+   *  shared cache, which an order empties and then holds behind a 2 s priority window plus the account's read lane, so a
+   *  new position took 5-6 s to show: read it live now, and once more 1 s later in case Kotak books the fill just after
+   *  answering the order. */
+  const refreshAfterOrder = useCallback(() => {
+    if (brokerRef.current !== 'kotak') { void loadPositions(); return; }
+    void loadPositions(true);
+    setTimeout(() => { if (brokerRef.current === 'kotak') void loadPositions(true); }, 1000);
+  }, [loadPositions]);
 
   // Order book reads: the timer skips while one is in flight or the tab is hidden, and only the newest request's reply
   // is applied (a slow old reply must not put a just-cancelled order back to PENDING). A read asked for by an action
@@ -743,7 +761,7 @@ export default function IndexScalperTerminal() {
         price: req.price ?? undefined, triggerPrice: req.trigger ?? undefined, product,
       }, req.closesLeg ? 'close' : 'open');
       if (out.ok && before === 0) rememberSpot(sym, f.spot);
-      loadPositions();
+      refreshAfterOrder();
       void loadOrders();
       return out;
     }
@@ -761,7 +779,7 @@ export default function IndexScalperTerminal() {
     loadPositions();
     void loadOrders();
     return out;
-  }, [real, sendReal, simFill, setSimOrders, rememberSpot, loadPositions, loadOrders, underlying]);
+  }, [real, sendReal, simFill, setSimOrders, rememberSpot, loadPositions, refreshAfterOrder, loadOrders, underlying]);
 
   const submitTicket = useCallback(async (req: TicketRequest) => {
     if (ticketBusy) return;
@@ -859,11 +877,11 @@ export default function IndexScalperTerminal() {
           const row = st.live.find(l => l.id === leg.id);
           out = row ? await exitRealRow(row, st.records, st.book) : { ok: true, text: 'Already flat' };
         }
-        loadPositions();
+        refreshAfterOrder();
       }
       flash({ ok: out.ok, text: out.text });
     } finally { setExitingId(null); }
-  }, [exitingId, real, exitSimLeg, readExitState, exitRealRow, loadPositions, flash]);
+  }, [exitingId, real, exitSimLeg, readExitState, exitRealRow, refreshAfterOrder, flash]);
 
   // Quantity this page's own orders filled today, per leg id: only to say which legs Exit All would close that were opened
   // elsewhere (exits themselves close any position). Read from the polled order book (at most one poll old).
@@ -902,9 +920,9 @@ export default function IndexScalperTerminal() {
         ok: problems.length === 0,
         text: problems.length ? `Exit All incomplete: ${problems.join(' · ')}` : `Exit All sent for ${sent} leg(s)`,
       });
-      loadPositions();
+      refreshAfterOrder();
     } finally { setExitingId(null); }
-  }, [exitingId, legs, real, openedHere, exitSimLeg, readExitState, exitRealRow, loadPositions, flash]);
+  }, [exitingId, legs, real, openedHere, exitSimLeg, readExitState, exitRealRow, refreshAfterOrder, flash]);
 
   // ── trailing stop loss (TSL) ───────────────────────────────────────
   // Browser-only (owner's choice, 2026-11-25): no broker order. The stop follows the best price of the leg's own
@@ -992,7 +1010,7 @@ export default function IndexScalperTerminal() {
         // Gone or flipped since: nothing of this trail is left to close.
         if (!row || (row.netQty > 0) !== t.isLong) { dropTrail(leg.id); delete trailRetryRef.current[leg.id]; return; }
         const o = await exitRealRow(row, st.records, st.book);
-        loadPositions();
+        refreshAfterOrder();
         if (o.ok || o.unknown) {
           // An unknown outcome is never resent (the page rule): the trail ends and the warning is shown.
           dropTrail(leg.id); delete trailRetryRef.current[leg.id];
@@ -1005,7 +1023,7 @@ export default function IndexScalperTerminal() {
     const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
     if (locks?.request) await locks.request(`index-scalper-exit:${leg.securityId}`, run);
     else await run();
-  }, [exitSimLeg, readExitState, exitRealRow, loadPositions, dropTrail, flash]);
+  }, [exitSimLeg, readExitState, exitRealRow, refreshAfterOrder, dropTrail, flash]);
 
   // The watcher: every book / price change steps each trail of the current mode; stale or closed-market prices pause it.
   useEffect(() => {
@@ -1568,10 +1586,10 @@ export default function IndexScalperTerminal() {
       reverseBusyRef.current = false;
       setExitingId(null);
       setTicketBusy(false);
-      loadPositions();
+      refreshAfterOrder();
       void loadOrders();
     }
-  }, [ticketBusy, exitingId, real, reverseSim, reverseReal, flash, loadPositions, loadOrders]);
+  }, [ticketBusy, exitingId, real, reverseSim, reverseReal, flash, refreshAfterOrder, loadOrders]);
   // What the REAL reverse confirmation shows (from the polled book; the reverse itself re-reads both books).
   const reverseView = useMemo(() => {
     if (!reverseAsk) return null;
@@ -1752,11 +1770,11 @@ export default function IndexScalperTerminal() {
         else if (!row) out = { ok: false, text: 'Position not found at the broker' };
         else if (n === 0) out = { ok: false, text: oneLeft };
         else out = await exitRealRow(row, st.records, st.book, n * brokerUnitsPerLot);
-        loadPositions();
+        refreshAfterOrder();
       }
       flash({ ok: out.ok, text: out.ok ? `${leg.type} ${leg.strike}: ${n} lot${n === 1 ? '' : 's'} taken off` : out.text });
     } finally { setExitingId(null); }
-  }, [exitingId, ticketBusy, real, underlying, placeContract, onTradeContract, readExitState, exitRealRow, loadPositions, flash]);
+  }, [exitingId, ticketBusy, real, underlying, placeContract, onTradeContract, readExitState, exitRealRow, refreshAfterOrder, flash]);
 
 
   // ── REAL arming ────────────────────────────────────────────────────
