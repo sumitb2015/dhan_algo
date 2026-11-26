@@ -37,7 +37,7 @@ import {
   dayPnl, fundsView, holdingRows, orderRows, positionRows, symbolLabel, type FundsView, type OrderRowView, type PositionRowView,
 } from '@/lib/indexScalperAccount';
 import MtmGuardControl from './MtmGuardControl';
-import { mtmGuardTrip, readMtmGuard, MTM_GUARD_DEFAULTS, type MtmGuardSettings } from '@/lib/indexScalperMtmGuard';
+import { guardScopeIds, mtmGuardTrip, readMtmGuard, MTM_GUARD_DEFAULTS, type MtmGuardSettings } from '@/lib/indexScalperMtmGuard';
 import IndicatorPicker from './IndicatorPicker';
 import dynamic from 'next/dynamic';
 
@@ -1021,11 +1021,12 @@ export default function IndexScalperTerminal() {
     () => (broker === 'kotak' ? ownedQtyFromKotakOrders(orderBook, kotakRecords) : pageFilledQty(orderBook)),
     [broker, orderBook, kotakRecords],
   );
-  const exitAll = useCallback(async (confirmed = false) => {
-    if (exitingId || legs.length === 0) return;
+  /** True when every leg's close was sent (SIM: closed); false when something was refused, unknown or not started. */
+  const exitAll = useCallback(async (confirmed = false): Promise<boolean> => {
+    if (exitingId || legs.length === 0) return false;
     if (real && !confirmed) {
       const elsewhere = legsOpenedElsewhere(legs, openedHere);
-      if (elsewhere.length) { setExitAllAsk(elsewhere); return; }
+      if (elsewhere.length) { setExitAllAsk(elsewhere); return false; }
     }
     setExitAllAsk(null);
     setExitingId('all');
@@ -1034,10 +1035,10 @@ export default function IndexScalperTerminal() {
         let failed = 0;
         for (const l of legs) { const o = exitSimLeg(l); if (!o.ok) failed++; }
         flash({ ok: failed === 0, text: failed ? `${failed} paper leg(s) not closed: no live price, or prices are stale` : 'SIM: all positions closed' });
-        return;
+        return failed === 0;
       }
       const st = await readExitState();
-      if (typeof st === 'string') { flash({ ok: false, text: st }); return; }
+      if (typeof st === 'string') { flash({ ok: false, text: st }); return false; }
       // One pass per broker row (legs are already one per security + product, duplicates collapsed), so no row is
       // closed twice. Cover shorts before selling longs so a hedge is never gone while its short is still open.
       const ordered = [...st.live.filter(l => l.netQty < 0), ...st.live.filter(l => l.netQty > 0)];
@@ -1053,6 +1054,7 @@ export default function IndexScalperTerminal() {
         text: problems.length ? `Exit All incomplete: ${problems.join(' · ')}` : `Exit All sent for ${sent} leg(s)`,
       });
       refreshAfterOrder();
+      return problems.length === 0;
     } finally { setExitingId(null); }
   }, [exitingId, legs, real, openedHere, exitSimLeg, readExitState, exitRealRow, refreshAfterOrder, flash]);
 
@@ -1069,13 +1071,31 @@ export default function IndexScalperTerminal() {
   const saveMtm = useCallback((next: MtmGuardSettings) => { setMtm(next); savePref(MTM_KEY, JSON.stringify(next)); }, []);
   const [mtmNote, setMtmNote] = useState<string | null>(null);
   const mtmFiringRef = useRef(false);
-  const dayTotal = useMemo(() => dayPnl(panelPositions, real ? realLoaded && !posErr : true), [panelPositions, real, realLoaded, posErr]);
+  // REAL rows are the whole account; Exit All closes only this underlying, so only its rows (open and closed) are summed.
+  const guardIds = useMemo(() => (real ? guardScopeIds(realRows, underlying, broker === 'kotak' ? 'kotak' : 'dhan') : null), [real, realRows, underlying, broker]);
+  const dayTotal = useMemo(
+    () => dayPnl(guardIds ? panelPositions.filter(r => guardIds.has(r.securityId)) : panelPositions, real ? realLoaded && !posErr : true),
+    [panelPositions, guardIds, real, realLoaded, posErr]);
   const pricesLive = !feed.stale && feed.feedAgeSec !== null;
+  // The first priced total after a mode / broker / instrument change is a baseline: a day ALREADY past a level when the
+  // book loads (arming REAL after a loss) switches the guard off with a message instead of exiting everything at once.
+  const mtmBaseRef = useRef<string | null>(null);
+  const mtmScopeKey = `${real ? 'real' : 'sim'}|${broker}|${underlying}`;
   useEffect(() => {
     if (!mtm.on || mtmFiringRef.current || exitingId !== null || legs.length === 0) return;
-    if (!pricesLive) return; // a P&L on old prices must not exit (or hold) anything
+    if (!pricesLive || !bookReady) return; // a P&L on old prices / a book not read yet must not exit (or hold) anything
     const trip = mtmGuardTrip(mtm, dayTotal.pnl, dayTotal.unpriced, legs.length);
+    const firstLook = mtmBaseRef.current !== mtmScopeKey;
+    if (dayTotal.pnl !== null && dayTotal.unpriced === 0) mtmBaseRef.current = mtmScopeKey;
     if (!trip) return;
+    if (firstLook) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- switching off a guard the loaded book is already past
+      saveMtm({ ...mtm, on: false });
+      setMtmNote(`already past the ${trip.kind} at load: off`);
+      flash({ ok: false, text: `MTM exit switched OFF, not fired: this book's day P&L ${Math.round(trip.pnl).toLocaleString('en-IN')} was already past the ${trip.kind} (₹${trip.level.toLocaleString('en-IN')}) when it loaded. Change the level, then switch it on.` });
+      if (soundOnRef.current) playWarnChime();
+      return;
+    }
     mtmFiringRef.current = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- switching the guard off for the trip the P&L update just caused
     saveMtm({ ...mtm, on: false });
@@ -1084,18 +1104,28 @@ export default function IndexScalperTerminal() {
     setMtmNote(`${trip.kind === 'target' ? 'Target' : 'Stop'} hit: exited, now off`);
     flash({ ok: trip.kind === 'target', text });
     if (soundOnRef.current) playWarnChime();
-    const run = async () => { await exitAll(true); if (real) await new Promise(r => setTimeout(r, 2000)); };
+    const run = async () => {
+      const ok = await exitAll(true);
+      if (!ok) {
+        // The guard is already off: say loudly that something may still be open (Exit All's own message has the detail).
+        setMtmNote('exit incomplete: check positions');
+        flash({ ok: false, text: `MTM ${trip.kind} exit did not close everything: check Positions now. The MTM exit is off.` });
+        if (soundOnRef.current) playWarnChime();
+      }
+      if (real) await new Promise(r => setTimeout(r, 2000));
+    };
     const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
     void (locks?.request ? locks.request('index-scalper-mtm-exit', run) : run()).finally(() => { mtmFiringRef.current = false; });
-  }, [mtm, dayTotal, legs.length, exitingId, pricesLive, real, saveMtm, exitAll, flash]);
-  const onMtmChange = useCallback((next: MtmGuardSettings) => {
-    if (next.on && !mtm.on) {
-      // Re-arming past a level would exit at once: say so rather than surprise.
+  }, [mtm, dayTotal, legs.length, exitingId, pricesLive, bookReady, mtmScopeKey, real, saveMtm, exitAll, flash]);
+  const onMtmChange = useCallback((next: MtmGuardSettings): boolean => {
+    if (next.on) {
+      // Switching on, or editing a level while on, so that the current P&L is already past it would exit at once: refuse.
       const t = mtmGuardTrip(next, dayTotal.pnl, dayTotal.unpriced, legs.length);
-      if (t) { flash({ ok: false, text: `Day P&L ${Math.round(t.pnl).toLocaleString('en-IN')} is already past the ${t.kind}: raise it before switching the MTM exit on` }); return; }
+      if (t) { flash({ ok: false, text: `Day P&L ${Math.round(t.pnl).toLocaleString('en-IN')} is already past that ${t.kind} (₹${t.level.toLocaleString('en-IN')}): not applied, it would Exit All at once` }); return false; }
     }
     setMtmNote(null);
     saveMtm(next);
+    return true;
   }, [mtm.on, dayTotal, legs.length, saveMtm, flash]);
   const mtmShownNote = mtmNote ?? (mtm.on && legs.length > 0
     ? (!pricesLive ? 'paused: prices stale' : dayTotal.unpriced > 0 ? 'paused: a position has no price' : null)
@@ -2234,7 +2264,7 @@ export default function IndexScalperTerminal() {
           <button type="button" aria-label="Reset scale" title="Reset scale: auto-scale the price axis and fit the time axis (undo a manual zoom)"
             onClick={() => { setAutoScale(true); setResetSeq(n => n + 1); }} className={btn}><Scaling className="w-4 h-4" /></button>
           <button type="button" aria-label="Refresh candles" title="Refresh candles" onClick={() => setRefreshTick(n => n + 1)} className={btn}><RefreshCw className={cn('w-4 h-4', loadingBars && 'animate-spin')} /></button>
-          <MtmGuardControl settings={mtm} onChange={onMtmChange} note={mtmShownNote} />
+          <MtmGuardControl settings={mtm} onChange={onMtmChange} note={mtmShownNote} pnl={dayTotal.pnl} scope={underlying} />
           <button type="button" disabled={legs.length === 0 || exitingId !== null} onClick={() => void exitAll()}
             className="h-7 px-2 rounded border border-rose-500/70 text-rose-300 hover:bg-rose-500/10 text-xs font-bold disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400">
             Exit All

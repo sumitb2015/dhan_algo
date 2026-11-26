@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MTM_GUARD_DEFAULTS, mtmGuardTrip, parseRupees, readMtmGuard } from './indexScalperMtmGuard.ts';
+import { MTM_GUARD_DEFAULTS, guardScopeIds, mtmGuardTrip, parseRupees, readMtmGuard } from './indexScalperMtmGuard.ts';
 
 const g = { on: true, target: 8000, stop: 8000 };
 
@@ -37,4 +37,22 @@ test('never trips: off, unread book, partial total, no open position; 0 disables
   assert.equal(mtmGuardTrip(g, -9000, 0, 0), null);
   assert.equal(mtmGuardTrip({ ...g, target: 0 }, 50_000, 0, 1), null);
   assert.equal(mtmGuardTrip({ ...g, stop: 0 }, -50_000, 0, 1), null);
+});
+
+test('scope: only the on-screen underlying\'s rows (open and closed), never the rest of the account', () => {
+  const kotak = [
+    { tradingSymbol: 'NIFTY26D0126150CE' }, { tradingSymbol: 'NIFTY26D0125800PE' }, { tradingSymbol: 'NIFTY26DEC26FUT' },
+    { tradingSymbol: 'CRUDEOILM18DEC26FUT' }, { tradingSymbol: 'CRUDEOIL18DEC267000CE' }, { tradingSymbol: 'NIFTYNXT5026DEC26FUT' }, { tradingSymbol: 'RELIANCE-EQ' },
+  ];
+  // the NIFTY future is not a leg on this page (Exit All never closes it), so its P&L is not guarded either
+  assert.deepEqual([...guardScopeIds(kotak, 'NIFTY', 'kotak')].sort(), ['NIFTY26D0125800PE', 'NIFTY26D0126150CE']);
+  assert.deepEqual([...guardScopeIds(kotak, 'CRUDEOILM', 'kotak')], ['CRUDEOILM18DEC26FUT']);
+  assert.deepEqual([...guardScopeIds(kotak, 'CRUDEOIL', 'kotak')], ['CRUDEOIL18DEC267000CE']);
+  const dhan = [
+    { tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302' },
+    { tradingSymbol: 'BANKNIFTY-Dec2026-55000-PE', securityId: '900' },
+    { tradingSymbol: 'RELIANCE', securityId: '2885' },
+    { tradingSymbol: 'NIFTY-Dec2026-25400-PE', securityId: '' },
+  ];
+  assert.deepEqual([...guardScopeIds(dhan, 'NIFTY', 'dhan')], ['302']);
 });

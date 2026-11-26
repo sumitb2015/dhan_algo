@@ -9,7 +9,7 @@ import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
 import { parseRupees, type MtmGuardSettings } from '@/lib/indexScalperMtmGuard';
 
-function RupeeBox({ label, value, onCommit, cls }: { label: string; value: number; onCommit: (v: number) => void; cls: string }) {
+function RupeeBox({ label, value, onCommit, cls }: { label: string; value: number; onCommit: (v: number) => boolean; cls: string }) {
   const [draft, setDraft] = useState(String(value));
   const [bad, setBad] = useState(false);
   const focused = useRef(false);
@@ -18,8 +18,9 @@ function RupeeBox({ label, value, onCommit, cls }: { label: string; value: numbe
     const n = parseRupees(raw);
     if (n === null) { setBad(true); return; } // keep the last good value; the box says it was not taken
     setBad(false);
-    if (n !== value) onCommit(n);
-    setDraft(String(n));
+    // A refused change (the page says why) puts the box back to the level actually in force.
+    const applied = n === value || onCommit(n);
+    setDraft(String(applied ? n : value));
   };
   return (
     <label className="flex items-center gap-1">
@@ -39,11 +40,15 @@ function RupeeBox({ label, value, onCommit, cls }: { label: string; value: numbe
   );
 }
 
-export default function MtmGuardControl({ settings, onChange, note }: {
+export default function MtmGuardControl({ settings, onChange, note, pnl, scope }: {
   settings: MtmGuardSettings;
-  onChange: (s: MtmGuardSettings) => void;
+  /** Apply new settings; false = refused (the page shows why). */
+  onChange: (s: MtmGuardSettings) => boolean;
   /** Why it is paused / what it did last, shown small beside the boxes. */
   note: string | null;
+  /** The day P&L the guard watches (this underlying only; the account panel's total is the whole account). */
+  pnl: number | null;
+  scope: string;
 }) {
   return (
     <div role="group" aria-label="MTM target and stop loss" data-testid="mtm-guard"
@@ -52,6 +57,10 @@ export default function MtmGuardControl({ settings, onChange, note }: {
       <span className="text-[10px] font-bold text-zinc-300">MTM</span>
       <RupeeBox label="T" value={settings.target} cls="text-emerald-400" onCommit={target => onChange({ ...settings, target })} />
       <RupeeBox label="SL" value={settings.stop} cls="text-rose-400" onCommit={stop => onChange({ ...settings, stop })} />
+      <span data-testid="mtm-guard-pnl" aria-label={`${scope} day P&L the MTM exit watches`}
+        className={cn('text-[11px] font-mono tabular-nums font-semibold', pnl === null ? 'text-zinc-500' : pnl >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
+        {pnl === null ? '—' : `${pnl >= 0 ? '+' : '-'}${Math.abs(Math.round(pnl)).toLocaleString('en-IN')}`}
+      </span>
       {note && <span data-testid="mtm-guard-note" className="text-[10px] text-amber-300 whitespace-nowrap">{note}</span>}
     </div>
   );
