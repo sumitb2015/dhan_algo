@@ -218,3 +218,29 @@ export function freezeSlices(units: number, freezeQty: number | null, lotSize: n
 export function appendRecord(file: KotakDayFile | null | undefined, day: string, rec: KotakRecord): KotakDayFile {
   return { day, records: [...todaysRecords(file, day), rec] };
 }
+
+/**
+ * Working orders that would make a Kotak exit a FRESH position. Kotak's RMS adds the closing side's working orders to the
+ * exit: with a full-size target (BUY LIMIT 260 on a 260 short) still working, a BUY 260 exit counts as going long 260 and
+ * is rejected for margin, even at market ("RMS:Margin Exceeds", 2026-11-26: five exits refused in a row). When the
+ * closing side's working quantity + the exit exceed the position, this page's own working orders there are to be
+ * cancelled first (`cancel`); if another placer's orders still overfill it, the exit is refused (`foreign`), since those
+ * are never cancelled from here. Working = open / part-filled / in transit; quantity = what is left unfilled.
+ */
+export function exitBlockers(book: Record<string, unknown>[], symbol: string, closeSide: 'BUY' | 'SELL', exitUnits: number,
+  positionUnits: number, ownIds: Set<string>): { cancel: string[]; foreign: string[] } {
+  const working = book.flatMap(o => {
+    if (String(o.tradingSymbol ?? '') !== symbol || String(o.transactionType ?? '').toUpperCase() !== closeSide) return [];
+    const qty = Number(o.quantity) || 0;
+    const filled = Number(o.filledQty) || 0;
+    const st = classifyKotakStatus(String(o.orderStatus ?? '').toUpperCase(), filled, qty);
+    if (st !== 'PENDING' && st !== 'PART_TRADED' && st !== 'TRANSIT') return [];
+    const left = Math.max(0, qty - filled);
+    return left > 0 ? [{ id: String(o.orderId ?? ''), left, own: ownIds.has(String(o.orderId ?? '')) }] : [];
+  });
+  const total = working.reduce((a, w) => a + w.left, 0);
+  if (total + exitUnits <= positionUnits) return { cancel: [], foreign: [] };
+  const own = working.filter(w => w.own);
+  const foreignLeft = working.filter(w => !w.own).reduce((a, w) => a + w.left, 0);
+  return { cancel: own.map(w => w.id), foreign: foreignLeft + exitUnits > positionUnits ? working.filter(w => !w.own).map(w => w.id) : [] };
+}

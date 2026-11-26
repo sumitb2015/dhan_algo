@@ -90,6 +90,12 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
   / `ownedQtyFromKotakOrders` from the polled order book; carried-over legs count as elsewhere) and lists them. Legs
   all opened here close at once. × on a single leg never asks.
 - Exit All: shorts first, then longs (a hedge is never gone while its short is open); stops at an unknown outcome.
+- **Kotak counts working closing-side orders into an exit** (2026-11-26): with this page's full-size target (BUY LIMIT
+  260 on a 260 short) still working, a BUY 260 exit reads as going long 260 and is RMS-rejected for margin, even at
+  market. `exitRealRow` asks `exitBlockers` (lib/indexScalperKotak.ts) first: when working + exit > position it cancels
+  this page's own orders there, re-reads the book until they are gone (3 s), then sends; another placer's order makes
+  it refuse. Every exit slice is then watched (`watchPlaced`, "Exit ...": a rejection says the position is STILL OPEN).
+  Dhan is unchanged (not observed there).
 - Kotak keeps one guard: an order on the contract with an **unknown outcome holds its exit up to 60 s** until Kotak's
   order book shows it (`heldByUnknown`); closes above the freeze quantity go in whole-lot slices (`freezeSlices`).
 - **Modify** (a working order's lots / price from the chart): `onModifyOrder` -> `PATCH /api/scalper/orders` with

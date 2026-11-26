@@ -53,7 +53,7 @@ import {
 } from '@/lib/indexScalperPositions';
 import { closeOrderProduct } from '@/lib/positionProduct';
 import {
-  dashProduct, freezeSlices, heldByUnknown, kotakOrdersAsDhan, legsFromKotakPositions, ownedQtyFromKotakOrders, recordedIds,
+  dashProduct, exitBlockers, freezeSlices, heldByUnknown, kotakOrdersAsDhan, legsFromKotakPositions, ownedQtyFromKotakOrders, recordedIds,
   withResolvedUnknowns, type KotakRecord, type KotakSymbolInfo,
 } from '@/lib/indexScalperKotak';
 import { readPref, savePref } from '@/lib/localPref';
@@ -877,6 +877,47 @@ export default function IndexScalperTerminal() {
     } catch { return null; }
   }, [loadKotakRecords]);
 
+  // A placed target / stop is not a working one until the order book says so: a broker can return an order number and
+  // reject it a moment later in RMS (Kotak: SL-M on options, 2026-11-26). Each placed bracket is checked against the
+  // order book (an extra read 2.5 s after the send, then the regular poll) for up to 30 s; a rejection or cancel is
+  // reported loudly with its reason, and an order never seen in that time is reported too.
+  const watchPlaced = useCallback((orderId: string, label: string) => {
+    placedChecksRef.current.set(orderId, { label, deadline: Date.now() + 30_000 });
+    setTimeout(() => { void loadOrders(); }, 2500);
+    setTimeout(() => { setPlacedCheckSeq(n => n + 1); }, 31_000);
+  }, [loadOrders]);
+  const [placedCheckSeq, setPlacedCheckSeq] = useState(0);
+  useEffect(() => { placedChecksRef.current.clear(); }, [real, broker, underlying]);
+  useEffect(() => {
+    const checks = placedChecksRef.current;
+    if (!checks.size) return;
+    const now = Date.now();
+    for (const [id, c] of [...checks]) {
+      const v = placedOrderState(orderBook, id);
+      if (v.state === 'live') { checks.delete(id); continue; }
+      if (v.state === 'missing' && now < c.deadline) continue;
+      checks.delete(id);
+      const text = v.state === 'rejected'
+        ? `${c.label} REJECTED by the broker (order ${id}): ${v.reason}. ${c.label.startsWith('Exit') ? 'The position is STILL OPEN.' : `The position has NO ${c.label.startsWith('Stop') ? 'stop' : 'target'}.`}`
+        : v.state === 'cancelled'
+          ? `${c.label} was cancelled at the broker (order ${id}): it is not working.`
+          : `${c.label} (order ${id}) is not in the order book after 30 s: check Orders before relying on it.`;
+      flash({ ok: false, text });
+      if (soundOnRef.current) playWarnChime();
+    }
+  }, [orderBook, placedCheckSeq, flash]);
+
+  const cancelQuiet = useCallback(async (orderId: string): Promise<string | null> => {
+    placedChecksRef.current.delete(orderId);
+    try {
+      const r = brokerRef.current === 'kotak'
+        ? await fetch('/api/scalper/kotak/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId }) })
+        : await fetch('/api/scalper/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId, broker: 'dhan' }) });
+      const j = await r.json() as { success: boolean; error?: string };
+      return j.success ? null : (j.error ?? 'cancel failed');
+    } catch (e) { return `no reply (${String((e as Error).message ?? e)})`; }
+  }, []);
+
   /** Close one broker row (security + product) in full, whoever opened it; `leg` is the row from a fresh broker read.
    *  `maxUnits` (broker units) caps the close: the chip's "-" takes one lot off through this same path. */
   const exitRealRow = useCallback(async (leg: ScalperLeg, records: KotakRecord[] = [], book: Record<string, unknown>[] = [], maxUnits?: number): Promise<Outcome> => {
@@ -897,11 +938,33 @@ export default function IndexScalperTerminal() {
       // first one that is not placed (an unknown slice is never followed by another).
       const k = feedRef.current.kotak;
       const slices = freezeSlices(order.units, k?.freezeQty ?? null, k?.lotSize ?? null);
+      // Kotak's RMS adds the closing side's working orders to the exit: a full-size target still working turns the exit
+      // into a fresh position, rejected for margin (2026-11-26). Cancel THIS page's own ones first and see them gone;
+      // another placer's order is never cancelled from here, so an exit it would overfill is refused.
+      const blk = exitBlockers(book, leg.securityId, order.side, order.units, Math.abs(leg.netQty), recordedIds(withResolvedUnknowns(records, book)));
+      if (blk.foreign.length) {
+        return { ok: false, text: `${label}: working ${order.side} order${blk.foreign.length === 1 ? '' : 's'} ${blk.foreign.join(', ')} placed elsewhere would make this exit a fresh position (Kotak rejects it for margin): cancel ${blk.foreign.length === 1 ? 'it' : 'them'} first, nothing sent` };
+      }
+      if (blk.cancel.length) {
+        const errs: string[] = [];
+        for (const id of blk.cancel) { const e = await cancelQuiet(id); if (e) errs.push(`${id} (${e})`); }
+        if (errs.length) return { ok: false, text: `${label}: could not cancel this page's working order${errs.length === 1 ? '' : 's'} ${errs.join(', ')} before the exit, nothing sent` };
+        let gone = false;
+        for (let i = 0; i < 6 && !gone; i++) {
+          await new Promise(r => setTimeout(r, 500));
+          const g = await loadKotakGuard();
+          if (g) gone = exitBlockers(g.book, leg.securityId, order.side, order.units, Math.abs(leg.netQty), new Set(blk.cancel)).cancel.length === 0;
+        }
+        if (!gone) return { ok: false, text: `${label}: cancelled ${blk.cancel.join(', ')} but Kotak still shows ${blk.cancel.length === 1 ? 'it' : 'them'} working; nothing sent, try Exit again` };
+        flash({ ok: true, text: `${label}: cancelled this page's working order${blk.cancel.length === 1 ? '' : 's'} ${blk.cancel.join(', ')} so the exit is not refused` });
+      }
       let sent = 0;
       out = { ok: true, text: 'Closed' };
       for (const q of slices) {
         out = await sendReal({ tradingSymbol: leg.securityId, quantity: q, side: order.side, orderType: 'MARKET', product: leg.product }, 'close');
         if (!out.ok) break;
+        // Kotak returns an order number and may reject it a moment later in RMS: check the order book for each slice.
+        if (out.orderId) watchPlaced(out.orderId, `Exit ${label}`);
         sent += q;
       }
       if (slices.length > 1) {
@@ -911,9 +974,10 @@ export default function IndexScalperTerminal() {
       }
     } else {
       out = await sendReal({ securityId: leg.securityId, quantity: order.units, side: order.side, orderType: 'MARKET', ...product.fields }, 'close');
+      if (out.ok && out.orderId) watchPlaced(out.orderId, `Exit ${label}`);
     }
     return out;
-  }, [sendReal]);
+  }, [sendReal, cancelQuiet, loadKotakGuard, watchPlaced, flash]);
 
   /** Fresh broker rows (plus, on Kotak, the unknown-outcome guard) read right before an exit. */
   const readExitState = useCallback(async (): Promise<{ live: ScalperLeg[]; records: KotakRecord[]; book: Record<string, unknown>[] } | string> => {
@@ -1353,35 +1417,6 @@ export default function IndexScalperTerminal() {
     }
   }, [real, simReady, feed.ltpById, feed.stale, feed.feedAgeSec, feed.marketOpen, underlying, simFill, setSimOrders, flash]);
 
-  // A placed target / stop is not a working one until the order book says so: a broker can return an order number and
-  // reject it a moment later in RMS (Kotak: SL-M on options, 2026-11-26). Each placed bracket is checked against the
-  // order book (an extra read 2.5 s after the send, then the regular poll) for up to 30 s; a rejection or cancel is
-  // reported loudly with its reason, and an order never seen in that time is reported too.
-  const watchPlaced = useCallback((orderId: string, label: string) => {
-    placedChecksRef.current.set(orderId, { label, deadline: Date.now() + 30_000 });
-    setTimeout(() => { void loadOrders(); }, 2500);
-    setTimeout(() => { setPlacedCheckSeq(n => n + 1); }, 31_000);
-  }, [loadOrders]);
-  const [placedCheckSeq, setPlacedCheckSeq] = useState(0);
-  useEffect(() => { placedChecksRef.current.clear(); }, [real, broker, underlying]);
-  useEffect(() => {
-    const checks = placedChecksRef.current;
-    if (!checks.size) return;
-    const now = Date.now();
-    for (const [id, c] of [...checks]) {
-      const v = placedOrderState(orderBook, id);
-      if (v.state === 'live') { checks.delete(id); continue; }
-      if (v.state === 'missing' && now < c.deadline) continue;
-      checks.delete(id);
-      const text = v.state === 'rejected'
-        ? `${c.label} REJECTED by the broker (order ${id}): ${v.reason}. The position has NO ${c.label.startsWith('Stop') ? 'stop' : 'target'}.`
-        : v.state === 'cancelled'
-          ? `${c.label} was cancelled at the broker (order ${id}): it is not working.`
-          : `${c.label} (order ${id}) is not in the order book after 30 s: check Orders before relying on it.`;
-      flash({ ok: false, text });
-      if (soundOnRef.current) playWarnChime();
-    }
-  }, [orderBook, placedCheckSeq, flash]);
 
   /** `quiet`: the caller shows one summary (the default target / stop) instead of a message per level. */
   const onSetBracket = useCallback(async (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }, opts?: { quiet?: boolean }): Promise<Outcome> => {
@@ -1656,16 +1691,6 @@ export default function IndexScalperTerminal() {
   };
 
   /** A cancel whose outcome the caller needs (Reverse); sendCancel is the panel's, with its own toast. */
-  const cancelQuiet = useCallback(async (orderId: string): Promise<string | null> => {
-    placedChecksRef.current.delete(orderId);
-    try {
-      const r = brokerRef.current === 'kotak'
-        ? await fetch('/api/scalper/kotak/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId }) })
-        : await fetch('/api/scalper/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId, broker: 'dhan' }) });
-      const j = await r.json() as { success: boolean; error?: string };
-      return j.success ? null : (j.error ?? 'cancel failed');
-    } catch (e) { return `no reply (${String((e as Error).message ?? e)})`; }
-  }, []);
 
   /** This broker's order book read now, in panel rows (own / cancellable / raw type). Kotak needs the page's order
    *  records to tell its own orders; pass them when already read (readExitState), else they are read here. */

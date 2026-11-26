@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   appendRecord, freezeSlices, resolveUnknowns, withResolvedUnknowns,
-  dashProduct, heldByUnknown, kotakOrdersAsDhan, kotakProduct, legsFromKotakPositions, ownedQtyFromKotakOrders, recordedIds,
+  dashProduct, exitBlockers, heldByUnknown, kotakOrdersAsDhan, kotakProduct, legsFromKotakPositions, ownedQtyFromKotakOrders, recordedIds,
   todaysRecords, type KotakRecord,
 } from './indexScalperKotak.ts';
 import { sourceLotCapError } from './kotakOrderRules.ts';
@@ -139,4 +139,23 @@ test('shapeKotakOrder carries a stop order\'s trigger (trgPrc) and nothing for a
   const { shapeKotakOrder } = await import('./kotakShape.ts');
   assert.equal(shapeKotakOrder({ nOrdNo: '1', trdSym: SYM, ordSt: 'trigger pending', prcTp: 'SL', trgPrc: '180.00', qty: 65 }).triggerPrice, 180);
   assert.equal(shapeKotakOrder({ nOrdNo: '2', trdSym: SYM, ordSt: 'open', prcTp: 'L', trgPrc: '0', qty: 65 }).triggerPrice, undefined);
+});
+
+test('exitBlockers: own working closing orders that would turn the exit into a fresh position are cancelled first', () => {
+  const sym = 'NIFTY26D0126150CE';
+  const row = (orderId: string, p: Record<string, unknown> = {}) => ({ orderId, tradingSymbol: sym, transactionType: 'BUY', quantity: 260, filledQty: 0, orderStatus: 'OPEN', ...p });
+  const own = new Set(['TP1']);
+  // 2026-11-26: short 260, own target BUY 260 working, exit BUY 260 -> RMS reads 520 to buy: cancel the target first
+  assert.deepEqual(exitBlockers([row('TP1')], sym, 'BUY', 260, 260, own), { cancel: ['TP1'], foreign: [] });
+  // nothing working, or working + exit within the position: nothing to do
+  assert.deepEqual(exitBlockers([], sym, 'BUY', 260, 260, own), { cancel: [], foreign: [] });
+  assert.deepEqual(exitBlockers([row('TP1', { quantity: 65 })], sym, 'BUY', 65, 260, own), { cancel: [], foreign: [] });
+  // done / cancelled / rejected / other contract / opening side never count
+  const dead = [row('a', { orderStatus: 'COMPLETE', filledQty: 260 }), row('b', { orderStatus: 'CANCELLED' }), row('c', { orderStatus: 'REJECTED' }),
+    row('d', { tradingSymbol: 'X' }), row('e', { transactionType: 'SELL' })];
+  assert.deepEqual(exitBlockers(dead, sym, 'BUY', 260, 260, own), { cancel: [], foreign: [] });
+  // a part-filled one counts what is left
+  assert.deepEqual(exitBlockers([row('TP1', { filledQty: 195, orderStatus: 'OPEN' })], sym, 'BUY', 195, 260, own), { cancel: [], foreign: [] });
+  // another placer's order is never cancelled: still overfilled after ours -> refuse
+  assert.deepEqual(exitBlockers([row('TP1', { quantity: 65 }), row('X9', { quantity: 260 })], sym, 'BUY', 260, 260, own), { cancel: ['TP1'], foreign: ['X9'] });
 });
