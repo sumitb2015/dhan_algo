@@ -32,7 +32,7 @@ import ChartPane, { type PaneCfg } from './ChartPane';
 import OptionChainPanel, { type PickedContract } from './OptionChainPanel';
 import OrderTicket, { type TicketRequest, type TicketOrderType } from './OrderTicket';
 import DhanScalperWidget from './DhanScalperWidget';
-import { belowHeaderY } from './useDraggable';
+import { belowHeaderY, topMiddleX } from './useDraggable';
 import AccountPanel from './AccountPanel';
 import {
   dayPnl, fundsView, holdingRows, orderRows, positionRows, symbolLabel, type FundsView, type OrderRowView, type PositionRowView,
@@ -2350,11 +2350,11 @@ export default function IndexScalperTerminal() {
       )}
       {watchIdx && (
         <MarketWatchWindow kind="indices" rows={watchIdxRows} updatedAt={watch.data.indices?.updated_at ?? null}
-          flash={watchIdxFlash} now={watch.now} initial={{ x: 64, y: belowHeaderY() }} onClose={() => setWatchIdx(false)} />
+          flash={watchIdxFlash} now={watch.now} initial={{ x: topMiddleX('left'), y: belowHeaderY() }} onClose={() => setWatchIdx(false)} />
       )}
       {watchStk && (
         <MarketWatchWindow kind="stocks" rows={watchStkRows} updatedAt={watch.data.stocks?.updated_at ?? null}
-          flash={watchStkFlash} now={watch.now} initial={{ x: 400, y: belowHeaderY() }} onClose={() => setWatchStk(false)} />
+          flash={watchStkFlash} now={watch.now} initial={{ x: topMiddleX('right'), y: belowHeaderY() }} onClose={() => setWatchStk(false)} />
       )}
       {chainOpen && (
         <OptionChainPanel feed={feed} onClose={() => setChainOpen(false)} onPick={c => { setTicket(c); setTicketMsg(null); }}
