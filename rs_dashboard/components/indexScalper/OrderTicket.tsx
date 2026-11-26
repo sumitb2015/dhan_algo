@@ -36,6 +36,16 @@ const TYPES: { v: TicketOrderType; label: string }[] = [
 
 const inr = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 
+// The chain window opens at x 120 and is ~860 wide, so the old "innerWidth - 800" put the ticket on top of its Strike / PE
+// columns at a laptop width. When the screen is wide enough it now opens clear of the chain, against the right edge;
+// narrower screens keep the old spot (the ticket is draggable).
+const TICKET_W = 320;
+function ticketX(): number {
+  const vw = typeof window === 'undefined' ? 1200 : window.innerWidth;
+  const clearOfChain = vw - TICKET_W - 24;
+  return clearOfChain >= 990 ? clearOfChain : Math.max(16, vw - 800);
+}
+
 export default function OrderTicket({
   contract, liveLtp, expiry, lotSize, real, available, busy, message, onSubmit, onClose,
   underlying = 'NIFTY', broker = 'dhan', initialOrderType, initialPrice, initialLots,
@@ -58,7 +68,7 @@ export default function OrderTicket({
   initialLots?: number;
 }) {
   // Right of the chain panel and left of the chart's position chips, so neither is covered by default.
-  const { pos, handle } = useDraggable({ x: Math.max(16, (typeof window === 'undefined' ? 1200 : window.innerWidth) - 800), y: 190 });
+  const { pos, handle } = useDraggable({ x: ticketX(), y: 190 });
   // No stop-market on an option: brokers refuse SL-M on options (Kotak RMS-rejects it after returning an order number,
   // 2026-11-26), so an option offers Stop Limit only; a future keeps Stop (SL-M).
   const isOptionContract = contract.type !== 'FUT';
@@ -117,6 +127,7 @@ export default function OrderTicket({
 
   return (
     <div style={{ left: pos.x, top: pos.y }} data-testid="order-ticket"
+      onKeyDown={e => { if (e.key === 'Escape') onClose(); }}
       className={cn('fixed z-50 w-[320px] rounded-lg border bg-zinc-900 shadow-2xl select-none', real ? 'border-rose-500/70' : 'border-zinc-700')}>
       <div {...handle} className="flex items-center justify-between gap-2 px-3 py-2 border-b border-zinc-800 cursor-move">
         <div className="min-w-0">
@@ -124,7 +135,7 @@ export default function OrderTicket({
           <div className={cn('text-[10px] font-bold uppercase tracking-wider', real ? 'text-rose-400' : 'text-amber-300')}>{real ? `REAL · ${broker === 'kotak' ? 'Kotak' : 'Dhan'}` : 'SIM · paper'}</div>
         </div>
         <button type="button" aria-label="Close order ticket" onClick={onClose}
-          className="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60"><X className="w-4 h-4" /></button>
+          className="p-1.5 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60"><X className="w-4 h-4" /></button>
       </div>
 
       <div className="p-3 flex flex-col gap-3">
@@ -141,9 +152,9 @@ export default function OrderTicket({
 
         <div className="flex items-center gap-3 text-xs border-b border-zinc-800">
           {types.map(t => (
-            <button key={t.v} type="button" onClick={() => setOrderType(t.v)}
+            <button key={t.v} type="button" aria-pressed={orderType === t.v} onClick={() => setOrderType(t.v)}
               title={!real && t.v !== 'MARKET' ? 'SIM: a limit away from the price, a stop or a stop-limit waits as a paper order and fills when the price gets there' : undefined}
-              className={cn('pb-1.5 -mb-px border-b-2 font-semibold disabled:opacity-40', orderType === t.v ? 'text-white border-sky-500' : 'text-zinc-400 border-transparent hover:text-zinc-200')}>
+              className={cn('pb-1.5 -mb-px border-b-2 font-semibold rounded-t focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60', orderType === t.v ? 'text-white border-sky-500' : 'text-zinc-400 border-transparent hover:text-zinc-200')}>
               {t.label}
             </button>
           ))}
@@ -178,7 +189,7 @@ export default function OrderTicket({
         <div className="text-[11px] text-zinc-400 flex flex-col gap-0.5 border-t border-zinc-800 pt-2">
           <div className="flex justify-between"><span>Order value</span><span className="text-zinc-100 tabular-nums">{value ? inr(value) : '—'}</span></div>
           <div className="flex justify-between"><span>Available balance</span><span className="text-zinc-100 tabular-nums">{available === null ? '—' : inr(available)}</span></div>
-          <div className="text-[10px] text-zinc-600">Selling needs margin: check it at the broker before a large short.</div>
+          <div className="text-[10px] text-zinc-500">Selling needs margin: check it at the broker before a large short.</div>
         </div>
 
         {(err || message) && (

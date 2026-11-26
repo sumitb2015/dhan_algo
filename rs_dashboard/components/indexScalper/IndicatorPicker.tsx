@@ -9,6 +9,10 @@ import { INDICATOR_CATALOG, LINE_WIDTHS, catalogEntry, clampParam, indicatorLabe
 import { cn } from '@/lib/utils';
 
 const SWATCHES = ['#3b82f6', '#f59e0b', '#ec4899', '#22c55e', '#a78bfa', '#06b6d4', '#eab308', '#ef4444', '#e4e4e7'];
+const SWATCH_NAMES: Record<string, string> = {
+  '#3b82f6': 'blue', '#f59e0b': 'amber', '#ec4899': 'pink', '#22c55e': 'green', '#a78bfa': 'violet', '#06b6d4': 'cyan', '#eab308': 'yellow', '#ef4444': 'red', '#e4e4e7': 'white',
+};
+const FOCUS = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60';
 
 function ParamField({ value, onCommit, label }: { value: number; onCommit: (n: number) => void; label: string }) {
   const [draft, setDraft] = useState(String(value));
@@ -66,7 +70,7 @@ export default function IndicatorPicker({ open, indicators, editId, onAdd, onCha
             <div className="flex items-center gap-2 text-xs text-zinc-300">Colour
               <div className="flex gap-1">
                 {SWATCHES.map(c => (
-                  <button key={c} type="button" aria-label={`Colour ${c}`} onClick={() => onChange(editing.id, { color: c })}
+                  <button key={c} type="button" aria-label={`Colour ${SWATCH_NAMES[c] ?? c}`} aria-pressed={editing.color === c} title={SWATCH_NAMES[c]} onClick={() => onChange(editing.id, { color: c })}
                     className={cn('w-5 h-5 rounded-full border-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60', editing.color === c ? 'border-white' : 'border-transparent')} style={{ backgroundColor: c }} />
                 ))}
               </div>
@@ -88,18 +92,19 @@ export default function IndicatorPicker({ open, indicators, editId, onAdd, onCha
             </div>
             </>}
             <div className="flex justify-between pt-2">
-              <button type="button" onClick={() => { onRemove(editing.id); onClose(); }} className="text-xs font-semibold text-rose-400 hover:text-rose-300">Remove</button>
-              <button type="button" onClick={onClose} className="h-8 px-3 rounded bg-sky-600 hover:bg-sky-500 text-oncolor text-xs font-bold">Done</button>
+              <button type="button" onClick={() => { onRemove(editing.id); onClose(); }} className={cn('h-8 px-2 rounded text-xs font-semibold text-rose-400 hover:text-rose-300 hover:bg-rose-500/10', FOCUS)}>Remove</button>
+              <button type="button" onClick={onClose} className={cn('h-8 px-4 rounded bg-sky-600 hover:bg-sky-500 text-oncolor text-xs font-bold', FOCUS)}>Done</button>
             </div>
           </div>
         ) : (
           <div className="p-3">
             <div className="relative mb-2">
-              <Search className="w-4 h-4 text-zinc-500 absolute left-2 top-2" />
-              <input autoFocus value={q} onChange={e => setQ(e.target.value)} placeholder="Search indicators"
+              <Search className="w-4 h-4 text-zinc-500 absolute left-2 top-2 pointer-events-none" aria-hidden />
+              <input autoFocus value={q} onChange={e => setQ(e.target.value)} placeholder="Search indicators" aria-label="Search indicators"
                 className="w-full h-8 pl-8 pr-2 rounded bg-zinc-800 border border-zinc-700 text-sm text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60" />
             </div>
             <ul className="max-h-72 overflow-auto">
+              {list.length === 0 && <li className="px-2 py-4 text-center text-xs text-zinc-500">No indicator matches &ldquo;{q.trim()}&rdquo;</li>}
               {list.map(c => (
                 <li key={c.kind}>
                   <button type="button" onClick={() => onAdd(c.kind)}
@@ -113,13 +118,13 @@ export default function IndicatorPicker({ open, indicators, editId, onAdd, onCha
             {indicators.length > 0 && (
               <>
                 <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mt-3 mb-1 px-1">On chart</div>
-                <ul>
+                <ul className="max-h-48 overflow-auto">
                   {indicators.map(i => (
                     <li key={i.id} className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-zinc-800">
                       <span className="flex items-center gap-2 text-sm text-zinc-200"><span className="w-2 h-2 rounded-full" style={{ backgroundColor: i.color }} />{indicatorLabel(i)}</span>
-                      <span className="flex gap-3 text-xs">
-                        <button type="button" onClick={() => onEdit(i.id)} className="text-sky-400 hover:text-sky-300">Settings</button>
-                        <button type="button" onClick={() => onRemove(i.id)} className="text-rose-400 hover:text-rose-300">Remove</button>
+                      <span className="flex gap-1 text-xs">
+                        <button type="button" aria-label={`Settings for ${indicatorLabel(i)}`} onClick={() => onEdit(i.id)} className={cn('px-1.5 py-0.5 rounded text-sky-400 hover:text-sky-300 hover:bg-zinc-700', FOCUS)}>Settings</button>
+                        <button type="button" aria-label={`Remove ${indicatorLabel(i)}`} onClick={() => onRemove(i.id)} className={cn('px-1.5 py-0.5 rounded text-rose-400 hover:text-rose-300 hover:bg-zinc-700', FOCUS)}>Remove</button>
                       </span>
                     </li>
                   ))}
