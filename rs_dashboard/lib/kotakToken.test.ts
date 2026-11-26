@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { isTokenExpired, isSessionDead, KOTAK_UNAUTHORIZED, KOTAK_INVALID_SESSION, KOTAK_INVALID_SESSION_TOKEN } from './kotakToken.ts';
+import { isTokenExpired, isSessionDead, KOTAK_UNAUTHORIZED, KOTAK_INVALID_SESSION, KOTAK_INVALID_SESSION_TOKEN, gateStep, KOTAK_PATH_GATES, KOTAK_PATHS, type PathGate } from './kotakToken.ts';
 
 test('isTokenExpired: undefined expiry is treated as expired', () => {
   assert.strictEqual(isTokenExpired(undefined), true);
@@ -160,4 +160,26 @@ test('laneRead: a read whose slot falls inside a rate-limit pause waits for the 
   // a was refused at its first send, which paused the lane 1500 ms: b must not have gone out inside that pause.
   assert.ok(sentAt.b[0] >= sentAt.a[0] + 1500, `b sent ${sentAt.b[0] - sentAt.a[0]} ms after a's refusal`);
   t.mock.timers.reset();
+});
+
+test('gateStep: Kotak positions reads are throttled, joined and reused, never across an order write', () => {
+  const cfg = KOTAK_PATH_GATES[KOTAK_PATHS.positions];
+  assert.ok(cfg && cfg.gapMs >= 1500 && cfg.reuseMs <= cfg.gapMs);
+  const json = { data: [] };
+  const p = Promise.resolve(json);
+  // nothing yet: send
+  assert.deepStrictEqual(gateStep({ nextAt: 0 }, 1000, 0, cfg), { kind: 'send' });
+  // one on the wire, sent after the last order write: join it
+  assert.strictEqual((gateStep({ nextAt: 2500, inflight: { startedAt: 1000, p } }, 1200, 500, cfg) as { p: unknown }).p, p);
+  // the one on the wire was sent before an order write: do not join; the gap still holds -> wait
+  assert.deepStrictEqual(gateStep({ nextAt: 2500, inflight: { startedAt: 1000, p } }, 1200, 1100, cfg), { kind: 'wait', ms: 1300 });
+  // finished 400 ms ago, after the last write: reuse it
+  const g: PathGate = { nextAt: 2500, last: { startedAt: 1000, at: 1400, json } };
+  assert.deepStrictEqual(gateStep(g, 1800, 0, cfg), { kind: 'reuse', json });
+  // too old to reuse, and inside the gap: wait for the gap
+  assert.deepStrictEqual(gateStep(g, 2450, 0, cfg), { kind: 'wait', ms: 50 });
+  // an order went out after that read: never reuse it (it could be the pre-order book)
+  assert.deepStrictEqual(gateStep(g, 1800, 1200, cfg), { kind: 'wait', ms: 700 });
+  // past the gap: send
+  assert.deepStrictEqual(gateStep(g, 2600, 0, cfg), { kind: 'send' });
 });

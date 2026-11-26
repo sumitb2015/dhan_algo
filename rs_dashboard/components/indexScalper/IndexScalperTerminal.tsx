@@ -444,12 +444,12 @@ export default function IndexScalperTerminal() {
   }, []);
   /** After this page's own REAL order or exit. Dhan's positions read is already live. Kotak's display read goes through the
    *  shared cache, which an order empties and then holds behind a 2 s priority window plus the account's read lane, so a
-   *  new position took 5-6 s to show: read it live now, and once more 1 s later in case Kotak books the fill just after
-   *  answering the order. */
+   *  new position took 5-6 s to show: read it live now, and once more 1.6 s later in case Kotak books the fill just after
+   *  answering the order (just past the server's 1.5 s gap between Kotak positions reads, so it does not queue). */
   const refreshAfterOrder = useCallback(() => {
     if (brokerRef.current !== 'kotak') { void loadPositions(); return; }
     void loadPositions(true);
-    setTimeout(() => { if (brokerRef.current === 'kotak') void loadPositions(true); }, 1000);
+    setTimeout(() => { if (brokerRef.current === 'kotak') void loadPositions(true); }, 1600);
   }, [loadPositions]);
 
   // Order book reads: the timer skips while one is in flight or the tab is hidden, and only the newest request's reply
@@ -515,7 +515,9 @@ export default function IndexScalperTerminal() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!real) { setRealRows([]); setPosErr(null); setRealLoaded(false); return; }
     loadPositions();
-    const t = setInterval(() => { void loadPositions(); }, 3000);
+    // Kotak answers 100025 (and pauses every Kotak read) when positions are read too often: its book is polled every 5 s,
+    // Dhan's every 3 s. The server also throttles Kotak positions reads (lib/kotakToken.ts KOTAK_PATH_GATES).
+    const t = setInterval(() => { void loadPositions(); }, broker === 'kotak' ? 5000 : 3000);
     return () => clearInterval(t);
   }, [real, loadPositions, broker, brokerLoaded]);
 

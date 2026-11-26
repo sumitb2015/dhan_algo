@@ -293,7 +293,64 @@ export async function laneRead(key: string, send: () => Promise<Record<string, u
 /** An order write is about to go out / just answered: no read queued before now may be joined from here on (it could carry the pre-order book). */
 export function noteKotakOrderWrite(now = Date.now()): void { readLane.lastWriteAt = Math.max(readLane.lastWriteAt, now); }
 
-/** Authenticated GET against the Kotak Neo REST API. Throws on error, `[]`-safe on an empty book. Paced through the read lane. */
+// ─── Positions throttle ───────────────────────────────────────────────────────────────────────────────────────────
+// The positions book is the read everybody wants live (the Kotak guard server every 2.5 s, exits, the Index Scalper's
+// post-order read, the CSP / covered-call / Fresh Money desks, every page's poll) and it is the one Kotak kept answering
+// 100025 on (2026-11-26), each time pausing EVERY Kotak read 1.5 s. So, process-wide and on top of the read lane:
+//   - a live positions call STARTS at least `gapMs` after the previous one;
+//   - a caller arriving while one is on the wire joins it, and one arriving within `reuseMs` of a finished one gets that
+//     result, but only if that call was sent after the last order write (never a pre-order book for an exit);
+//   - a live result also refreshes the shared display cache, so page polls stop adding calls of their own.
+export interface PathGateCfg { gapMs: number; reuseMs: number }
+export const KOTAK_PATH_GATES: Readonly<Record<string, PathGateCfg>> = { [KOTAK_PATHS.positions]: { gapMs: 1_500, reuseMs: 1_000 } };
+export interface PathGate {
+  nextAt: number;
+  last?: { startedAt: number; at: number; json: Record<string, unknown> };
+  inflight?: { startedAt: number; p: Promise<Record<string, unknown>> };
+}
+export type GateStep =
+  | { kind: 'join'; p: Promise<Record<string, unknown>> }
+  | { kind: 'reuse'; json: Record<string, unknown> }
+  | { kind: 'wait'; ms: number }
+  | { kind: 'send' };
+/** What a gated read does now. Pure. A call sent at or before `lastWriteAt` (an order write) is never joined or reused. */
+export function gateStep(g: PathGate, now: number, lastWriteAt: number, cfg: PathGateCfg): GateStep {
+  if (g.inflight && g.inflight.startedAt > lastWriteAt) return { kind: 'join', p: g.inflight.p };
+  if (g.last && g.last.startedAt > lastWriteAt && now - g.last.at < cfg.reuseMs) return { kind: 'reuse', json: g.last.json };
+  if (g.nextAt > now) return { kind: 'wait', ms: g.nextAt - now };
+  return { kind: 'send' };
+}
+const pathGates = globalOnce('__kotakPathGates', () => new Map<string, PathGate>());
+
+async function gatedRead(apiPath: string, cfg: PathGateCfg, send: () => Promise<Record<string, unknown>>): Promise<Record<string, unknown>> {
+  let g = pathGates.get(apiPath);
+  if (!g) { g = { nextAt: 0 }; pathGates.set(apiPath, g); }
+  for (;;) {
+    const step = gateStep(g, Date.now(), readLane.lastWriteAt, cfg);
+    if (step.kind === 'join') return step.p;
+    if (step.kind === 'reuse') return step.json;
+    if (step.kind === 'send') break;
+    await new Promise(res => setTimeout(res, step.ms));
+  }
+  const startedAt = Date.now();
+  g.nextAt = startedAt + cfg.gapMs;
+  const gate = g;
+  const p = send().then(json => {
+    if (startedAt > readLane.lastWriteAt) {
+      gate.last = { startedAt, at: Date.now(), json };
+      const cur = sharedGets.get(apiPath);
+      if (!cur?.inflight) sharedGets.set(apiPath, { at: Date.now(), json });
+    }
+    return json;
+  });
+  const entry = { startedAt, p };
+  gate.inflight = entry;
+  void p.finally(() => { if (gate.inflight === entry) gate.inflight = undefined; }).catch(() => {});
+  return p;
+}
+
+/** Authenticated GET against the Kotak Neo REST API. Throws on error, `[]`-safe on an empty book. Paced through the read
+ *  lane; the positions book is also throttled (KOTAK_PATH_GATES). */
 export async function kotakGet(apiPath: string, timeoutMs = 10_000): Promise<Record<string, unknown>> {
   const doRequest = async () => {
     const res = await fetch(kotakUrl(apiPath), {
@@ -302,7 +359,7 @@ export async function kotakGet(apiPath: string, timeoutMs = 10_000): Promise<Rec
     });
     return await res.json() as Record<string, unknown>;
   };
-  return laneRead(`GET ${apiPath}`, async () => {
+  const read = () => laneRead(`GET ${apiPath}`, async () => {
     let json = await doRequest();
     if (isSessionDead(json) && await reloginKotak()) {
       json = await doRequest();
@@ -310,6 +367,8 @@ export async function kotakGet(apiPath: string, timeoutMs = 10_000): Promise<Rec
     raiseIfError(json, apiPath, true);
     return json;
   });
+  const cfg = KOTAK_PATH_GATES[apiPath];
+  return cfg ? gatedRead(apiPath, cfg, read) : read();
 }
 
 // Display polls (positions / orders / trades, every open tab every 2 s) share one Kotak call per path: Kotak answers
