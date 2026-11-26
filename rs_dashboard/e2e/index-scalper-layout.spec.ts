@@ -108,6 +108,10 @@ async function mockApi(page: Page, state: State) {
   });
 }
 
+/** Saves the default target / stop as switched off before the page loads (it is on by default). */
+const defaultBracketsOff = (page: Page) => page.addInitScript(() => {
+  try { localStorage.setItem('indexScalper.defaultBrackets.v1', JSON.stringify({ on: false, tpPct: 30, slPct: 20 })); } catch { /* private mode */ }
+});
 const newState = (): State => ({ calls: [], blocked: [], bridgeStarts: [], candleReqs: [], positions: [], orders: [] });
 
 async function dragFrom(page: Page, locator: ReturnType<Page['locator']>, dy: number) {
@@ -638,6 +642,7 @@ test.describe('Index Scalper layout + option charts', () => {
     const state = newState();
     await signIn(context);
     await mockApi(page, state);
+    await defaultBracketsOff(page); // this test sets its target by hand on a position that has none
     await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
     await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
     await page.getByRole('switch', { name: 'Quick Trade' }).click();
@@ -830,6 +835,7 @@ test.describe('Index Scalper layout + option charts', () => {
     const state = newState();
     await signIn(context);
     await mockApi(page, state);
+    await defaultBracketsOff(page); // this test sets its target by hand on a position that has none
     await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
     await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
     await page.getByRole('switch', { name: 'Quick Trade' }).click();
@@ -1347,6 +1353,132 @@ test.describe('Index Scalper layout + option charts', () => {
     await expect(stk).toHaveCount(0);
     await page.getByRole('button', { name: 'Top indices', exact: true }).click();
     await expect(idx).toHaveCount(0);
+    expect(state.blocked).toEqual([]);
+  });
+  test('default TP / SL (on, 30 % / 20 %): a SIM buy at market gets its paper target and stop from the entry premium', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId('default-brackets-chip')).toHaveText('TP 30% · SL 20%');
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    const pane = page.getByTestId('chart-pane-0');
+    const overlay = pane.getByTestId('quick-overlay');
+    await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
+    await overlay.getByRole('button', { name: 'Quick buy 25350 CE 1 lot' }).click();
+    const chip = pane.getByTestId('position-chip');
+    // entry 210.50: target 210.50 x 1.3 = 273.65, stop 210.50 x 0.8 = 168.40
+    await expect(chip.getByTestId('premium-tp')).toContainText('TP 273.65', { timeout: 15_000 });
+    await expect(chip.getByTestId('premium-sl')).toContainText('SL 168.40');
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('default TP / SL in REAL: once the market buy shows in the book, a Limit target and an SL-M stop are sent once', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    const overlay = page.getByTestId('chart-pane-0').getByTestId('quick-overlay');
+    await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
+    await overlay.getByRole('button', { name: 'Quick buy 25350 CE 1 lot' }).click();
+    const sends = () => state.calls.filter(c => c.path === '/api/scalper/fast-order');
+    await expect.poll(() => sends().length, { timeout: 15_000 }).toBe(1);
+    expect(sends()[0].body).toMatchObject({ securityId: '302', side: 'BUY', orderType: 'MARKET', quantity: 65 });
+    // the fill shows in the broker book at 210.50
+    state.positions = [{
+      tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY',
+      netQty: 65, buyAvg: 210.5, costPrice: 210.5, sellAvg: 0, positionType: 'LONG',
+    }];
+    await expect.poll(() => sends().length, { timeout: 15_000 }).toBe(3);
+    expect(sends()[1].body).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'LIMIT', price: 273.65, quantity: 65 });
+    expect(sends()[2].body).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 168.4, quantity: 65 });
+    // at most once: the order book still shows neither order, yet nothing more is sent
+    await page.waitForTimeout(4000);
+    expect(sends()).toHaveLength(3);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('default TP / SL switched off in the settings: a buy gets no levels, and it stays off after a reload', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'Default target and stop settings' }).click();
+    const panel = page.getByRole('dialog', { name: 'Default target and stop panel' });
+    await expect(panel.getByLabel('Default target percent')).toHaveValue('30');
+    await expect(panel.getByLabel('Default stop percent')).toHaveValue('20');
+    await panel.getByRole('switch', { name: 'Default target and stop' }).click();
+    await expect(page.getByTestId('default-brackets-chip')).toHaveText('TP/SL off');
+    await page.keyboard.press('Escape');
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    const pane = page.getByTestId('chart-pane-0');
+    const overlay = pane.getByTestId('quick-overlay');
+    await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
+    await overlay.getByRole('button', { name: 'Quick buy 25350 CE 1 lot' }).click();
+    const chip = pane.getByTestId('position-chip');
+    await expect(chip).toHaveCount(1, { timeout: 15_000 });
+    await page.waitForTimeout(2500);
+    await expect(chip.getByTestId('premium-tp')).toHaveCount(0);
+    await expect(chip.getByTestId('premium-sl')).toHaveCount(0);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('default-brackets-chip')).toHaveText('TP/SL off', { timeout: 60_000 });
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+  test('default TP / SL after a SIM flip: the short gets its own levels; the old long target neither blocks them nor closes it', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    const pane = page.getByTestId('chart-pane-0');
+    const overlay = pane.getByTestId('quick-overlay');
+    await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
+    await overlay.getByRole('button', { name: 'Quick buy 25350 CE 1 lot' }).click();
+    const chip = pane.getByTestId('position-chip');
+    await expect(chip.getByTestId('premium-tp')).toContainText('TP 273.65', { timeout: 15_000 });
+    // sell 2 lots at market: long 1 -> short 1 (Sell lots per click = 2)
+    await page.getByRole('button', { name: 'Quick Trade settings' }).click();
+    await page.getByLabel('Sell lots per click').selectOption('2');
+    await page.keyboard.press('Escape');
+    await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
+    await overlay.getByRole('button', { name: 'Quick sell 25350 CE 2 lots' }).click();
+    await expect(chip.getByTestId('leg-label')).toHaveText('S CE 25350', { timeout: 15_000 });
+    // a short from 210.50: target 30 % below (147.35), stop 20 % above (252.60)
+    await expect(chip.getByTestId('premium-tp')).toContainText('TP 147.35', { timeout: 15_000 });
+    await expect(chip.getByTestId('premium-sl')).toContainText('SL 252.60');
+    await page.waitForTimeout(2000);
+    await expect(chip).toHaveCount(1); // still open: the old long target 273.65 did not "hit" the short
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('default TP / SL in REAL: a fill that never shows in the book is reported after 30 s, nothing sent', async ({ page, context }) => {
+    test.setTimeout(150_000);
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    const overlay = page.getByTestId('chart-pane-0').getByTestId('quick-overlay');
+    await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
+    await overlay.getByRole('button', { name: 'Quick buy 25350 CE 1 lot' }).click();
+    const sends = () => state.calls.filter(c => c.path === '/api/scalper/fast-order');
+    await expect.poll(() => sends().length, { timeout: 15_000 }).toBe(1);
+    await expect(page.getByRole('status').filter({ hasText: 'No default target / stop' }))
+      .toContainText('the position did not show within 30 s', { timeout: 70_000 });
+    expect(sends()).toHaveLength(1);
     expect(state.blocked).toEqual([]);
   });
 });

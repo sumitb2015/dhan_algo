@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BarChart3, Building2, CandlestickChart, Columns2, Gauge, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Scaling, Trash2, TrendingUp, Volume2, VolumeX, Zap,
+  BarChart3, Building2, CandlestickChart, Columns2, Gauge, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Scaling, Target, Trash2, TrendingUp, Volume2, VolumeX, Zap,
 } from 'lucide-react';
 import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { useTabLeader } from '@/hooks/useTabLeader';
@@ -58,6 +58,8 @@ import { cn } from '@/lib/utils';
 import { Switch } from '@/components/ui/switch';
 import type { OiMode } from '@/lib/indexScalperOiProfile';
 import { editLotsError, isEditable, movedLevels, orderEditError } from '@/lib/indexScalperOrderEdit';
+import { DEFAULT_BRACKETS, DEFAULT_BRACKETS_KEY, SL_PCT_OPTIONS, TP_PCT_OPTIONS, clampDefaultBrackets, defaultBracketPlan, opensPosition, pendingLeg, type DefaultBracketSettings, type PendingDefault } from '@/lib/indexScalperDefaultBrackets';
+import { premiumBracketsFor } from '@/lib/indexScalperPremiumBrackets';
 import { QUICK_ON_KEY, QUICK_SETTINGS_KEY, DEFAULT_QUICK, MAX_QUICK_RANGE, clampQuickSettings, lotsToRemove, type QuickSettings } from '@/lib/indexScalperQuickTrade';
 
 // v2: v1 could hold an ATM pin taken before any spot was known (the middle of the strike list, e.g. 24200). v1 is
@@ -168,6 +170,14 @@ export default function IndexScalperTerminal() {
   const [quickOn, setQuickOnState] = useState(false);
   const [quickSettings, setQuickSettingsState] = useState<QuickSettings>(DEFAULT_QUICK);
   const [quickMenu, setQuickMenu] = useState(false);
+  // Default target / stop for a new option position opened here (lib/indexScalperDefaultBrackets): on, 30 % / 20 %.
+  const [defBrackets, setDefBracketsState] = useState<DefaultBracketSettings>(DEFAULT_BRACKETS);
+  const defBracketsRef = useRef(defBrackets);
+  useEffect(() => { defBracketsRef.current = defBrackets; }, [defBrackets]);
+  const [defMenu, setDefMenu] = useState(false);
+  /** Pending defaults by leg key (Dhan security id / Kotak trading symbol / paper id), with the mode they were made in. */
+  const pendingDefaultsRef = useRef(new Map<string, { p: PendingDefault; real: boolean }>());
+  const [pendingSeq, setPendingSeq] = useState(0);
   // What the bars show: the total OI, or today's change in OI.
   const [oiMode, setOiModeState] = useState<OiMode>('total');
   const [days, setDays] = useState(15);
@@ -249,6 +259,8 @@ export default function IndexScalperTerminal() {
   // REAL positions have been read successfully at least once since REAL was armed (the day P&L is unknown before).
   const [realLoaded, setRealLoaded] = useState(false);
   const [exitingId, setExitingId] = useState<string | null>(null);
+  // While a REAL reverse runs (reverseReal): OCO and the default target / stop watcher keep off its contract.
+  const reverseBusyRef = useRef(false);
   const [toast, setToast] = useState<Toast | null>(null);
   // One-click size: the widget's top stepper sets it; Buy CE / Buy PE and the chain's B / S use it too.
   const [scalpLots, setScalpLots] = useState(1);
@@ -275,9 +287,10 @@ export default function IndexScalperTerminal() {
   const { leaderRef: soundLeaderRef } = useTabLeader('index-scalper-sound');
   const lastSentAtRef = useRef(0);
 
+  // A warning (ok: false) stays up 15 s, a confirmation 6 s: "no stop on this position" must not flash past unread.
   const flash = useCallback((t: Toast) => {
     setToast(t);
-    window.setTimeout(() => setToast(cur => (cur === t ? null : cur)), 6000);
+    window.setTimeout(() => setToast(cur => (cur === t ? null : cur)), t.ok ? 6000 : 15000);
   }, []);
 
   // ── persisted per-viewer state ─────────────────────────────────────
@@ -314,12 +327,29 @@ export default function IndexScalperTerminal() {
     if (readPref(OI_MODE_KEY) === 'change') setOiModeState('change');
     if (readPref(QUICK_ON_KEY) === '1') setQuickOnState(true);
     setQuickSettingsState(clampQuickSettings(loadJson<unknown>(QUICK_SETTINGS_KEY, null)));
+    setDefBracketsState(clampDefaultBrackets(loadJson<unknown>(DEFAULT_BRACKETS_KEY, null)));
     setLayoutReady(true);
   }, []);
   const setOi = (on: boolean) => { setShowOi(on); savePref(OI_KEY, on ? '1' : '0'); };
   const toggleGrid = () => { const on = !showGrid; setShowGridState(on); savePref(GRID_KEY, on ? '1' : '0'); };
   const setOiMode = (m: OiMode) => { setOiModeState(m); savePref(OI_MODE_KEY, m); };
   const setQuickOn = (on: boolean) => { setQuickOnState(on); savePref(QUICK_ON_KEY, on ? '1' : '0'); if (!on) setQuickMenu(false); };
+  const patchDefBrackets = (patch: Partial<DefaultBracketSettings>) => setDefBracketsState(prev => {
+    const next = clampDefaultBrackets({ ...prev, ...patch });
+    savePref(DEFAULT_BRACKETS_KEY, JSON.stringify(next));
+    return next;
+  });
+  // Another tab changed it (switched it off): this tab follows at once, so it never keeps placing levels the user turned off.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== DEFAULT_BRACKETS_KEY) return;
+      let v: unknown = null;
+      try { v = e.newValue ? JSON.parse(e.newValue) : null; } catch { /* unreadable: the defaults */ }
+      setDefBracketsState(clampDefaultBrackets(v));
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
   const patchQuick = (patch: Partial<QuickSettings>) => setQuickSettingsState(prev => {
     const next = clampQuickSettings({ ...prev, ...patch });
     savePref(QUICK_SETTINGS_KEY, JSON.stringify(next));
@@ -685,7 +715,29 @@ export default function IndexScalperTerminal() {
       return { ...prev, realized, legs: { ...prev.legs, [id]: { ...cur, netQty: next.netQty, avg: next.avg, realized: legRealized } } };
     });
     if (opens) rememberSpot(id, feedRef.current.spot);
-  }, [rememberSpot]);
+    // Flat or flipped through zero: the old side's paper target / stop no longer belongs to this position (a long's
+    // target left on a new short reads as already hit and closed it at once). Reverse already clears them.
+    if (before !== 0 && (after === 0 || Math.sign(after) !== Math.sign(before))) {
+      setSimBrackets(prev => { if (!prev[id]) return prev; const next = { ...prev }; delete next[id]; return next; });
+    }
+  }, [rememberSpot, setSimBrackets]);
+
+  /** After this page's MARKET order on an option was accepted: when it opened a position from flat (or flipped one), the
+   *  default target / stop is queued for that leg; the watcher below places it once the book shows the leg. */
+  // `before` / `orderQty` are in the leg's own unit (broker netQty; paper units); `entry` is the price the order went out
+  // at (the live premium; the paper fill), never the broker's day average (lib/indexScalperDefaultBrackets).
+  const queueDefaultBrackets = useCallback((key: string, req: TicketRequest, o: { before: number; orderQty: number; entry: number; product: string; isReal: boolean }) => {
+    const s = defBracketsRef.current;
+    if (!s.on || req.closesLeg || req.orderType !== 'MARKET' || req.contract.type === 'FUT') return;
+    const long = req.side === 'BUY';
+    if (!opensPosition(o.before, long, o.orderQty)) return; // adding to or reducing a position: its levels stay as they are
+    pendingDefaultsRef.current.set(key, {
+      p: { legKey: key, long, at: Date.now(), tpPct: s.tpPct, slPct: s.slPct, entry: o.entry, product: o.product,
+        expectQty: o.before + (long ? o.orderQty : -o.orderQty) },
+      real: o.isReal,
+    });
+    setPendingSeq(n => n + 1);
+  }, [setPendingSeq]);
 
   const placeContract = useCallback(async (req: TicketRequest): Promise<Outcome> => {
     const f = feedRef.current;
@@ -735,7 +787,10 @@ export default function IndexScalperTerminal() {
         return { ok: true, text: `SIM ${req.side} ${o.orderType === 'LIMIT' ? 'Limit' : o.orderType === 'STOP_LOSS' ? 'Stop Limit' : 'Stop'} ${req.lots} lot${req.lots > 1 ? 's' : ''} ${isFut ? 'FUT' : `${c.strike} ${c.type}`} ${lvl}: working, fills when the price gets there` };
       }
       const fillPx = live;
+      const simKey = c.securityId ?? `${c.type}${c.strike}`;
+      const simBefore = simRef.current.legs[simKey]?.netQty ?? 0;
       simFill(c, req.side, size.units, fillPx, symbol);
+      queueDefaultBrackets(simKey, req, { before: simBefore, orderQty: size.units, entry: fillPx, product: '', isReal: false });
       return { ok: true, text: `SIM ${req.side} ${req.lots} lot${req.lots > 1 ? 's' : ''} ${isFut ? 'FUT' : `${c.strike} ${c.type}`} @ ${fillPx.toFixed(2)}` };
     }
 
@@ -763,6 +818,7 @@ export default function IndexScalperTerminal() {
         price: req.price ?? undefined, triggerPrice: req.trigger ?? undefined, product,
       }, req.closesLeg ? 'close' : 'open');
       if (out.ok && before === 0) rememberSpot(sym, f.spot);
+      if (out.ok) queueDefaultBrackets(sym, req, { before, orderQty: kQty, entry: live ?? 0, product, isReal: true });
       refreshAfterOrder();
       void loadOrders();
       return out;
@@ -778,10 +834,11 @@ export default function IndexScalperTerminal() {
       price: req.price ?? undefined, triggerPrice: req.trigger ?? undefined, productType: product,
     }, req.closesLeg ? 'close' : 'open');
     if (out.ok && before === 0) rememberSpot(c.securityId, f.spot);
+    if (out.ok) queueDefaultBrackets(c.securityId, req, { before, orderQty: dQty, entry: live ?? 0, product, isReal: true });
     loadPositions();
     void loadOrders();
     return out;
-  }, [real, sendReal, simFill, setSimOrders, rememberSpot, loadPositions, refreshAfterOrder, loadOrders, underlying]);
+  }, [real, sendReal, simFill, setSimOrders, rememberSpot, loadPositions, refreshAfterOrder, loadOrders, underlying, queueDefaultBrackets]);
 
   const submitTicket = useCallback(async (req: TicketRequest) => {
     if (ticketBusy) return;
@@ -1287,7 +1344,9 @@ export default function IndexScalperTerminal() {
     }
   }, [real, simReady, feed.ltpById, feed.stale, feed.feedAgeSec, feed.marketOpen, underlying, simFill, setSimOrders, flash]);
 
-  const onSetBracket = useCallback(async (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }) => {
+  /** `quiet`: the caller shows one summary (the default target / stop) instead of a message per level. */
+  const onSetBracket = useCallback(async (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }, opts?: { quiet?: boolean }): Promise<Outcome> => {
+    const say = (o: Outcome): Outcome => { if (!opts?.quiet) flash(o); return o; };
     if (!real || req.leg.sim) {
       setSimBrackets(prev => ({
         ...prev,
@@ -1296,8 +1355,7 @@ export default function IndexScalperTerminal() {
           [req.kind === 'TP' ? 'tp' : 'sl']: req.price,
         },
       }));
-      flash({ ok: true, text: `SIM ${req.kind} set at ₹${req.price.toFixed(2)}` });
-      return;
+      return say({ ok: true, text: `SIM ${req.kind} set at ₹${req.price.toFixed(2)}` });
     }
 
     const isLong = req.leg.netQty > 0;
@@ -1315,8 +1373,7 @@ export default function IndexScalperTerminal() {
     });
     const foreign = sameKind.find(o => !o.own);
     if (foreign) {
-      flash({ ok: false, text: `A ${req.kind === 'TP' ? 'target' : 'stop'} placed elsewhere (order ${foreign.id}) already works on ${req.leg.type} ${req.leg.strike}: cancel it first (Orders), nothing sent` });
-      return;
+      return say({ ok: false, text: `A ${req.kind === 'TP' ? 'target' : 'stop'} placed elsewhere (order ${foreign.id}) already works on ${req.leg.type} ${req.leg.strike}: cancel it first (Orders), nothing sent` });
     }
     const existing = sameKind.find(o => o.own);
     if (existing) {
@@ -1337,8 +1394,7 @@ export default function IndexScalperTerminal() {
     // netQty is in the broker's own unit (Dhan MCX: lots; Kotak / SIM / NSE: units): leg.mult converts it.
     const lots = qtyLots(underlying, req.leg.netQty, req.leg.mult ?? 1, feed.lotSize);
     if (lots === null) {
-      flash({ ok: false, text: `Cannot size the ${req.kind}: ${Math.abs(req.leg.netQty)} is not a whole number of lots (or the lot size is unknown)` });
-      return;
+      return say({ ok: false, text: `Cannot size the ${req.kind}: ${Math.abs(req.leg.netQty)} is not a whole number of lots (or the lot size is unknown)` });
     }
 
     const out = await placeContract({
@@ -1352,9 +1408,73 @@ export default function IndexScalperTerminal() {
       // A TP / SL closes this leg: it keeps the leg's product (an MIS crude leg is squared off as MIS).
       closesLeg: true,
     });
-    flash({ ok: out.ok, text: out.text });
     void loadOrders();
+    return say(out);
   }, [real, chartOpenOrders, chartContract, sendCancel, feed.expiry, feed.lotSize, underlying, placeContract, flash, loadOrders]);
+
+  // Default target / stop watcher: a queued default (queueDefaultBrackets) is placed once the book shows its leg on the
+  // expected side and product, filled in full, with a live premium, through onSetBracket like a level typed on the chip.
+  // It is taken off the queue BEFORE anything is sent, so the next pass (the order book still without the new orders)
+  // never sends twice. REAL re-reads the broker first (an Exit / Reverse may have closed the leg since the poll); nothing
+  // runs while an exit, a reverse or a ticket order is in progress. A default that cannot be placed says so, loudly.
+  const defaultsBusyRef = useRef(false);
+  useEffect(() => {
+    const pend = pendingDefaultsRef.current;
+    if (!pend.size) return;
+    const again = () => { const t = setTimeout(() => setPendingSeq(n => n + 1), 1000); return () => clearTimeout(t); };
+    if (defaultsBusyRef.current || exitingId !== null || ticketBusy || reverseBusyRef.current) return again();
+    const warn = (text: string) => { flash({ ok: false, text }); if (soundOnRef.current) playWarnChime(); };
+    const tick = INSTRUMENTS[underlying].optTick;
+    const now = Date.now();
+    for (const [key, { p, real: madeReal }] of [...pend]) {
+      if (madeReal !== real) { pend.delete(key); continue; } // the mode changed since: that book is not on screen
+      const leg = pendingLeg(p, legs.filter(l => l.type !== 'FUT'));
+      const b = leg ? premiumBracketsFor(leg, chartOpenOrders, simBrackets[leg.id]) : null;
+      const plan = defaultBracketPlan(p, leg, { tp: !!b?.tp, sl: !!b?.sl }, tick, now);
+      if (plan.kind === 'wait') continue;
+      pend.delete(key);
+      const name = leg ? `${leg.type} ${leg.strike}` : key;
+      if (plan.kind === 'drop') {
+        if (plan.warn) warn(`No default target / stop on ${name}: ${plan.reason}. Set them on the position chip`);
+        continue;
+      }
+      if (!leg) continue;
+      defaultsBusyRef.current = true;
+      void (async () => {
+        try {
+          let use: ScalperLeg = leg;
+          if (madeReal) {
+            // A fresh broker read, as an exit does: never size or send closing orders off the 3-5 s old poll.
+            const st = await readExitState();
+            if (typeof st === 'string') { warn(`No default target / stop on ${name}: ${st}`); return; }
+            const fresh = pendingLeg(p, st.live.filter(l => l.type !== 'FUT'));
+            if (!fresh) { flash({ ok: true, text: `${name} closed before its default target / stop: nothing sent` }); return; }
+            if (Math.abs(fresh.netQty) < Math.abs(p.expectQty)) { pend.set(key, { p, real: madeReal }); return; } // fill still arriving
+            use = { ...leg, netQty: fresh.netQty, product: fresh.product, mult: fresh.mult };
+          }
+          const outs: string[] = [];
+          let ok = plan.skipped.length === 0;
+          if (plan.tp !== null) {
+            const o = await onSetBracket({ leg: use, kind: 'TP', price: plan.tp }, { quiet: true });
+            outs.push(o.ok ? `TP ${plan.tp.toFixed(2)}` : `TP not set (${o.text})`); ok &&= o.ok;
+          }
+          if (plan.sl !== null) {
+            const o = await onSetBracket({ leg: use, kind: 'SL', price: plan.sl }, { quiet: true });
+            outs.push(o.ok ? `SL ${plan.sl.toFixed(2)}` : `SL not set (${o.text})`); ok &&= o.ok;
+          }
+          const text = `Default ${outs.join(' / ') || 'target / stop'} on ${name}${plan.skipped.length ? `: skipped ${plan.skipped.join('; ')}` : ''}`;
+          if (ok) flash({ ok: true, text }); else warn(text);
+        } finally {
+          defaultsBusyRef.current = false;
+          setPendingSeq(n => n + 1);
+        }
+      })();
+      break; // one leg at a time: the next pass (after this one's sends) takes the next
+    }
+    // Waiting ones are looked at again each second (a leg's live premium may move without the legs list changing).
+    if (!pend.size) return;
+    return again();
+  }, [pendingSeq, legs, chartOpenOrders, simBrackets, real, underlying, onSetBracket, readExitState, flash, exitingId, ticketBusy]);
 
   /** Edit one of this page's working orders: move it to `level` (its line was dragged; a Limit moves its price, an SL-M
    *  its trigger, an SL-limit both by the same amount) and / or change its `lots`. Checked against the live price like a
@@ -1520,8 +1640,8 @@ export default function IndexScalperTerminal() {
     } catch { return null; }
   }, [loadKotakRecords]);
 
-  // While a REAL reverse runs, the flat moment between its close and its open is not a "position closed" event.
-  const reverseBusyRef = useRef(false);
+  // reverseBusyRef (declared with the page state above): while a REAL reverse runs, the flat moment between its close
+  // and its open is not a "position closed" event.
   const reverseReal = useCallback(async (leg: ScalperLeg) => {
     const f = feedRef.current;
     const kotak = brokerRef.current === 'kotak';
@@ -1908,6 +2028,21 @@ export default function IndexScalperTerminal() {
             )}
           </div>
           {sep}
+          <div className="relative flex items-center">
+            <button type="button" aria-label="Default target and stop settings" aria-expanded={defMenu}
+              title={defBrackets.on
+                ? `Every new option position opened here at market gets a target ${defBrackets.tpPct}% and a stop ${defBrackets.slPct}% from its entry premium`
+                : 'Default target / stop is off: new positions get no automatic levels'}
+              onClick={() => setDefMenu(v => !v)}
+              className={cn(btn, 'px-1.5 gap-1 text-xs font-semibold', defMenu && 'bg-zinc-800 text-white')}>
+              <Target className={cn('w-4 h-4', defBrackets.on ? 'text-emerald-400' : 'text-zinc-500')} aria-hidden />
+              <span data-testid="default-brackets-chip" className={defBrackets.on ? 'text-zinc-200' : 'text-zinc-500'}>
+                {defBrackets.on ? `TP ${defBrackets.tpPct}% · SL ${defBrackets.slPct}%` : 'TP/SL off'}
+              </span>
+            </button>
+            {defMenu && <DefaultBracketsMenu settings={defBrackets} onPatch={patchDefBrackets} onClose={() => setDefMenu(false)} />}
+          </div>
+          {sep}
           <div role="group" aria-label="OI shows" className={cn('flex rounded border border-zinc-700 overflow-hidden', !showOi && 'opacity-50')}
             title={showOi ? 'Bars show the total OI, or today\'s change in OI (added = filled, shed = outlined)' : 'Turn the OI profile on first'}>
             {([['total', 'Total'], ['change', 'Chg']] as const).map(([m, label]) => (
@@ -2264,4 +2399,50 @@ function prefixFlash(all: Record<string, 'up' | 'down'>, prefix: string): Record
   const out: Record<string, 'up' | 'down'> = {};
   for (const [k, v] of Object.entries(all)) if (k.startsWith(prefix)) out[k.slice(prefix.length)] = v;
   return out;
+}
+
+/** Default target / stop settings (header "TP / SL" button). Selects, not typed boxes: a half-typed value must never
+ *  reach a live rule (dhan-commit-on-blur). Saved per browser in indexScalper.defaultBrackets.v1. */
+function DefaultBracketsMenu({ settings, onPatch, onClose }: {
+  settings: DefaultBracketSettings; onPatch: (p: Partial<DefaultBracketSettings>) => void; onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Element | null;
+      if (ref.current?.contains(t) || t?.closest?.('[aria-label="Default target and stop settings"]')) return;
+      onClose();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey); };
+  }, [onClose]);
+  const sel = 'h-7 w-16 px-1 rounded border border-zinc-700 bg-zinc-900 text-xs font-mono text-zinc-100 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60';
+  return (
+    <div ref={ref} role="dialog" aria-label="Default target and stop panel"
+      className="absolute left-0 top-9 z-[60] w-64 rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl p-3 flex flex-col gap-2.5 text-xs">
+      <label className="flex items-center justify-between gap-2 font-bold text-zinc-100 cursor-pointer">
+        <span>Default target / stop</span>
+        <Switch size="sm" checked={settings.on} onCheckedChange={on => onPatch({ on })} aria-label="Default target and stop" />
+      </label>
+      <label className="flex items-center justify-between gap-2 text-zinc-300">
+        <span>Target (% of entry)</span>
+        <select aria-label="Default target percent" value={settings.tpPct} disabled={!settings.on} onChange={e => onPatch({ tpPct: Number(e.target.value) })} className={sel}>
+          {TP_PCT_OPTIONS.map(n => <option key={n} value={n}>{n}%</option>)}
+        </select>
+      </label>
+      <label className="flex items-center justify-between gap-2 text-zinc-300">
+        <span>Stop loss (% of entry)</span>
+        <select aria-label="Default stop percent" value={settings.slPct} disabled={!settings.on} onChange={e => onPatch({ slPct: Number(e.target.value) })} className={sel}>
+          {SL_PCT_OPTIONS.map(n => <option key={n} value={n}>{n}%</option>)}
+        </select>
+      </label>
+      <p className="text-[10px] leading-snug text-zinc-500">
+        A new option position opened here at market gets these levels from its entry premium once it shows in the book:
+        a buy&apos;s target above entry and stop below, a sell&apos;s the other way. REAL places a Limit target and an SL-M stop;
+        SIM sets paper levels. Not for futures, added lots or limit entries; a position that already has a target / stop keeps it.
+      </p>
+    </div>
+  );
 }
