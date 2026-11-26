@@ -111,6 +111,16 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
 - Trade-off to state when asked: a running strategy's leg on the same contract can now be closed from here, and the
   strategy will not know.
 
+### Global MTM target / stop (header, 2026-11-26)
+- `MtmGuardControl.tsx` beside Exit All; rules `lib/indexScalperMtmGuard.ts`. Watches the account panel's "Today's Position
+  P&L" (`dayPnl` over `panelPositions`: realized + open, the mode's book for the underlying on screen) and runs
+  `exitAll(true)` (no "opened elsewhere" question) once when it reaches +target or -stop; then switches itself OFF (re-arm
+  by the switch; re-arming while already past a level is refused with a message). Defaults ON, ₹8,000 / ₹8,000, saved
+  per browser in `indexScalper.mtmGuard.v1`; 0 = that side off. Amounts commit on blur / Enter only.
+- Never trips with no open position, a partial total (an unpriced position) or stale prices (`feedAgeSec`). Browser-only:
+  REAL needs the page open and armed. Web Lock `index-scalper-mtm-exit` + a 2 s hold so a second tab's Exit All re-reads a
+  flat book. Because realized P&L counts, a day already past -stop exits any NEW position at once while the guard is on.
+
 ### Reverse position (rebuilt 2026-11-25; rules `lib/indexScalperReverse.ts`)
 - REAL asks first (`Reverse position` dialog), then: fresh positions read (never the chip's 3 s-old qty) -> fresh order
   book -> cancel THIS page's working orders on the closing side of that contract (the old TP / SL would add to the new

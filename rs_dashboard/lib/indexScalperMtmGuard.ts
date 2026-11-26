@@ -1,0 +1,49 @@
+// Index Scalper global MTM target / stop (header, beside Exit All). It watches the page's "Today's Position P&L" (the
+// account panel's day total: realized + open, the mode's book for the underlying on screen) and, when that reaches the
+// target or falls to minus the stop, runs Exit All. Like the Price Ladder's MTM guard it then switches itself OFF:
+// re-arm it to carry on. It never trips on a partial total (an open position with no price) or with no open position.
+// Browser-only: the page must be open (and, for REAL, armed). Pure: no React. Tested in indexScalperMtmGuard.test.ts.
+
+export interface MtmGuardSettings {
+  on: boolean;
+  /** Exit All when the day P&L reaches this many rupees of profit (0 = no target). */
+  target: number;
+  /** Exit All when the day P&L falls to this many rupees of loss, a positive number (0 = no stop). */
+  stop: number;
+}
+
+export const MTM_GUARD_DEFAULTS: MtmGuardSettings = { on: true, target: 8000, stop: 8000 };
+export const MTM_GUARD_MAX = 10_000_000;
+
+/** A rupee amount typed in the header: a whole, non-negative number up to the max; null = not a valid amount. */
+export function parseRupees(raw: string): number | null {
+  const s = raw.replace(/[,\s₹]/g, '');
+  if (!/^\d+$/.test(s)) return null;
+  const n = Number(s);
+  return n <= MTM_GUARD_MAX ? n : null;
+}
+
+/** Saved settings (localStorage JSON), with anything missing or invalid taken from the defaults. */
+export function readMtmGuard(raw: string | null): MtmGuardSettings {
+  let v: Record<string, unknown> = {};
+  try { const p = raw ? JSON.parse(raw) : null; if (p && typeof p === 'object') v = p as Record<string, unknown>; } catch { /* defaults */ }
+  const amt = (x: unknown, d: number) => (typeof x === 'number' && Number.isInteger(x) && x >= 0 && x <= MTM_GUARD_MAX ? x : d);
+  return {
+    on: typeof v.on === 'boolean' ? v.on : MTM_GUARD_DEFAULTS.on,
+    target: amt(v.target, MTM_GUARD_DEFAULTS.target),
+    stop: amt(v.stop, MTM_GUARD_DEFAULTS.stop),
+  };
+}
+
+export type MtmTrip = { kind: 'target' | 'stop'; pnl: number; level: number };
+
+/**
+ * Whether the guard trips now. `pnl` null (book not read) or `unpriced` > 0 (a partial total) never trips; nor does a
+ * book with no open position (a day already past a level, flat, has nothing to exit).
+ */
+export function mtmGuardTrip(g: MtmGuardSettings, pnl: number | null, unpriced: number, openPositions: number): MtmTrip | null {
+  if (!g.on || pnl === null || !Number.isFinite(pnl) || unpriced > 0 || openPositions === 0) return null;
+  if (g.target > 0 && pnl >= g.target) return { kind: 'target', pnl, level: g.target };
+  if (g.stop > 0 && pnl <= -g.stop) return { kind: 'stop', pnl, level: g.stop };
+  return null;
+}

@@ -34,8 +34,10 @@ import OrderTicket, { type TicketRequest, type TicketOrderType } from './OrderTi
 import DhanScalperWidget from './DhanScalperWidget';
 import AccountPanel from './AccountPanel';
 import {
-  fundsView, holdingRows, orderRows, positionRows, symbolLabel, type FundsView, type OrderRowView, type PositionRowView,
+  dayPnl, fundsView, holdingRows, orderRows, positionRows, symbolLabel, type FundsView, type OrderRowView, type PositionRowView,
 } from '@/lib/indexScalperAccount';
+import MtmGuardControl from './MtmGuardControl';
+import { mtmGuardTrip, readMtmGuard, MTM_GUARD_DEFAULTS, type MtmGuardSettings } from '@/lib/indexScalperMtmGuard';
 import IndicatorPicker from './IndicatorPicker';
 import dynamic from 'next/dynamic';
 
@@ -109,6 +111,7 @@ const SIM_KEY = 'indexScalper.sim.v1';
 const SOUND_KEY = 'indexScalper.tradeSound';
 /** SIM trailing stops (REAL ones live in memory only: REAL is armed per page load). */
 const TRAIL_KEY = 'indexScalper.trail.v1';
+const MTM_KEY = 'indexScalper.mtmGuard.v1';
 /** Paper working orders (SIM limits / stops waiting for their price): today's only. */
 const SIM_ORDERS_KEY = 'indexScalper.simOrders.v1';
 const SPOT_KEY = 'indexScalper.entrySpots.v1';
@@ -1052,6 +1055,51 @@ export default function IndexScalperTerminal() {
       refreshAfterOrder();
     } finally { setExitingId(null); }
   }, [exitingId, legs, real, openedHere, exitSimLeg, readExitState, exitRealRow, refreshAfterOrder, flash]);
+
+  // ── global MTM target / stop (lib/indexScalperMtmGuard.ts) ────────────────────────────────────────────────────────
+  // Watches the account panel's "Today's Position P&L" (same number, same book) and runs Exit All once when it reaches the
+  // target or falls to minus the stop, then switches itself off (re-arm to carry on), like the Price Ladder's guard.
+  // Paused on stale prices or a partial total. Browser-only: the page must be open (REAL: armed). A Web Lock and a
+  // 2 s hold after the exit keep a second open tab from closing the same book twice (its Exit All re-reads it).
+  const [mtm, setMtm] = useState<MtmGuardSettings>(MTM_GUARD_DEFAULTS);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- per-viewer settings read after mount (no SSR mismatch)
+    setMtm(readMtmGuard(readPref(MTM_KEY)));
+  }, []);
+  const saveMtm = useCallback((next: MtmGuardSettings) => { setMtm(next); savePref(MTM_KEY, JSON.stringify(next)); }, []);
+  const [mtmNote, setMtmNote] = useState<string | null>(null);
+  const mtmFiringRef = useRef(false);
+  const dayTotal = useMemo(() => dayPnl(panelPositions, real ? realLoaded && !posErr : true), [panelPositions, real, realLoaded, posErr]);
+  const pricesLive = !feed.stale && feed.feedAgeSec !== null;
+  useEffect(() => {
+    if (!mtm.on || mtmFiringRef.current || exitingId !== null || legs.length === 0) return;
+    if (!pricesLive) return; // a P&L on old prices must not exit (or hold) anything
+    const trip = mtmGuardTrip(mtm, dayTotal.pnl, dayTotal.unpriced, legs.length);
+    if (!trip) return;
+    mtmFiringRef.current = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- switching the guard off for the trip the P&L update just caused
+    saveMtm({ ...mtm, on: false });
+    const what = trip.kind === 'target' ? `target ₹${trip.level.toLocaleString('en-IN')} reached` : `stop loss ₹${trip.level.toLocaleString('en-IN')} hit`;
+    const text = `MTM ${what} (P&L ${trip.pnl >= 0 ? '+' : ''}${Math.round(trip.pnl).toLocaleString('en-IN')}): Exit All${real ? '' : ' (SIM)'}. The MTM exit is now off; switch it on to re-arm.`;
+    setMtmNote(`${trip.kind === 'target' ? 'Target' : 'Stop'} hit: exited, now off`);
+    flash({ ok: trip.kind === 'target', text });
+    if (soundOnRef.current) playWarnChime();
+    const run = async () => { await exitAll(true); if (real) await new Promise(r => setTimeout(r, 2000)); };
+    const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+    void (locks?.request ? locks.request('index-scalper-mtm-exit', run) : run()).finally(() => { mtmFiringRef.current = false; });
+  }, [mtm, dayTotal, legs.length, exitingId, pricesLive, real, saveMtm, exitAll, flash]);
+  const onMtmChange = useCallback((next: MtmGuardSettings) => {
+    if (next.on && !mtm.on) {
+      // Re-arming past a level would exit at once: say so rather than surprise.
+      const t = mtmGuardTrip(next, dayTotal.pnl, dayTotal.unpriced, legs.length);
+      if (t) { flash({ ok: false, text: `Day P&L ${Math.round(t.pnl).toLocaleString('en-IN')} is already past the ${t.kind}: raise it before switching the MTM exit on` }); return; }
+    }
+    setMtmNote(null);
+    saveMtm(next);
+  }, [mtm.on, dayTotal, legs.length, saveMtm, flash]);
+  const mtmShownNote = mtmNote ?? (mtm.on && legs.length > 0
+    ? (!pricesLive ? 'paused: prices stale' : dayTotal.unpriced > 0 ? 'paused: a position has no price' : null)
+    : null);
 
   // ── trailing stop loss (TSL) ───────────────────────────────────────
   // Browser-only (owner's choice, 2026-11-25): no broker order. The stop follows the best price of the leg's own
@@ -2186,6 +2234,7 @@ export default function IndexScalperTerminal() {
           <button type="button" aria-label="Reset scale" title="Reset scale: auto-scale the price axis and fit the time axis (undo a manual zoom)"
             onClick={() => { setAutoScale(true); setResetSeq(n => n + 1); }} className={btn}><Scaling className="w-4 h-4" /></button>
           <button type="button" aria-label="Refresh candles" title="Refresh candles" onClick={() => setRefreshTick(n => n + 1)} className={btn}><RefreshCw className={cn('w-4 h-4', loadingBars && 'animate-spin')} /></button>
+          <MtmGuardControl settings={mtm} onChange={onMtmChange} note={mtmShownNote} />
           <button type="button" disabled={legs.length === 0 || exitingId !== null} onClick={() => void exitAll()}
             className="h-7 px-2 rounded border border-rose-500/70 text-rose-300 hover:bg-rose-500/10 text-xs font-bold disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400">
             Exit All

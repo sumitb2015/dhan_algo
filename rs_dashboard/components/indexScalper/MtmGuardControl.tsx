@@ -1,0 +1,58 @@
+'use client';
+
+// Header control for the global MTM target / stop (lib/indexScalperMtmGuard.ts): an on / off switch, the target and stop
+// in rupees, and what it is doing. The amounts are free-typed, so they commit on blur / Enter only (dhan-commit-on-blur):
+// typing 8000 must never briefly arm a stop of 8. Esc reverts the box.
+
+import { useEffect, useRef, useState } from 'react';
+import { Switch } from '@/components/ui/switch';
+import { cn } from '@/lib/utils';
+import { parseRupees, type MtmGuardSettings } from '@/lib/indexScalperMtmGuard';
+
+function RupeeBox({ label, value, onCommit, cls }: { label: string; value: number; onCommit: (v: number) => void; cls: string }) {
+  const [draft, setDraft] = useState(String(value));
+  const [bad, setBad] = useState(false);
+  const focused = useRef(false);
+  useEffect(() => { if (!focused.current) { setDraft(String(value)); setBad(false); } }, [value]);
+  const commit = (raw: string) => {
+    const n = parseRupees(raw);
+    if (n === null) { setBad(true); return; } // keep the last good value; the box says it was not taken
+    setBad(false);
+    if (n !== value) onCommit(n);
+    setDraft(String(n));
+  };
+  return (
+    <label className="flex items-center gap-1">
+      <span className={cn('text-[10px] font-bold', cls)}>{label}</span>
+      <input inputMode="numeric" aria-label={`MTM ${label === 'T' ? 'target' : 'stop loss'} in rupees`} aria-invalid={bad} value={draft}
+        onFocus={() => { focused.current = true; }}
+        onChange={e => setDraft(e.target.value)}
+        onBlur={e => { focused.current = false; commit(e.currentTarget.value); }}
+        onKeyDown={e => {
+          if (e.key === 'Enter') { commit(e.currentTarget.value); e.currentTarget.blur(); }
+          if (e.key === 'Escape') { setDraft(String(value)); setBad(false); e.currentTarget.blur(); }
+          e.stopPropagation();
+        }}
+        className={cn('h-6 w-[62px] px-1 rounded border bg-zinc-900 text-[11px] font-mono tabular-nums text-zinc-100 text-right focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
+          bad ? 'border-amber-500' : 'border-zinc-700')} />
+    </label>
+  );
+}
+
+export default function MtmGuardControl({ settings, onChange, note }: {
+  settings: MtmGuardSettings;
+  onChange: (s: MtmGuardSettings) => void;
+  /** Why it is paused / what it did last, shown small beside the boxes. */
+  note: string | null;
+}) {
+  return (
+    <div role="group" aria-label="MTM target and stop loss" data-testid="mtm-guard"
+      className={cn('h-7 px-1.5 flex items-center gap-1.5 rounded border', settings.on ? 'border-sky-500/50' : 'border-zinc-700')}>
+      <Switch size="sm" checked={settings.on} onCheckedChange={on => onChange({ ...settings, on })} aria-label="MTM target / stop loss exit" />
+      <span className="text-[10px] font-bold text-zinc-300">MTM</span>
+      <RupeeBox label="T" value={settings.target} cls="text-emerald-400" onCommit={target => onChange({ ...settings, target })} />
+      <RupeeBox label="SL" value={settings.stop} cls="text-rose-400" onCommit={stop => onChange({ ...settings, stop })} />
+      {note && <span data-testid="mtm-guard-note" className="text-[10px] text-amber-300 whitespace-nowrap">{note}</span>}
+    </div>
+  );
+}
