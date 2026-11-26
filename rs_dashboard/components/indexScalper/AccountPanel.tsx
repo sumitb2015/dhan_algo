@@ -106,7 +106,7 @@ export default function AccountPanel(p: AccountPanelProps) {
       <div className="flex items-start justify-between gap-4 px-3 pt-2">
         <div className="flex items-center gap-2 pt-1">
           <span className="font-bold text-zinc-100 text-xs">{p.brokerName.toUpperCase()}</span>
-          <span className={cn('text-[9px] font-bold px-1.5 py-px rounded border', p.real ? 'text-rose-400 border-rose-500/40 bg-rose-500/10' : 'text-amber-300 border-amber-500/40 bg-amber-500/10')}>
+          <span className={cn('text-[10px] font-bold px-1.5 py-px rounded border', p.real ? 'text-rose-400 border-rose-500/40 bg-rose-500/10' : 'text-amber-300 border-amber-500/40 bg-amber-500/10')}>
             {p.real ? `REAL · ${p.brokerName}` : 'SIM · paper positions'}
           </span>
           <button type="button" aria-label="Download this table as CSV" title="Download CSV" onClick={download}
@@ -146,11 +146,11 @@ export default function AccountPanel(p: AccountPanelProps) {
             </div>
           )}
 
-          <div className="h-[200px] overflow-auto px-1 pb-1">
+          <div role="tabpanel" aria-label={tabs.find(t => t.key === tab)?.label} className="h-[clamp(130px,22vh,220px)] overflow-auto px-1 pb-1">
             <table className="w-full tabular-nums">
               {tab === 'positions' && (
                 <>
-                  <thead className="sticky top-0 bg-zinc-800"><tr><Th>Symbol</Th><Th>Product</Th><Th right>Qty</Th><Th right>Avg</Th><Th right>LTP</Th><Th right>P&amp;L</Th><Th right>{''}</Th></tr></thead>
+                  <thead className="sticky top-0 bg-zinc-800"><tr><Th>Symbol</Th><Th>Product</Th><Th right>Qty</Th><Th right>Avg</Th><Th right>LTP</Th><Th right>P&amp;L</Th><Th right><span className="sr-only">Action</span></Th></tr></thead>
                   <tbody>
                     {p.errors.positions && <Empty cols={7} text={`Positions: ${p.errors.positions}`} />}
                     {!p.errors.positions && openRows.length === 0 && <Empty cols={7} text="No open positions" />}
@@ -281,7 +281,7 @@ function Stat({ label, value, cls, testId, note, noteTitle }: { label: string; v
     <div className="px-4 first:pl-0 last:pr-0">
       <div className="text-[11px] text-zinc-400 whitespace-nowrap">{label}</div>
       <div className="flex items-baseline gap-1.5">
-        <span data-testid={testId} className={cn('text-xs font-semibold', cls)}>{value}</span>
+        <span data-testid={testId} className={cn('text-sm font-bold', cls)}>{value}</span>
         {note && <span data-testid={testId ? `${testId}-partial` : undefined} title={noteTitle} className="text-[10px] text-amber-300 whitespace-nowrap">{note}</span>}
       </div>
     </div>

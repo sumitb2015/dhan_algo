@@ -52,6 +52,7 @@ export default function MtmGuardControl({ settings, onChange, note, pnl, scope }
 }) {
   return (
     <div role="group" aria-label="MTM target and stop loss" data-testid="mtm-guard"
+      title="MTM exit: T = target and SL = stop loss in rupees on this underlying's day P&L. When either is reached, every position on it is exited once."
       className={cn('h-7 px-1.5 flex items-center gap-1.5 rounded border', settings.on ? 'border-sky-500/50' : 'border-zinc-700')}>
       <Switch size="sm" checked={settings.on} onCheckedChange={on => onChange({ ...settings, on })} aria-label="MTM target / stop loss exit" />
       <span className="text-[10px] font-bold text-zinc-300">MTM</span>

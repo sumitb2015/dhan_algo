@@ -25,3 +25,12 @@ export function useDraggable(initial: { x: number; y: number }) {
 
   return { pos, handle: { onPointerDown, onPointerMove, onPointerUp } };
 }
+
+// The terminal's header grows to two rows on a laptop width, so a fixed top would cover its right-hand controls
+// (fullscreen, nav, the SIM / REAL switch): open just under whatever height it has now.
+export function belowHeaderY(): number {
+  if (typeof document === 'undefined') return 65;
+  const h = document.querySelector('[data-testid="index-scalper"] > div');
+  return h ? Math.round(h.getBoundingClientRect().bottom) + 8 : 65;
+}
+

@@ -32,6 +32,7 @@ import ChartPane, { type PaneCfg } from './ChartPane';
 import OptionChainPanel, { type PickedContract } from './OptionChainPanel';
 import OrderTicket, { type TicketRequest, type TicketOrderType } from './OrderTicket';
 import DhanScalperWidget from './DhanScalperWidget';
+import { belowHeaderY } from './useDraggable';
 import AccountPanel from './AccountPanel';
 import {
   dayPnl, fundsView, holdingRows, orderRows, positionRows, symbolLabel, type FundsView, type OrderRowView, type PositionRowView,
@@ -2098,6 +2099,7 @@ export default function IndexScalperTerminal() {
 
   const btn = 'h-7 px-2 rounded text-xs font-semibold text-zinc-300 hover:bg-zinc-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60 transition-colors';
   const sep = <span className="w-px h-5 bg-zinc-800 shrink-0" />;
+  const scaleBtn = 'h-6 px-1.5 rounded hover:text-white hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60 transition-colors';
 
   const toolBtn = (t: DrawTool, label: string, Icon: typeof Minus) => (
     <button key={t} type="button" aria-label={label} title={label} aria-pressed={tool === t} onClick={() => setTool(tool === t ? 'cursor' : t)}
@@ -2130,7 +2132,8 @@ export default function IndexScalperTerminal() {
       {/* header toolbar */}
       {/* Wraps onto a second line when the controls do not fit (a laptop width): overlapping groups hid REAL / SIM. */}
       <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 px-3 py-1.5 min-h-11 border-b border-zinc-800 bg-zinc-950 shrink-0">
-        <div className="flex items-center gap-1.5 whitespace-nowrap [&>*]:shrink-0">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0 whitespace-nowrap [&>*]:shrink-0">
+          <div className="flex items-center gap-1.5">
           <div role="group" aria-label="Underlying" className="flex rounded border border-zinc-700 overflow-hidden" title={real ? 'Switch to SIM to change underlying: a REAL session trades one account' : undefined}>
             <button
               type="button"
@@ -2217,7 +2220,8 @@ export default function IndexScalperTerminal() {
           <button type="button" onClick={() => { setEditId(null); setPickerOpen(true); }} className={cn(btn, 'flex items-center gap-1')}>
             <BarChart3 className="w-4 h-4" />Indicators{indicators.length > 0 && <span className="text-sky-400">{indicators.length}</span>}
           </button>
-          {sep}
+          </div>
+          <div className="flex items-center gap-1.5">
           {isMcx(underlying) && (
             <>
               <button
@@ -2244,7 +2248,8 @@ export default function IndexScalperTerminal() {
               scalperOn ? 'border-amber-400 text-amber-300 bg-amber-500/10' : 'border-sky-500/60 text-sky-300 hover:bg-sky-500/10')}>
             <Zap className="w-3.5 h-3.5" />Scalper
           </button>
-          {sep}
+          </div>
+          <div className="flex items-center gap-1.5">
           <button type="button" aria-pressed={!soundOn} aria-label={soundOn ? 'Mute trade chimes' : 'Unmute trade chimes'}
             title={soundOn ? 'Trade chimes on: entry, exit and order problems (sounds start after your first click on the page). Click to mute.' : 'Trade chimes muted. Click to turn them on.'}
             onClick={() => setSoundOn(!soundOn)} className={cn(btn, !soundOn && 'text-zinc-500')}>
@@ -2267,11 +2272,14 @@ export default function IndexScalperTerminal() {
           <button type="button" aria-label="Reset scale" title="Reset scale: auto-scale the price axis and fit the time axis (undo a manual zoom)"
             onClick={() => { setAutoScale(true); setResetSeq(n => n + 1); }} className={btn}><Scaling className="w-4 h-4" /></button>
           <button type="button" aria-label="Refresh candles" title="Refresh candles" onClick={() => setRefreshTick(n => n + 1)} className={btn}><RefreshCw className={cn('w-4 h-4', loadingBars && 'animate-spin')} /></button>
+          </div>
+          <div className="flex items-center gap-1.5">
           <MtmGuardControl settings={mtm} onChange={onMtmChange} note={mtmShownNote} pnl={dayTotal.pnl} scope={underlying} />
           <button type="button" disabled={legs.length === 0 || exitingId !== null} onClick={() => void exitAll()}
             className="h-7 px-2 rounded border border-rose-500/70 text-rose-300 hover:bg-rose-500/10 text-xs font-bold disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400">
             Exit All
           </button>
+          </div>
         </div>
         <div className="flex items-center gap-2 shrink-0 ml-auto">
           <IstClock suffix=" IST" title="Current time (IST)" className="h-7 px-2 flex items-center rounded border border-zinc-700 bg-zinc-900 text-xs font-bold tabular-nums font-mono text-zinc-100" />
@@ -2362,15 +2370,15 @@ export default function IndexScalperTerminal() {
       <div className="flex items-center justify-between px-3 h-8 border-t border-zinc-800 text-[11px] text-zinc-400 shrink-0">
         <div className="flex items-center gap-1">
           {RANGES.map(r => (
-            <button key={r.label} type="button" className={btn} onClick={() => { setDays(r.days); setFocus(f => ({ seconds: r.focus, seq: (f?.seq ?? 0) + 1 })); }}>{r.label}</button>
+            <button key={r.label} type="button" title={`Show the last ${r.label}`} className={btn} onClick={() => { setDays(r.days); setFocus(f => ({ seconds: r.focus, seq: (f?.seq ?? 0) + 1 })); }}>{r.label}</button>
           ))}
         </div>
         <div className="flex items-center gap-3 tabular-nums font-mono">
           <IstClock suffix=" (UTC+05:30)" />
-          <button type="button" aria-pressed={pctScale} onClick={() => { setPctScale(v => !v); setLogScale(false); }} className={cn('hover:text-white', pctScale && 'text-sky-400')}>%</button>
-          <button type="button" aria-pressed={logScale} onClick={() => { setLogScale(v => !v); setPctScale(false); }} className={cn('hover:text-white', logScale && 'text-sky-400')}>log</button>
-          <button type="button" aria-pressed={autoScale} onClick={() => setAutoScale(v => !v)} className={cn('hover:text-white', autoScale && 'text-sky-400')}>auto</button>
-          <button type="button" aria-pressed={showGrid} aria-label="Grid" title="Background grid lines on / off (remembered)" onClick={toggleGrid} className={cn('hover:text-white', showGrid && 'text-sky-400')}>grid</button>
+          <button type="button" aria-pressed={pctScale} title="Price axis in % change from the first visible bar" onClick={() => { setPctScale(v => !v); setLogScale(false); }} className={cn(scaleBtn, pctScale && 'text-sky-400')}>%</button>
+          <button type="button" aria-pressed={logScale} title="Logarithmic price axis" onClick={() => { setLogScale(v => !v); setPctScale(false); }} className={cn(scaleBtn, logScale && 'text-sky-400')}>log</button>
+          <button type="button" aria-pressed={autoScale} title="Auto-fit the price axis to the visible bars" onClick={() => setAutoScale(v => !v)} className={cn(scaleBtn, autoScale && 'text-sky-400')}>auto</button>
+          <button type="button" aria-pressed={showGrid} aria-label="Grid" title="Background grid lines on / off (remembered)" onClick={toggleGrid} className={cn(scaleBtn, showGrid && 'text-sky-400')}>grid</button>
         </div>
       </div>
 
@@ -2406,11 +2414,11 @@ export default function IndexScalperTerminal() {
       )}
       {watchIdx && (
         <MarketWatchWindow kind="indices" rows={watchIdxRows} updatedAt={watch.data.indices?.updated_at ?? null}
-          flash={watchIdxFlash} now={watch.now} initial={{ x: 16, y: 64 }} onClose={() => setWatchIdx(false)} />
+          flash={watchIdxFlash} now={watch.now} initial={{ x: 64, y: belowHeaderY() }} onClose={() => setWatchIdx(false)} />
       )}
       {watchStk && (
         <MarketWatchWindow kind="stocks" rows={watchStkRows} updatedAt={watch.data.stocks?.updated_at ?? null}
-          flash={watchStkFlash} now={watch.now} initial={{ x: 392, y: 64 }} onClose={() => setWatchStk(false)} />
+          flash={watchStkFlash} now={watch.now} initial={{ x: 400, y: belowHeaderY() }} onClose={() => setWatchStk(false)} />
       )}
       {chainOpen && (
         <OptionChainPanel feed={feed} onClose={() => setChainOpen(false)} onPick={c => { setTicket(c); setTicketMsg(null); }}
@@ -2520,7 +2528,7 @@ function QuickSettingsMenu({ settings, onPatch, nrmlLocked, maxLots, onClose }: 
   const product = nrmlLocked ? 'MARGIN' : settings.product;
   return (
     <div ref={ref} role="dialog" aria-label="Quick Trade settings panel"
-      className="absolute left-0 top-9 z-[60] w-60 rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl p-3 flex flex-col gap-2.5 text-xs">
+      className="absolute left-0 top-9 z-[60] w-60 rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl p-3 flex flex-col gap-2.5 text-xs whitespace-normal">
       <div className="font-bold text-zinc-100">Quick Trade</div>
       <label className="flex items-center justify-between gap-2 text-zinc-300">
         <span>Buy lots per click</span>
@@ -2589,7 +2597,7 @@ function DefaultBracketsMenu({ settings, onPatch, onClose }: {
   const sel = 'h-7 w-16 px-1 rounded border border-zinc-700 bg-zinc-900 text-xs font-mono text-zinc-100 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60';
   return (
     <div ref={ref} role="dialog" aria-label="Default target and stop panel"
-      className="absolute left-0 top-9 z-[60] w-64 rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl p-3 flex flex-col gap-2.5 text-xs">
+      className="absolute left-0 top-9 z-[60] w-64 rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl p-3 flex flex-col gap-2.5 text-xs whitespace-normal">
       <label className="flex items-center justify-between gap-2 font-bold text-zinc-100 cursor-pointer">
         <span>Default target / stop</span>
         <Switch size="sm" checked={settings.on} onCheckedChange={on => onPatch({ on })} aria-label="Default target and stop" />

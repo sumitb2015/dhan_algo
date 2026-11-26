@@ -16,7 +16,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, Settings, X, Zap } from 'lucide-react';
 import type { IndexScalperFeed } from './useIndexScalperFeed';
 import type { PickedContract } from './OptionChainPanel';
-import { useDraggable } from './useDraggable';
+import { belowHeaderY, useDraggable } from './useDraggable';
 import { INSTRUMENTS, isMcx, nrmlOnly } from '@/lib/indexScalperInstrument';
 import {
   calcOptionBuyReq, computeAtmStrikes, formatDhanExpiry, formatManageScripExpiry, getStrikeOffsetLabel,
@@ -113,7 +113,7 @@ function useSellMargin(underlying: string, expiry: string, strike: number | null
 }
 
 export default function DhanScalperWidget({ feed, real, broker, busy, topLots, onTopLotsChange, onTradeContract, onClose }: DhanScalperWidgetProps) {
-  const { pos, handle } = useDraggable({ x: Math.max(16, (typeof window === 'undefined' ? 1200 : window.innerWidth) - 400), y: 65 });
+  const { pos, handle } = useDraggable({ x: Math.max(16, (typeof window === 'undefined' ? 1200 : window.innerWidth) - 400), y: belowHeaderY() });
 
   const [ceLots, setCeLots] = useState(1);
   const [peLots, setPeLots] = useState(1);
