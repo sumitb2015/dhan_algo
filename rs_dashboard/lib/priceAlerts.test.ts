@@ -141,3 +141,31 @@ test('expire-at-date means that day\'s session close: NSE 15:30, MCX 23:30 / 23:
   assert.equal(sessionCloseMs('CRUDEOILM', '2026-12-16'), ist(23, 55, '2026-12-16'));   // US winter time
   assert.equal(sessionCloseMs('CRUDEOIL', '2026-06-16'), ist(23, 30, '2026-06-16'));    // US summer time
 });
+
+test('trade alerts: Greater Than already true on the first price does NOT trade; it must go false and come back', () => {
+  const a = { condition: 'gt' as const, value: 100, trigger: 'once' as const };
+  const r1 = stepAlert(a, undefined, 105, 0, true);
+  assert.equal(r1.fire, false, 'already above at creation / restart: no order');
+  const r2 = stepAlert(a, r1.mem, 106, 500, true);
+  assert.equal(r2.fire, false, 'still above');
+  const r3 = stepAlert(a, r2.mem, 99, 1000, true);
+  const r4 = stepAlert(a, r3.mem, 101, 1500, true);
+  assert.equal(r4.fire, true, 'moved back above: trades');
+  assert.equal(stepAlert(a, undefined, 105, 0).fire, true, 'a notify alert still fires on the level at once (TradingView)');
+  const b = stepAlert(a, undefined, 95, 0, true);
+  assert.equal(stepAlert(a, b.mem, 101, 500, true).fire, true, 'below at creation, then above: trades');
+});
+
+test('trade block: MIS refused from the intraday cutoff (NSE 15:17, MCX auto-exit); NRML is not', () => {
+  const armed = { armedOn: '2026-11-26' };
+  assert.equal(tradeBlock(armed, base(), ist(15, 16)), null);
+  assert.match(String(tradeBlock(armed, base(), ist(15, 17))), /15:17 intraday \(MIS\) cutoff/);
+  const nrml = base({ action: { ...(base().action as Extract<PriceAlert['action'], { kind: 'trade' }>), product: 'MARGIN' } });
+  assert.equal(tradeBlock(armed, nrml, ist(15, 20)), null);
+  assert.match(String(tradeBlock(armed, base(), ist(15, 0), { nse: 1500 })), /15:00/);
+  const mcx = base({ action: { kind: 'trade', side: 'BUY', lots: 1, product: 'INTRADAY',
+    contract: { kind: 'future', segment: 'MCX_COMM', securityId: '1', displayName: 'CRUDEOILM FUT', underlying: 'CRUDEOILM', expiry: '2026-12-18', lot: 10 } } });
+  assert.equal(tradeBlock(armed, mcx, ist(23, 0)), null);
+  assert.match(String(tradeBlock(armed, mcx, ist(23, 40))), /23:40/);         // US winter: auto-exit 23:40
+  assert.match(String(tradeBlock(armed, mcx, ist(23, 20), { mcx: 2315 })), /23:15/);
+});

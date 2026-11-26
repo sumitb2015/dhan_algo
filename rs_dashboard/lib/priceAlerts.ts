@@ -117,6 +117,8 @@ export interface AlertsView {
   defaultSoundSec: number;
   version: number;
   log: AlertEvent[];
+  /** The server watcher: running = ticked in the last 5 s; unpriced = active alert ids with no usable live price for 20 s+. */
+  watcher?: { running: boolean; unpriced: string[] };
 }
 
 export const emptyAlertsState = (): AlertsState => ({ alerts: [], armedOn: null, defaultSoundSec: DEFAULT_SOUND_SEC, version: 0 });
@@ -144,12 +146,16 @@ export interface AlertMemory { prev: number; armed: boolean; lastFireAt: number 
  */
 export function stepAlert(
   a: Pick<PriceAlert, 'condition' | 'value' | 'trigger'>, mem: AlertMemory | undefined, cur: number, now: number,
+  /** Trade alerts: the first sample never fires, even for Greater / Less Than — the price must MOVE into the condition
+   *  (already above the level when created or after a restart = wait until it has been below and comes back). */
+  baselineFirst = false,
 ): { fire: boolean; mem: AlertMemory } {
   const prev = mem ? mem.prev : null;
   const met = conditionMet(a.condition, a.value, prev, cur);
+  const isState = a.condition === 'gt' || a.condition === 'lt';
+  if (!mem && baselineFirst) return { fire: false, mem: { prev: cur, armed: !(met && isState), lastFireAt: Number.NEGATIVE_INFINITY } };
   const armed = mem ? mem.armed : true;
   const lastFireAt = mem ? mem.lastFireAt : Number.NEGATIVE_INFINITY;
-  const isState = a.condition === 'gt' || a.condition === 'lt';
   if (!met) return { fire: false, mem: { prev: cur, armed: true, lastFireAt } };
   const cooled = a.trigger === 'once' || now - lastFireAt >= EVERY_COOLDOWN_MS;
   if (armed && cooled) return { fire: true, mem: { prev: cur, armed: !isState, lastFireAt: now } };
@@ -190,13 +196,26 @@ export function sessionOpen(segment: AlertSegment, now: number): boolean {
   return isRegularSession(iso) && t >= 915 && t < 1530;
 }
 
-/** Why a firing trade alert must not send its order (it still notifies), or null when it may. */
-export function tradeBlock(state: Pick<AlertsState, 'armedOn'>, a: PriceAlert, now: number): string | null {
+/** The repo's intraday (MIS) cutoffs in IST hhmm: NSE 15:17 (CLAUDE.md), MCX the session's auto-exit. */
+export interface MisCutoffs { nse: number; mcx: number }
+
+const label = (t: number) => `${String(Math.floor(t / 100)).padStart(2, '0')}:${String(t % 100).padStart(2, '0')}`;
+
+/**
+ * Why a firing trade alert must not send its order (it still notifies), or null when it may. An intraday (MIS) order is
+ * refused from the intraday cutoff on (`mis`: the dashboard's NSE / MCX auto-exit settings; default NSE 15:17 and
+ * mcxSession's auto-exit), so an alert never opens a position minutes before it is squared off.
+ */
+export function tradeBlock(state: Pick<AlertsState, 'armedOn'>, a: PriceAlert, now: number, mis?: Partial<MisCutoffs>): string | null {
   if (a.action.kind !== 'trade') return 'Not a trade alert';
   const c = a.action.contract;
   if (state.armedOn !== istDateIso(now)) return 'REAL orders are not armed today — order skipped';
   if (c.expiry && c.expiry < istDateIso(now)) return `${c.displayName} has expired — order skipped`;
   if (!sessionOpen(c.segment, now)) return `${c.segment === 'MCX_COMM' ? 'MCX' : 'NSE'} market is closed — order skipped`;
+  if (a.action.product === 'INTRADAY') {
+    const cutoff = c.segment === 'MCX_COMM' ? (mis?.mcx ?? mcxSession(istDateIso(now)).autoExit) : (mis?.nse ?? 1517);
+    if (hhmm(now) >= cutoff) return `Past the ${label(cutoff)} intraday (MIS) cutoff — order skipped`;
+  }
   if (!alertOrderQty(c, a.action.lots)) return `Lots must be 1-${MAX_ALERT_LOTS} with a known lot size — order skipped`;
   return null;
 }

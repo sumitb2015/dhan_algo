@@ -32,12 +32,13 @@ interface State { want: Map<string, number>; written: string; writtenAt: number;
 export interface BridgeWsClient {
   /** Ask for an instrument; returns its quote key (`SEGMENT:securityId`). Call sync() after a batch of asks. */
   want(segment: WsSegment, securityId: string): string;
-  /** Write this process's wanted file (on change and every 20 s) and start the bridge when it is not running. */
-  sync(): void;
+  /** Write this process's wanted file (on change and every 20 s) and start the bridge when it is not running. Returns the
+   *  quotes file it read for the running check (pass it to prices() to skip a second parse), or null when it read none. */
+  sync(): Record<string, unknown> | null;
   /** The bridge's quote for `key`, or null (bridge down, hub down, not subscribed long enough). Reads the file. */
   price(key: string): WsPrice | null;
-  /** Several quotes from ONE read of the quotes file. */
-  prices(keys: string[]): Map<string, WsPrice | null>;
+  /** Several quotes from ONE read of the quotes file (or from `file`, what sync() just read). */
+  prices(keys: string[], file?: Record<string, unknown> | null): Map<string, WsPrice | null>;
 }
 
 /** `name`: lowercase letters / underscore (the bridge's file names). `stateKey`: the globalThis slot for this client. */
@@ -64,26 +65,28 @@ export function createBridgeWsClient(name: string, stateKey: string, tag: string
       try {
         if (!keys.length) {
           if (st.written) { fs.rmSync(wantedFile, { force: true }); st.written = ''; }
-          return;
+          return null;
         }
         if (sig !== st.written || now - st.writtenAt >= REWRITE_MS) {
           writeJsonAtomic(wantedFile, { pid: process.pid, updated_ms: now, instruments: keys.map(k => k.split(':')) });
           st.written = sig; st.writtenAt = now;
         }
       } catch {
-        return; // the next sync retries
+        return null; // the next sync retries
       }
       const quotes = readJsonFile<Record<string, unknown>>(quotesFile);
-      if (bridgeRunning({ quotes, statusFile, fileStaleMs: FILE_STALE_MS, heartbeatStaleMs: HEARTBEAT_STALE_MS })) return;
-      if (now - st.startAt < START_EVERY_MS) return;
-      st.startAt = now;
-      startBridge({ script: SCRIPT, lockFile: startLock, logFile, tag, args: ['--name', name] });
+      if (bridgeRunning({ quotes, statusFile, fileStaleMs: FILE_STALE_MS, heartbeatStaleMs: HEARTBEAT_STALE_MS })) return quotes;
+      if (now - st.startAt >= START_EVERY_MS) {
+        st.startAt = now;
+        startBridge({ script: SCRIPT, lockFile: startLock, logFile, tag, args: ['--name', name] });
+      }
+      return quotes;
     },
     price(key) {
       return usableQuote(readJsonFile(quotesFile), key, Date.now());
     },
-    prices(keys) {
-      const file = readJsonFile<Record<string, unknown>>(quotesFile);
+    prices(keys, read) {
+      const file = read !== undefined ? read : readJsonFile<Record<string, unknown>>(quotesFile);
       const now = Date.now();
       return new Map(keys.map(k => [k, usableQuote(file, k, now)]));
     },

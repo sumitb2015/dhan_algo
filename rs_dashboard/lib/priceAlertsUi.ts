@@ -46,6 +46,14 @@ export function usePriceAlertsUi(): UiState {
   return useSyncExternalStore(priceAlertsStore.subscribe, priceAlertsStore.get, () => SERVER_STATE);
 }
 
+const getView = () => state.view;
+const getServerView = () => null;
+
+/** Only the alerts view: a component using this does not re-render when the panel or dialog opens or closes (charts). */
+export function usePriceAlertsView(): AlertsView | null {
+  return useSyncExternalStore(priceAlertsStore.subscribe, getView, getServerView);
+}
+
 /** Active + paused alerts watching this exact instrument (Dhan segment + security id) — for chart lines. */
 export function alertsFor(view: AlertsView | null, segment: string, securityId: string): PriceAlert[] {
   if (!view) return [];

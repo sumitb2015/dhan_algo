@@ -8,6 +8,8 @@ import { placeDhanOrder } from '@/lib/dhanPlaceOrder';
 import { globalOnce } from '@/lib/globalOnce';
 import { indexSpotId, resolveFuture, resolveOption } from '@/lib/pnfContracts';
 import { istDateIso } from '@/lib/nseHolidays';
+import { mcxSession } from '@/lib/mcxSession';
+import { readLadderSettings, timeStringToHhmm } from '@/lib/priceLadderSettings';
 import {
   alertCorrelationId, alertLabel, alertOrderQty, appendLog, emptyAlertsState, expiryReason, newId, stepAlert, tradeBlock, tradeLine,
   DEFAULT_SOUND_SEC,
@@ -182,6 +184,11 @@ export function playServerAlarm(sec: number): void {
 
 // ── the watcher ───────────────────────────────────────────────────────
 
+/** What the panel shows about the watcher itself: when it last ticked, and alerts with no usable price since when. */
+const status = globalOnce('__priceAlertStatus', () => ({ tickAt: 0, unpricedSince: new Map<string, number>() }));
+/** An alert this long without a usable price is reported (the bridge's replay needs ~8 s to settle on a new subscription). */
+const UNPRICED_REPORT_MS = 20_000;
+
 /** Per-alert price memory, keyed by what the alert watches: an edit (new level / condition / instrument) starts a fresh baseline. */
 const memory = globalOnce('__priceAlertMemory', () => new Map<string, AlertMemory>());
 const memKey = (a: PriceAlert) => `${a.id}|${a.instrument.segment}:${a.instrument.securityId}|${a.condition}|${a.value}|${a.updatedAt}`;
@@ -197,7 +204,11 @@ const toOutcome = (r: Awaited<ReturnType<typeof placeDhanOrder>>, qty: number, a
 async function sendOrder(alert: PriceAlert, eventId: string, armedOn: string | null): Promise<void> {
   const now = Date.now();
   let outcome: OrderOutcome;
-  const block = tradeBlock({ armedOn }, alert, now);
+  const settings = readLadderSettings();
+  const block = tradeBlock({ armedOn }, alert, now, {
+    nse: timeStringToHhmm(settings.nseAutoExitTime) ?? undefined,
+    mcx: mcxSession(istDateIso(now), timeStringToHhmm(settings.mcxAutoExitTime)).autoExit,
+  });
   if (alert.action.kind !== 'trade') return;
   const qty = alertOrderQty(alert.action.contract, alert.action.lots);
   if (block) {
@@ -233,16 +244,22 @@ async function tick(): Promise<void> {
   const live = new Set(active.map(memKey));
   for (const k of memory.keys()) if (!live.has(k)) memory.delete(k);
 
+  status.tickAt = now;
+  for (const id of status.unpricedSince.keys()) if (!active.some(a => a.id === id)) status.unpricedSince.delete(id);
   const fires: Fire[] = [];
   if (active.length) {
     const keys = active.map(a => ws.want(a.instrument.segment, a.instrument.securityId));
-    ws.sync();
-    const prices = ws.prices(keys);
+    const prices = ws.prices(keys, ws.sync());           // one parse of the quotes file per tick
     active.forEach((a, i) => {
       const q = prices.get(keys[i]);
-      if (!q) return;                               // no fresh price: keep the last one, evaluate when it returns
+      if (!q) {                                     // no fresh price: keep the last one, evaluate when it returns
+        if (!status.unpricedSince.has(a.id)) status.unpricedSince.set(a.id, now);
+        return;
+      }
+      status.unpricedSince.delete(a.id);
       const k = memKey(a);
-      const r = stepAlert(a, memory.get(k), q.ltp, now);
+      // A trade alert never fires on its first price (Greater / Less Than included): the price must move into it.
+      const r = stepAlert(a, memory.get(k), q.ltp, now, a.action.kind === 'trade');
       memory.set(k, r.mem);
       if (r.fire) fires.push({ alert: a, price: q.ltp });
     });
@@ -322,7 +339,12 @@ export function startPriceAlertLoop(): void {
 export function alertsView(logLimit = 100): AlertsView {
   const s = readAlertsState();
   const log = readAlertsLog();
+  const now = Date.now();
   return {
+    watcher: {
+      running: now - status.tickAt < 5_000,
+      unpriced: [...status.unpricedSince].filter(([, since]) => now - since >= UNPRICED_REPORT_MS).map(([id]) => id),
+    },
     alerts: s.alerts,
     armedToday: s.armedOn === istDateIso(Date.now()),
     defaultSoundSec: s.defaultSoundSec,

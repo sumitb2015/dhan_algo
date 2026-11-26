@@ -5,7 +5,7 @@ import { AlarmClock, Bell, DatabaseZap, GitPullRequest, LogOut, RefreshCw, Setti
 import { toast } from 'sonner';
 import { useRefreshStatus } from '@/lib/useRefreshStatus';
 import { useWhatsNew } from '@/lib/whatsNewStore';
-import { priceAlertsStore, usePriceAlertsUi } from '@/lib/priceAlertsUi';
+import { priceAlertsStore, usePriceAlertsView } from '@/lib/priceAlertsUi';
 import WhatsNewPanel from './WhatsNewPanel';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import DataRefreshPanel from './DataRefreshPanel';
@@ -26,7 +26,7 @@ function NavBar({ compact = false }: { compact?: boolean } = {}) {
   const [whatsNewOpen, setWhatsNewOpen] = useState(false);
   const sync = useRefreshStatus();
   const { unread } = useWhatsNew();
-  const alertsView = usePriceAlertsUi().view;
+  const alertsView = usePriceAlertsView();
   const activeAlerts = alertsView?.alerts.filter(a => a.status === 'active').length ?? 0;
   const alertsArmed = !!alertsView?.armedToday;
 

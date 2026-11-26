@@ -114,7 +114,8 @@ interface Props {
   onAlert?: (symbol: string, price: number) => void;
   /** Price Alerts on this chart's instrument, drawn as bell lines; their chip drags them to a new level (onMoveAlert, on release). */
   alertLines?: AlertLine[];
-  onMoveAlert?: (id: string, price: number) => void;
+  /** Resolves true once the alert is saved at the new level (the chart shows that level until then, then the store's). */
+  onMoveAlert?: (id: string, price: number) => Promise<boolean>;
   simBrackets?: Record<string, { tp?: number; sl?: number }>;
   onSetBracket?: (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }) => void;
   onCancelBracket?: (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => void;
@@ -251,6 +252,13 @@ function ScalperChart(props: Props) {
   const alertLinesRef = useRef<Map<string, IPriceLine>>(new Map());
   const [alertDrag, setAlertDrag] = useState<{ id: string; startPrice: number } | null>(null);
   const alertDragPriceRef = useRef(0);
+  // A level just dropped, shown while its save is in flight (the alert still carries its old price until the store
+  // updates), so the line does not jump back to the old level for a round trip. Cleared when the save settles.
+  const [alertPending, setAlertPending] = useState<Record<string, { price: number; from: number }>>({});
+  const alertShown = useCallback((a: AlertLine) => {
+    const p = alertPending[a.id];
+    return p && p.from === a.price ? p.price : a.price;
+  }, [alertPending]);
   const [hoverScale, setHoverScale] = useState<{ y: number; price: number } | null>(null);
   const plusRef = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<{ y: number; price: number } | null>(null);
@@ -1052,14 +1060,14 @@ function ScalperChart(props: Props) {
       seen.add(a.id);
       if (alertDrag?.id === a.id) continue;          // the drag owns this line's price until release
       const opts = {
-        price: a.price, color: a.paused ? chrome.textMuted : ALERT_COLOR, lineWidth: 1 as const,
+        price: alertShown(a), color: a.paused ? chrome.textMuted : ALERT_COLOR, lineWidth: 1 as const,
         lineStyle: a.paused ? LineStyle.Dotted : LineStyle.Dashed, axisLabelVisible: true, title: `🔔 ${a.title}${a.paused ? ' (paused)' : ''}`,
       };
       const ex = lines.get(a.id);
       if (ex) ex.applyOptions(opts); else lines.set(a.id, candles.createPriceLine(opts));
     }
     for (const [id, l] of lines) if (!seen.has(id)) { try { candles.removePriceLine(l); } catch { /* gone */ } lines.delete(id); }
-  }, [alertLines, alertDrag, chrome.textMuted]);
+  }, [alertLines, alertDrag, alertShown, chrome.textMuted]);
 
   // Dragging an alert by its chip: the line follows the mouse (snapped to the tick); release saves the new level, Esc reverts.
   useEffect(() => {
@@ -1076,9 +1084,15 @@ function ScalperChart(props: Props) {
     };
     const finish = (send: boolean) => {
       const price = alertDragPriceRef.current;
+      const { id, startPrice } = alertDrag;
       setAlertDrag(null);
-      if (send && Math.abs(price - alertDrag.startPrice) > 1e-9) onMoveAlert?.(alertDrag.id, price);
-      else line?.applyOptions({ price: alertDrag.startPrice });
+      if (send && onMoveAlert && Math.abs(price - startPrice) > 1e-9) {
+        setAlertPending(prev => ({ ...prev, [id]: { price, from: startPrice } }));
+        const settle = () => setAlertPending(prev => { const next = { ...prev }; delete next[id]; return next; });
+        onMoveAlert(id, price).then(settle, settle);
+      } else {
+        line?.applyOptions({ price: startPrice });
+      }
     };
     const onUp = () => finish(true);
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') finish(false); };
@@ -1133,7 +1147,7 @@ function ScalperChart(props: Props) {
       }
       // Alert chips sit on their own line (left edge), not pushed apart; a dragged one follows the drag.
       for (const a of alertLines) {
-        const y = candles.priceToCoordinate(alertDrag?.id === a.id ? alertDragPriceRef.current : a.price);
+        const y = candles.priceToCoordinate(alertDrag?.id === a.id ? alertDragPriceRef.current : alertShown(a));
         if (y !== null) out[`alert_${a.id}`] = Number(y);
       }
       setChipTops(prev => {
@@ -1145,7 +1159,7 @@ function ScalperChart(props: Props) {
     tick();
     const t = setInterval(tick, 150);
     return () => clearInterval(t);
-  }, [placed, activeBrackets, regularOrders, alertLines, alertDrag]);
+  }, [placed, activeBrackets, regularOrders, alertLines, alertDrag, alertShown]);
 
   // ── OI profile: Call / Put OI bars at each strike's level ─────────────
   // Drawn on one canvas over the plot, behind the chips, ignoring the mouse. Zoom / pan / autoscale fire no event, so it
@@ -1542,14 +1556,14 @@ function ScalperChart(props: Props) {
             onMouseDown={e => {
               if (!onMoveAlert) return;
               e.stopPropagation(); e.preventDefault();
-              alertDragPriceRef.current = a.price;
+              alertDragPriceRef.current = alertShown(a);
               setAlertDrag({ id: a.id, startPrice: a.price });
             }}
             className={cn('absolute left-2 z-[55] flex items-center gap-1 px-1.5 h-[20px] rounded border text-[11px] font-mono bg-zinc-900 shadow select-none',
               a.paused ? 'border-zinc-600 text-zinc-400' : 'border-amber-500/60 text-amber-400',
               onMoveAlert && (dragging ? 'cursor-grabbing ring-1 ring-amber-400' : 'cursor-ns-resize'))}>
             <Bell className="w-3 h-3" />
-            <span className="font-semibold">{fmt(dragging ? alertDragPriceRef.current : a.price)}</span>
+            <span className="font-semibold">{fmt(dragging ? alertDragPriceRef.current : alertShown(a))}</span>
           </div>
         );
       })}

@@ -32,7 +32,7 @@ async function act(body: Record<string, unknown>, ok?: string) {
   try { await postAlertAction(body); if (ok) toast.success(ok); } catch (e) { toast.error((e as Error).message); }
 }
 
-function AlertRow({ a }: { a: PriceAlert }) {
+function AlertRow({ a, unpriced }: { a: PriceAlert; unpriced: boolean }) {
   const busy = a.status === 'firing';
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-3 space-y-1.5">
@@ -49,6 +49,9 @@ function AlertRow({ a }: { a: PriceAlert }) {
         <div className="flex items-center gap-1.5 text-[11px] font-mono text-amber-400">
           <ShieldAlert className="h-3 w-3" /> {tradeLine(a.action)}
         </div>
+      )}
+      {unpriced && (
+        <div className="text-[11px] font-semibold text-red-400">No live price for {a.instrument.displayName} — this alert cannot fire until the price feed returns.</div>
       )}
       {a.message && <div className="text-[11px] text-zinc-300 truncate">“{a.message}”</div>}
       {a.lastFiredAt && (
@@ -110,6 +113,8 @@ export default function PriceAlertsPanel({ open, onClose }: { open: boolean; onC
   const [soundDraft, setSoundDraft] = useState<string | null>(null);
   const alerts = view?.alerts ?? [];
   const log = [...(view?.log ?? [])].reverse();
+  const unpriced = new Set(view?.watcher?.unpriced ?? []);
+  const watcherDown = !!view?.watcher && !view.watcher.running && alerts.some(a => a.status === 'active');
   const hasTrade = alerts.some(a => a.action.kind === 'trade' && (a.status === 'active' || a.status === 'paused'));
 
   const commitSound = () => {
@@ -166,6 +171,9 @@ export default function PriceAlertsPanel({ open, onClose }: { open: boolean; onC
               s
             </label>
           </div>
+          {watcherDown && (
+            <p className="text-[11px] font-semibold text-red-400">The alert watcher is not running on the server — no alert will fire. Restart the dashboard.</p>
+          )}
           {hasTrade && !view?.armedToday && (
             <p className="text-[11px] text-amber-400">Trade alerts will only notify today — their orders are skipped until you arm REAL orders.</p>
           )}
@@ -183,7 +191,7 @@ export default function PriceAlertsPanel({ open, onClose }: { open: boolean; onC
         <div className="flex-1 min-h-0 overflow-y-auto px-5 py-3 space-y-2">
           {!view && <div className="text-xs text-zinc-500">Loading…</div>}
           {view && tab === 'alerts' && (alerts.length
-            ? [...alerts].reverse().map(a => <AlertRow key={a.id} a={a} />)
+            ? [...alerts].reverse().map(a => <AlertRow key={a.id} a={a} unpriced={unpriced.has(a.id)} />)
             : <div className="text-xs text-zinc-500 py-6 text-center">No alerts yet. Create one here, or from a chart&apos;s “+” price menu.</div>)}
           {view && tab === 'log' && (
             <>

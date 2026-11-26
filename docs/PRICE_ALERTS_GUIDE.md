@@ -20,6 +20,8 @@ The first price the server sees for an alert is only a baseline. A crossing neve
 
 ## Order alerts (real money)
 - An order alert is always **Once only**.
+- An order alert never fires on the first price it sees, Greater Than / Less Than included. If the price is already past the level when you create it (or after a server restart), it waits until the price has been on the other side and comes back.
+- An MIS order is not sent from the intraday cutoff on: NSE 15:17 and the MCX auto-exit, both taken from the dashboard's Settings cutoffs. The alert still notifies. NRML orders run until the close.
 - It sends its order only when all of these hold:
   - **REAL orders armed today** is switched on in the panel (the switch resets at midnight IST);
   - the exchange is in session (NSE 09:15-15:30; MCX in its own hours);
@@ -29,8 +31,13 @@ The first price the server sees for an alert is only a baseline. A crossing neve
 - The alert is marked as firing on disk **before** the order is sent. An order whose outcome is unknown is recorded as `unknown` and **never resent**; check the order book. Orders are tagged with correlation id prefix `pa` and capped at 10 lots (`lib/dhanSourceCaps.ts`).
 - Editing or restarting a fired order alert re-arms it, so it will place a **new** order the next time it fires.
 
+## Health warnings in the panel
+- **The alert watcher is not running:** the server is not evaluating alerts, so none will fire. Restart the dashboard.
+- **No live price for …:** an alert has had no usable WebSocket price for 20 s or more (for example the price bridge or the hub is down), so it cannot fire until the feed returns.
+
 ## Sound
-- If a dashboard tab is open, **one** tab plays the alarm and every tab shows a toast with **Stop sound**. The browser only allows sound after you click a page once.
+- If a dashboard tab is open, **one** tab (the leader) plays the alarm and every tab shows a toast with **Stop sound**. Only the leader tab keeps a live stream; other tabs check every 5 s.
+- The browser only allows sound after you click a page once. Until you click the leader tab, the server keeps playing alarms on the speakers.
 - If no tab is open, the server plays the alarm on the PC's speakers (`pw-play`, else `aplay`, on Linux only).
 
 ## Files

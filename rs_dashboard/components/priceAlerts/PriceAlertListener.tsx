@@ -3,7 +3,7 @@
 import { useEffect, useRef } from 'react';
 import { usePathname } from 'next/navigation';
 import { toast } from 'sonner';
-import { installAlertSoundUnlock, playAlarm, playWarnChime } from '@/lib/alertSound';
+import { alertSoundReady, installAlertSoundUnlock, playAlarm, playWarnChime } from '@/lib/alertSound';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { priceAlertsStore, usePriceAlertsUi } from '@/lib/priceAlertsUi';
 import type { AlertEvent, AlertsView } from '@/lib/priceAlerts';
@@ -11,7 +11,8 @@ import PriceAlertsPanel from './PriceAlertsPanel';
 import AlertDialog from './AlertDialog';
 
 // Mounted ONCE in app/layout.tsx. The only browser code that talks to the alerts server:
-//   • keeps the store (lib/priceAlertsUi.ts) current from /api/price-alerts/stream (SSE), polling as a fallback;
+//   • keeps the store (lib/priceAlertsUi.ts) current: the leader tab from /api/price-alerts/stream (SSE), other tabs by
+//     polling (one stream per browser);
 //   • on a newly fired event: a toast in every tab, and the alarm (N seconds) in the ONE leader tab, which also tells the
 //     server it is listening (?leader=1) so the server does not play it on the speakers as well;
 //   • renders the header's panel and the create / edit dialog.
@@ -85,9 +86,15 @@ export default function PriceAlertListener() {
     const startPoll = () => { if (!poll) poll = setInterval(() => { void fetchOnce(); }, POLL_MS); };
     const stopPoll = () => { if (poll) { clearInterval(poll); poll = null; } };
 
+    // Only the leader tab holds the stream: one SSE connection per browser, not one per tab (HTTP/1.1 allows 6 per
+    // origin across ALL tabs, and the chart / order pages need theirs). Followers poll every POLL_MS (toast only).
+    // The leader says ?leader=1 — "a browser will sound this, server stay quiet" — only once its audio is unlocked;
+    // until the first click it streams without it, so the server's speakers still ring.
+    let streamLeader = false;
     const open = () => {
       if (es || disposed) return;
-      es = new EventSource(`/api/price-alerts/stream${leaderRef.current ? '?leader=1' : ''}`);
+      streamLeader = alertSoundReady();
+      es = new EventSource(`/api/price-alerts/stream${streamLeader ? '?leader=1' : ''}`);
       es.onmessage = ev => {
         try { const j = JSON.parse(ev.data); if (j.success) { stopPoll(); apply(j.data); } } catch { /* ignore */ }
       };
@@ -95,17 +102,20 @@ export default function PriceAlertListener() {
     };
     const close = () => { es?.close(); es = null; };
 
-    // Followers close the stream while hidden; the leader keeps it (it must hear an alert to ring it).
-    const onVis = () => {
-      if (document.hidden && !leaderRef.current) { close(); startPoll(); }
-      else { open(); }
+    // The first click / key unlocks audio: reopen the leader's stream as ?leader=1.
+    const onUnlock = () => {
+      if (!leaderRef.current || streamLeader) return;
+      setTimeout(() => { if (!disposed && alertSoundReady() && !streamLeader) { close(); open(); } }, 200);
     };
 
-    void fetchOnce().then(() => { if (!disposed) onVis(); });
-    document.addEventListener('visibilitychange', onVis);
+    if (leaderRef.current) void fetchOnce().then(() => { if (!disposed) open(); });
+    else { void fetchOnce(); startPoll(); }
+    window.addEventListener('pointerdown', onUnlock);
+    window.addEventListener('keydown', onUnlock);
     return () => {
       disposed = true;
-      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('pointerdown', onUnlock);
+      window.removeEventListener('keydown', onUnlock);
       close(); stopPoll();
     };
   }, [onLogin, isLeader, leaderRef]);

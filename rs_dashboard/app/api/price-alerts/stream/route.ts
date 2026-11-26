@@ -45,8 +45,10 @@ export async function GET(req: NextRequest): Promise<Response> {
         if (r.view) {
           const v = r.view;
           const tail = v.log.at(-1);
-          // Change test: state version + the newest event and its order outcome (an outcome arrives after the event).
-          const k = `${v.version}|${v.armedToday}|${v.log.length}|${tail?.id ?? ''}|${v.log.map(e => e.order?.status ?? '').join('')}`;
+          // Change test: state version + the newest event and its order outcome (an outcome arrives after the event) + the
+          // watcher's health (running / alerts without a live price).
+          const k = `${v.version}|${v.armedToday}|${v.log.length}|${tail?.id ?? ''}|${v.log.map(e => e.order?.status ?? '').join('')}`
+            + `|${v.watcher?.running}|${v.watcher?.unpriced.join(',')}`;
           if (k !== last) { last = k; lastError = ''; send(`data: ${JSON.stringify({ success: true, data: v })}\n\n`); }
         } else if (r.error && r.error !== lastError) {
           lastError = r.error; last = '';

@@ -57,31 +57,35 @@ interface ContractsData { expiries: string[]; strikes: number[]; atm: number | n
  * `onLoad` runs on each answer so the caller can fill in defaults (nearest expiry, ATM strike).
  */
 function useContracts(kind: 'futures' | 'options' | null, underlying: string, expiry: string, withSpot: boolean, onLoad?: (d: ContractsData) => void) {
-  const [got, setGot] = useState<{ key: string; d: ContractsData | null; error: string | null }>({ key: '', d: null, error: null });
+  // `keys`: every key this answer serves. An options answer asked WITHOUT an expiry is also the answer for the expiry the
+  // route picked, so filling that expiry in (defaultsFor) does not fetch the same list — and spend a spot quote — again.
+  const [got, setGot] = useState<{ keys: string[]; d: ContractsData | null; error: string | null }>({ keys: [], d: null, error: null });
   const key = kind ? `${kind}|${underlying}|${kind === 'options' ? expiry : ''}` : '';
+  const gotKeys = useRef<string[]>([]);
   const cb = useRef(onLoad);
   useEffect(() => { cb.current = onLoad; });
   useEffect(() => {
-    if (!kind) return;
+    if (!kind || gotKeys.current.includes(key)) return;
     const ctl = new AbortController();
     const qs = new URLSearchParams({ kind, underlying });
     if (kind === 'options' && expiry) qs.set('expiry', expiry);
     if (!withSpot) qs.set('nospot', '1');
+    const done = (keys: string[], d: ContractsData | null, error: string | null) => { gotKeys.current = keys; setGot({ keys, d, error }); };
     fetch(`/api/straddle-pnf/contracts?${qs}`, { signal: ctl.signal })
       .then(r => r.json())
       .then(j => {
-        if (!j.success) { setGot({ key, d: null, error: j.error ?? 'No contracts' }); return; }
+        if (!j.success) { done([key], null, j.error ?? 'No contracts'); return; }
         // ATM only from a real spot: without one the route answers the list's middle strike, which is not ATM.
         const d: ContractsData = { expiries: j.expiries ?? [], strikes: j.strikes ?? [], atm: j.spot > 0 ? j.atm ?? null : null, expiry: j.expiry ?? j.expiries?.[0] ?? null };
-        setGot({ key, d, error: null });
+        done(kind === 'options' && !expiry && d.expiry ? [key, `${kind}|${underlying}|${d.expiry}`] : [key], d, null);
         cb.current?.(d);
       })
-      .catch(() => { if (!ctl.signal.aborted) setGot({ key, d: null, error: 'Could not load the contract list' }); });
+      .catch(() => { if (!ctl.signal.aborted) done([key], null, 'Could not load the contract list'); });
     return () => ctl.abort();
     // `key` covers kind / underlying / expiry; withSpot only changes what one request asks for.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
-  const fresh = got.key === key;
+  const fresh = got.keys.includes(key);
   return { data: fresh ? got.d : null, loading: !!kind && !fresh, error: fresh ? got.error : null };
 }
 

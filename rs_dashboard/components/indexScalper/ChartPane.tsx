@@ -24,7 +24,7 @@ import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { isMcx, type Underlying } from '@/lib/indexScalperInstrument';
 import { toIsoDate } from '@/components/DataChip';
 import { cn } from '@/lib/utils';
-import { alertsFor, postAlertAction, priceAlertsStore, usePriceAlertsUi } from '@/lib/priceAlertsUi';
+import { alertsFor, postAlertAction, priceAlertsStore, usePriceAlertsView } from '@/lib/priceAlertsUi';
 import { CONDITIONS, type InstrumentSpec } from '@/lib/priceAlerts';
 import { toast } from 'sonner';
 import type { TrailState } from '@/lib/indexScalperTrail';
@@ -168,7 +168,7 @@ function ChartPane(p: Props) {
     }
     return { spec: { kind: 'index', symbol: underlying }, segment: 'IDX_I', securityId: underlying === 'NIFTY' ? '13' : null };
   }, [underlying, isOption, isFuture, resolved.strike, resolved.type, resolved.dhanId, feed.expiry, feed.indexFuture, feed.future]);
-  const alertsView = usePriceAlertsUi().view;
+  const alertsView = usePriceAlertsView();
   const alertLines = useMemo(() => {
     if (!alertTarget?.securityId) return [];
     return alertsFor(alertsView, alertTarget.segment, alertTarget.securityId).map(a => ({
@@ -181,12 +181,11 @@ function ChartPane(p: Props) {
     if (!alertTarget) { onAlert(sym, price); return; }
     priceAlertsStore.openDialog({ instrument: alertTarget.spec, instrumentLabel: sym, value: price });
   }, [alertTarget, onAlert]);
-  const moveAlert = useCallback((id: string, value: number) => {
+  const moveAlert = useCallback((id: string, value: number): Promise<boolean> =>
     postAlertAction({ action: 'move', id, value }).then(
-      () => toast.success(`Alert moved to ${value}`),
-      (e: Error) => toast.error(`Alert not moved: ${e.message}`),
-    );
-  }, []);
+      () => { toast.success(`Alert moved to ${value}`); return true; },
+      (e: Error) => { toast.error(`Alert not moved: ${e.message}`); return false; },
+    ), []);
 
   // Keep identity while nothing on this pane changed (legsKey), so the memoised chart skips feed pushes.
   const paneLegsAll = useMemo(() => p.legs.filter(l => legOnChart(l, resolved)), [p.legs, resolved]);
