@@ -52,6 +52,22 @@ export function bracketKind(orderType: string, price: number, anchor: number, is
   return (isLong ? price >= anchor : price <= anchor) ? 'TP' : 'SL';
 }
 
+/**
+ * The price a working order is drawn, dragged and valued at: a stop's TRIGGER (where it fires), a limit's price. An
+ * option stop is a stop-LIMIT whose limit sits a 5% cushion beyond the trigger (`optionStopLimit`), so reading `price`
+ * first drew a stop dragged to 82.00 at its 86.10 limit, and the next drag of that line re-placed the trigger at 86.10
+ * (2026-11-26). Null when the order has no positive level.
+ */
+export function orderLevel(o: { orderType: string; price: number | null; trigger: number | null }): number | null {
+  const t = (o.orderType || '').toUpperCase().replace(/[\s_-]/g, '');
+  const isStop = t.includes('STOP') || t.startsWith('SL');
+  const first = isStop ? o.trigger : o.price;
+  const second = isStop ? o.price : o.trigger;
+  if (first !== null && first > 0) return first;
+  if (second !== null && second > 0) return second;
+  return null;
+}
+
 /** Everything the chart and panels show of a leg list, as one string. A feed push that changes no held leg (most pushes:
  *  they move other strikes) gives the same key, so the page can keep the same `legs` array and the chart skips a render. */
 export function legsKey(legs: ScalperLeg[]): string {

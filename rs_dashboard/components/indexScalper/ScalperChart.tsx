@@ -14,7 +14,7 @@ import {
 import { ChevronDown, ChevronRight, Eye, EyeOff, Settings2, X, Plus, ArrowDown, ArrowUp, ArrowUpDown, Bell, FileText, Minus } from 'lucide-react';
 import { useChartChrome } from '@/lib/chartTheme';
 import { computeIndicator, indicatorLabel, tailUnchanged, volumeMa, type Bar, type IndicatorInstance, pointColor, flipsAtLast, type OutSeries } from '@/lib/indexScalperIndicators';
-import { bracketKind, fmtRupees, legAnchor, legPnl, type ScalperLeg } from '@/lib/indexScalperPositions';
+import { bracketKind, fmtRupees, legAnchor, legPnl, orderLevel, type ScalperLeg } from '@/lib/indexScalperPositions';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { INSTRUMENTS, displayLotUnits, isMcx, qtyUnits, type Underlying } from '@/lib/indexScalperInstrument';
 import { readPref, savePref } from '@/lib/localPref';
@@ -741,7 +741,7 @@ function ScalperChart(props: Props) {
         if (!ord.securityId || ord.securityId !== p.leg.securityId) continue;
 
         const ot = (ord.orderType || '').toUpperCase();
-        const ordPrice = ord.price ?? ord.trigger ?? 0;
+        const ordPrice = orderLevel(ord) ?? 0; // a stop's trigger, not its stop-limit's limit
         if (ordPrice <= 0) continue;
 
         if (!(p.anchor.level > 0)) continue;
@@ -776,7 +776,7 @@ function ScalperChart(props: Props) {
       if (b?.tp) lv.push(b.tp.price);
       if (b?.sl) lv.push(b.sl.price);
     }
-    for (const o of openOrders) { const px = o.price ?? o.trigger; if (px && px > 0) lv.push(px); }
+    for (const o of openOrders) { const px = orderLevel(o); if (px !== null) lv.push(px); }
     const key = lv.join(',');
     if (key === scaleLevelsRef.current.join(',')) return;
     scaleLevelsRef.current = lv;
@@ -1002,7 +1002,7 @@ function ScalperChart(props: Props) {
     const lines = orderLinesRef.current;
     const seen = new Set<string>();
     for (const ord of regularOrders) {
-      const p = ord.price ?? ord.trigger;
+      const p = orderLevel(ord);
       if (!p) continue;
       seen.add(ord.id);
       const color = ord.side === 'BUY' ? '#0ea5e9' : '#f43f5e';
@@ -1035,7 +1035,7 @@ function ScalperChart(props: Props) {
         }
       }
       for (const ord of regularOrders) {
-        const p = ord.price ?? ord.trigger;
+        const p = orderLevel(ord);
         if (p) {
           const y = candles.priceToCoordinate(p);
           if (y !== null) raw.push({ id: `ord_${ord.id}`, y: Number(y) });
@@ -1049,7 +1049,7 @@ function ScalperChart(props: Props) {
       for (const r of raw) { const y = Math.max(r.y, floor + 26); out[r.id] = y; floor = y; }
       // The order lines' own y (not pushed apart like the chips): where a line can be grabbed and dragged.
       for (const ord of regularOrders) {
-        const p = ord.price ?? ord.trigger;
+        const p = orderLevel(ord);
         const y = p ? candles.priceToCoordinate(p) : null;
         if (y !== null) out[`oline_${ord.id}`] = Number(y);
       }
@@ -1451,7 +1451,7 @@ function ScalperChart(props: Props) {
       {/* working order chips on chart: this page's own Limit / SL / SL-M orders can be dragged to a new price (chip or
           line) and have their lots edited; another placer's order is shown with its x only */}
       {regularOrders.map(ord => {
-        const p = ord.price ?? ord.trigger;
+        const p = orderLevel(ord);
         if (!p) return null;
         const top = chipTops[`ord_${ord.id}`];
         if (top === undefined) return null;
@@ -1496,7 +1496,7 @@ function ScalperChart(props: Props) {
               <span className={cn('font-bold', isBuy ? 'text-sky-400' : 'text-rose-400')}>{ord.side}</span>
               {canEdit ? (
                 <button type="button" aria-label={`Edit order ${ord.id}`} aria-expanded={ordEdit?.id === ord.id}
-                  onClick={e => { e.stopPropagation(); setOrdEdit(ordEdit?.id === ord.id ? null : { id: ord.id, lots: ordLots ?? 1, price: (ord.rawType === 'STOP_LOSS_MARKET' ? ord.trigger ?? p : ord.price ?? p).toFixed(2) }); }}
+                  onClick={e => { e.stopPropagation(); setOrdEdit(ordEdit?.id === ord.id ? null : { id: ord.id, lots: ordLots ?? 1, price: p.toFixed(2) }); }}
                   className="h-[16px] px-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border border-zinc-700">{ordLots ?? ord.qty} lot{ordLots === 1 ? '' : 's'}</button>
               ) : <span className="text-zinc-200">{ord.qty}</span>}
               <span className="text-zinc-400">{ord.orderType}</span>

@@ -1709,7 +1709,7 @@ export default function IndexScalperTerminal() {
         }),
       });
       const j = await r.json() as { success: boolean; error?: string };
-      const what = [req.level !== undefined ? `${row.rawType === 'STOP_LOSS_MARKET' ? 'trigger' : 'price'} ${(row.rawType === 'STOP_LOSS_MARKET' ? levels.trigger : levels.price).toFixed(2)}` : '', req.lots !== undefined ? `${req.lots} lot${req.lots === 1 ? '' : 's'}` : ''].filter(Boolean).join(', ');
+      const what = [req.level !== undefined ? (row.rawType === 'LIMIT' ? `price ${levels.price.toFixed(2)}` : `trigger ${levels.trigger.toFixed(2)}${row.rawType === 'STOP_LOSS' ? ` (limit ${levels.price.toFixed(2)})` : ''}`) : '', req.lots !== undefined ? `${req.lots} lot${req.lots === 1 ? '' : 's'}` : ''].filter(Boolean).join(', ');
       flash({ ok: j.success, text: j.success ? `Order ${row.id} modified: ${what}` : `Modify refused: ${j.error ?? 'unknown error'}` });
       return j.success;
     } catch (e) {

@@ -3,7 +3,7 @@
 // indexScalperPremiumBrackets.test.ts. Orders go through the terminal's onSetBracket (REAL: LIMIT target / SL-M stop on
 // that contract, isx tag; SIM: the paper bracket watcher, which compares the leg's own live premium).
 
-import { bracketKind, legPnl, type ScalperLeg } from './indexScalperPositions.ts';
+import { bracketKind, legPnl, orderLevel, type ScalperLeg } from './indexScalperPositions.ts';
 
 export interface PremiumLevel { price: number; orderId?: string; sim: boolean }
 export interface PremiumBrackets { tp?: PremiumLevel; sl?: PremiumLevel }
@@ -20,8 +20,8 @@ export function premiumBracketsFor(leg: ScalperLeg, orders: OrderLike[], sim?: {
   const close = isLong ? 'SELL' : 'BUY';
   for (const o of orders) {
     if (!o.securityId || o.securityId !== leg.securityId || o.side !== close) continue;
-    const px = o.price ?? o.trigger;
-    if (!px || px <= 0) continue;
+    const px = orderLevel(o); // a stop's trigger, never its stop-limit's limit
+    if (px === null) continue;
     const kind = bracketKind(o.orderType || '', px, leg.avg, isLong);
     if (kind === 'TP' && !out.tp) out.tp = { price: px, orderId: o.id, sim: false };
     if (kind === 'SL' && !out.sl) out.sl = { price: px, orderId: o.id, sim: false };

@@ -28,15 +28,16 @@ export function isEditable(o: EditableOrder): boolean {
 
 const snap = (v: number, tick: number) => Number((Math.round(v / tick) * tick).toFixed(2));
 
-/** The order's levels after its line moves to `level` (the line sits at the limit price, else the trigger). A Limit
- *  moves its price; an SL-M its trigger; an SL-limit moves trigger AND price by the same amount, so its gap stays. */
+/** The order's levels after its line moves to `level` (a Limit's line sits at its price, a stop's at its TRIGGER:
+ *  `orderLevel`). A Limit moves its price; an SL-M its trigger; an SL-limit's trigger goes to the line and its limit moves
+ *  by the same amount, so the cushion stays. */
 export function movedLevels(o: EditableOrder, level: number, tick: number): { price: number; trigger: number } {
   const lv = snap(level, tick);
   if (o.rawType === 'LIMIT') return { price: lv, trigger: 0 };
   if (o.rawType === 'STOP_LOSS_MARKET') return { price: 0, trigger: lv };
-  const from = o.price ?? o.trigger ?? lv;
+  const from = o.trigger !== null && o.trigger > 0 ? o.trigger : o.price ?? lv;
   const delta = lv - from;
-  return { price: lv, trigger: snap((o.trigger ?? from) + delta, tick) };
+  return { price: snap((o.price !== null && o.price > 0 ? o.price : from) + delta, tick), trigger: lv };
 }
 
 /**

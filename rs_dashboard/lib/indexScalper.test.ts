@@ -543,3 +543,15 @@ test('Day High / Low: PDH / PDL from the previous day, DH / DL flat across each 
   assert.equal(out.series[4].flat, true); // DH's shadow repaints with it
   assert.equal(pointColor(lines[2], 1), 'transparent'); // no slanted join from Friday's DH to Monday's
 });
+
+test('orderLevel: a stop is drawn at its trigger, a limit at its price', async () => {
+  const { orderLevel } = await import('./indexScalperPositions.ts');
+  assert.equal(orderLevel({ orderType: 'STOP_LOSS', price: 86.1, trigger: 82 }), 82);
+  assert.equal(orderLevel({ orderType: 'Stop Limit', price: 86.1, trigger: 82 }), 82);
+  assert.equal(orderLevel({ orderType: 'SL', price: 86.1, trigger: 82 }), 82);
+  assert.equal(orderLevel({ orderType: 'STOP_LOSS_MARKET', price: 0, trigger: 82 }), 82); // Dhan sends price 0 on SL-M
+  assert.equal(orderLevel({ orderType: 'LIMIT', price: 67.7, trigger: 0 }), 67.7);
+  assert.equal(orderLevel({ orderType: 'LIMIT', price: 67.7, trigger: null }), 67.7);
+  assert.equal(orderLevel({ orderType: 'STOP_LOSS', price: 86.1, trigger: null }), 86.1); // no trigger known: its price
+  assert.equal(orderLevel({ orderType: 'LIMIT', price: null, trigger: null }), null);
+});

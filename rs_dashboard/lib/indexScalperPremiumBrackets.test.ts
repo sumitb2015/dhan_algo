@@ -17,6 +17,11 @@ test('brackets: SIM levels first; else this contract\'s closing orders, a stop =
   assert.deepEqual(premiumBracketsFor(leg(), [ord({ securityId: '303' }), ord({ side: 'BUY' }), ord({ price: null })]), {});
   // a short closes with BUY orders
   assert.equal(premiumBracketsFor(leg({ netQty: -65 }), [ord({ side: 'BUY', orderType: 'SL-M', price: null, trigger: 240 })]).sl?.price, 240);
+
+  // a stop-LIMIT is drawn at its trigger, never its limit: Dhan BUY STOP_LOSS trigger 82.00 / limit 86.10 (2026-11-26),
+  // shown at 86.10 before the fix; Kotak's 'SL' the same
+  assert.equal(premiumBracketsFor(leg({ netQty: -130 }), [ord({ side: 'BUY', orderType: 'STOP_LOSS', price: 86.1, trigger: 82 })]).sl?.price, 82);
+  assert.equal(premiumBracketsFor(leg({ netQty: -130 }), [ord({ side: 'BUY', orderType: 'SL', price: 86.1, trigger: 82 })]).sl?.price, 82);
 });
 
 test('validation: right side of the LIVE premium, on the tick, positive; no live premium = refuse', () => {
