@@ -221,8 +221,29 @@ export interface AlertInput {
   action: { kind: 'notify' } | { kind: 'trade'; contract: InstrumentSpec; side: 'BUY' | 'SELL'; lots: number; product: 'INTRADAY' | 'MARGIN' };
 }
 
-const SYM = /^[A-Z0-9&-]{1,20}$/;
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
+
+/** The only underlyings alerts are offered on: NIFTY (index, futures, options) and MCX crude (futures, options). */
+export const ALERT_UNDERLYINGS = ['NIFTY', 'CRUDEOIL', 'CRUDEOILM'] as const;
+export type AlertUnderlying = (typeof ALERT_UNDERLYINGS)[number];
+export const isAlertUnderlying = (u: string): u is AlertUnderlying => (ALERT_UNDERLYINGS as readonly string[]).includes(u);
+export const isMcxAlertUnderlying = (u: string): boolean => u === 'CRUDEOIL' || u === 'CRUDEOILM';
+/** Underlyings with an index of their own (alerts on the index level). Crude's "spot" is its future. */
+export const hasIndex = (u: string): boolean => u === 'NIFTY';
+
+/**
+ * Epoch ms of the session close on `iso` for this underlying — what an "expire at <date>" choice means. NSE 15:30 IST;
+ * MCX from mcxSession (23:30 in US summer time, else 23:55; 17:00 on a morning-only day). A closed MCX day falls back to 23:55.
+ */
+export function sessionCloseMs(underlying: string, iso: string): number {
+  let hhmm = 1530;
+  if (isMcxAlertUnderlying(underlying)) {
+    const m = mcxSession(iso);
+    hhmm = m.open < m.close ? m.close : 2355;
+  }
+  const mins = Math.floor(hhmm / 100) * 60 + (hhmm % 100);
+  return Date.parse(`${iso}T00:00:00Z`) + (mins - 330) * 60_000;
+}
 
 function parseSpec(raw: unknown, allowIndex: boolean): InstrumentSpec | string {
   const r = (raw ?? {}) as Record<string, unknown>;
@@ -230,12 +251,12 @@ function parseSpec(raw: unknown, allowIndex: boolean): InstrumentSpec | string {
   if (kind === 'index') {
     if (!allowIndex) return 'An index cannot be traded — pick a future or an option';
     const symbol = String(r.symbol ?? '').toUpperCase();
-    return SYM.test(symbol) ? { kind, symbol } : 'Invalid index symbol';
+    return hasIndex(symbol) ? { kind, symbol } : `${symbol || 'That'} has no index alert — pick ${ALERT_UNDERLYINGS.join(' / ')} future or option`;
   }
   if (kind === 'future' || kind === 'option') {
     const underlying = String(r.underlying ?? '').toUpperCase();
     const expiry = String(r.expiry ?? '');
-    if (!SYM.test(underlying)) return 'Invalid underlying';
+    if (!isAlertUnderlying(underlying)) return `Alerts are only for ${ALERT_UNDERLYINGS.join(', ')}`;
     if (!ISO.test(expiry)) return 'Invalid expiry';
     if (kind === 'future') return { kind, underlying, expiry };
     const strike = Number(r.strike);

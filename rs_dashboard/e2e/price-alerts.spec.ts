@@ -32,6 +32,16 @@ async function mockApi(page: Page, s: State) {
       // One frame per connection (EventSource reconnects on its own).
       return route.fulfill({ status: 200, contentType: 'text/event-stream', body: `data: ${JSON.stringify({ success: true, data: view(s, s.streamLog ?? s.log) })}\n\n` });
     }
+    if (p === '/api/straddle-pnf/contracts') {
+      // master_list answers: CRUDEOILM options 16 Dec / 15 Jan, spot 7856 (ATM 7850); NIFTY options for the index's expiration
+      const u = new URL(req.url()).searchParams;
+      if (u.get('underlying') === 'CRUDEOILM') {
+        const expiry = u.get('expiry') ?? '2027-12-16';
+        const spot = u.get('nospot') === '1' ? null : 7856;
+        return json(route, { success: true, expiries: ['2027-12-16', '2028-01-14'], expiry, strikes: [7750, 7800, 7850, 7900, 7950], spot, atm: spot ? 7850 : 7850 });
+      }
+      return json(route, { success: true, expiries: ['2027-12-07', '2027-12-14'], expiry: '2027-12-07', strikes: [], spot: null, atm: null });
+    }
     if (p === '/api/price-alerts' && method === 'GET') return json(route, { success: true, data: view(s) });
     if (p === '/api/price-alerts' && method === 'POST') {
       s.calls.push({ path: p, body });
@@ -87,6 +97,37 @@ test.describe('Price Alerts', () => {
     await page.getByRole('button', { name: 'Delete alert' }).click();
     await expect.poll(() => s.calls.some(c => c.body?.action === 'delete' && c.body.id === 'a1')).toBe(true);
     await expect(page.getByText('No alerts yet.', { exact: false })).toBeVisible();
+    expect(s.blocked).toEqual([]);
+  });
+
+  test('crude mini option: expiry, ATM strike and expiration are filled in from the contract list', async ({ page, context }) => {
+    const s = newState();
+    await signIn(context);
+    await mockApi(page, s);
+    await page.goto('/movers-plus', { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Price alerts' }).first().click();
+    await page.getByRole('button', { name: 'Create alert' }).click();
+    const dlg = page.getByRole('dialog', { name: 'Create alert' });
+
+    // NIFTY index: only the three underlyings; Expiration defaults to the nearest NIFTY expiry
+    await expect(dlg.getByRole('radiogroup', { name: 'Underlying' }).getByRole('radio')).toHaveText(['NIFTY', 'CRUDE OIL', 'CRUDE MINI']);
+    await expect(dlg.getByLabel('Expiration', { exact: true })).toHaveValue('exp:2027-12-07');
+
+    await dlg.getByRole('radio', { name: 'CRUDE MINI' }).click();
+    await expect(dlg.getByRole('radio', { name: 'Index' })).toHaveCount(0);   // crude has no index
+    await dlg.getByRole('radio', { name: 'Option' }).click();
+    await expect(dlg.getByLabel('Expiry')).toHaveValue('2027-12-16');
+    await expect(dlg.getByLabel('Strike')).toHaveValue('7850');
+    await expect(dlg.getByLabel('Expiration', { exact: true })).toHaveValue('exp:2027-12-16');
+    await dlg.getByLabel('Value', { exact: true }).fill('120');
+    await dlg.getByRole('button', { name: 'Create' }).click();
+    await expect(dlg).toHaveCount(0);
+
+    const create = s.calls.find(c => c.body?.action === 'create');
+    const alert = create?.body?.alert as Record<string, unknown>;
+    expect(alert.instrument).toEqual({ kind: 'option', underlying: 'CRUDEOILM', expiry: '2027-12-16', strike: 7850, optType: 'CE' });
+    // 16 Dec 2027 is US winter time: MCX closes 23:55 IST = 18:25 UTC
+    expect(alert.expiresAt).toBe(Date.parse('2027-12-16T18:25:00Z'));
     expect(s.blocked).toEqual([]);
   });
 

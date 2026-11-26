@@ -9,10 +9,10 @@ TradingView-style price alerts that run on the **dashboard server**, so they kee
 ## An alert
 | Field | Meaning |
 |---|---|
-| Symbol | An index (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX), a future, or an option strike (its premium). Security ids are resolved on the server from `master_list.csv`. |
+| Symbol | **NIFTY** (index, future or option) or MCX **CRUDEOIL** / **CRUDEOILM** (future or option; crude has no index). Expiries and strikes are filled in automatically from `master_list.csv`: the nearest expiry and the ATM strike. Security ids are resolved on the server. |
 | Condition | **Crossing**, **Crossing Up** and **Crossing Down** fire when the price moves past the value between two ticks. **Greater Than** and **Less Than** fire while the price is on that side of the value. |
 | Trigger | **Once only** stops the alert after it fires. **Every time** can fire again, with at most one fire per 10 s. A Greater/Less Than alert fires again only after the price has gone back to the other side. |
-| Expiration | Open-ended, or a date and time. An alert also expires when its option or future expires. |
+| Expiration | Choose one of the valid expiries. The default is the contract's own expiry, or the nearest NIFTY expiry for the index. The alert stops at that day's session close (NSE 15:30; MCX 23:30 or 23:55). You can also pick Today's close, Open-ended or a custom date and time. A contract alert also stops when its contract expires. |
 | Sound | The alarm length in seconds (default 3, set in the panel; 1-60). |
 | Action | **Notify**, or **Place order**: one Dhan MARKET order (BUY/SELL, 1-10 lots, MIS/NRML) on a fixed future or option chosen in the dialog. |
 

@@ -92,11 +92,9 @@ export async function updateAlerts<T>(
 
 // ── instrument resolution (security ids come from master_list.csv, never the browser) ──
 
-const BSE_INDEX_IDS: Record<string, string> = { SENSEX: '51' };
-
 export function resolveSpec(spec: InstrumentSpec): AlertInstrument | string {
   if (spec.kind === 'index') {
-    const id = indexSpotId(spec.symbol) ?? BSE_INDEX_IDS[spec.symbol];
+    const id = indexSpotId(spec.symbol);
     return id
       ? { kind: 'index', segment: 'IDX_I', securityId: id, displayName: spec.symbol, underlying: spec.symbol, expiry: null, lot: 1 }
       : `${spec.symbol} is not a known index`;

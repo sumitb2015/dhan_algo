@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   conditionMet, stepAlert, expiryReason, alertOrderQty, sessionOpen, tradeBlock, parseAlertInput, appendLog, alertCorrelationId,
-  EVERY_COOLDOWN_MS, MAX_ALERT_LOTS, MAX_LOG, type PriceAlert, type AlertEvent, type AlertMemory,
+  sessionCloseMs, EVERY_COOLDOWN_MS, MAX_ALERT_LOTS, MAX_LOG, type PriceAlert, type AlertEvent, type AlertMemory,
 } from './priceAlerts.ts';
 
 // 2026-11-26 is a Thursday. IST = UTC + 5:30.
@@ -125,4 +125,19 @@ test('log is capped, correlation ids are Dhan-valid', () => {
   assert.equal(log.at(-1)?.id, String(MAX_LOG));
   const cid = alertCorrelationId('lx9a2-Zq81', Date.now());
   assert.match(cid, /^pa[a-z0-9]{6,23}$/);
+});
+
+test('only NIFTY, CRUDEOIL and CRUDEOILM; only NIFTY has an index', () => {
+  const base = { condition: 'gt', value: 1 };
+  assert.match(String(parseAlertInput({ ...base, instrument: { kind: 'index', symbol: 'BANKNIFTY' } }, 0)), /no index alert/);
+  assert.match(String(parseAlertInput({ ...base, instrument: { kind: 'index', symbol: 'CRUDEOILM' } }, 0)), /no index alert/);
+  assert.match(String(parseAlertInput({ ...base, instrument: { kind: 'future', underlying: 'BANKNIFTY', expiry: '2026-12-30' } }, 0)), /only for NIFTY, CRUDEOIL, CRUDEOILM/);
+  assert.ok(typeof parseAlertInput({ ...base, instrument: { kind: 'future', underlying: 'crudeoilm', expiry: '2026-12-17' } }, 0) !== 'string');
+  assert.ok(typeof parseAlertInput({ ...base, instrument: { kind: 'option', underlying: 'CRUDEOIL', expiry: '2026-12-16', strike: 5600, optType: 'PE' } }, 0) !== 'string');
+});
+
+test('expire-at-date means that day\'s session close: NSE 15:30, MCX 23:30 / 23:55 IST', () => {
+  assert.equal(sessionCloseMs('NIFTY', '2026-12-01'), ist(15, 30, '2026-12-01'));
+  assert.equal(sessionCloseMs('CRUDEOILM', '2026-12-16'), ist(23, 55, '2026-12-16'));   // US winter time
+  assert.equal(sessionCloseMs('CRUDEOIL', '2026-06-16'), ist(23, 30, '2026-06-16'));    // US summer time
 });
