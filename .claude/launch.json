@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "rs_dashboard", "run", "dev", "--", "-p", "3001"],
       "port": 3001
+    },
+    {
+      "name": "dashboard-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "rs_dashboard", "run", "dev"],
+      "port": 3000
     }
   ]
 }
