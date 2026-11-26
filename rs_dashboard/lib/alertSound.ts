@@ -36,10 +36,13 @@ export function installAlertSoundUnlock(): () => void {
 }
 
 /** Plays `freqs` one after another on the shared context. Gated like every chime: unlocked, and one per MIN_GAP_MS. */
-function playTones(freqs: number[], type: OscillatorType, now: number, step = 0.18): boolean {
+function playTones(freqs: number[], type: OscillatorType, now: number, step = 0.18, throttled = true): boolean {
   const c = ctx;
-  if (!c || c.state !== 'running' || now - lastPlayed < MIN_GAP_MS) return false;
-  lastPlayed = now;
+  if (!c || c.state !== 'running') return false;
+  if (throttled) {
+    if (now - lastPlayed < MIN_GAP_MS) return false;
+    lastPlayed = now;
+  }
   try {
     freqs.forEach((f, i) => {
       const o = c.createOscillator();
@@ -97,6 +100,49 @@ export function playBearChime(now = Date.now()): boolean {
 /** Signal went neutral: two soft level tones. */
 export function playNeutralChime(now = Date.now()): boolean {
   return playTones([523, 523], 'triangle', now, 0.16);
+}
+
+// ── Alarm (Price Alerts): the alert chime repeated for a set time, with a stop handle.
+
+/** How often the alarm repeats its three-tone chime. */
+export const ALARM_REPEAT_MS = 800;
+
+/**
+ * Plays the alert chime every ALARM_REPEAT_MS for `durationMs` (a price alert's "sound for N seconds"). Every repeat is
+ * scheduled up front on the audio clock, not on a timer, so a background tab's timer throttling cannot stretch or drop it.
+ * Outside the shared MIN_GAP_MS throttle — an alarm is one deliberate sound, and taking the slot would silence another
+ * page's chime. Returns stop() for the toast's "Stop sound" button (a no-op when audio is not unlocked yet).
+ */
+export function playAlarm(durationMs: number): () => void {
+  const c = ctx;
+  if (!c || c.state !== 'running') return () => {};
+  const step = 0.18;
+  const freqs = [660, 880, 1175];
+  const repeats = Math.max(1, Math.ceil(durationMs / ALARM_REPEAT_MS));
+  try {
+    const master = c.createGain();
+    master.connect(c.destination);
+    for (let r = 0; r < repeats; r++) {
+      freqs.forEach((f, i) => {
+        const o = c.createOscillator();
+        const g = c.createGain();
+        const t = c.currentTime + r * (ALARM_REPEAT_MS / 1000) + i * step;
+        o.type = 'triangle';
+        o.frequency.value = f;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.2, t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + step - 0.02);
+        o.connect(g);
+        g.connect(master);
+        o.start(t);
+        o.stop(t + step - 0.01);
+      });
+    }
+    let stopped = false;
+    return () => { if (!stopped) { stopped = true; try { master.disconnect(); } catch { /* already gone */ } } };
+  } catch {
+    return () => {};   // audio unavailable: the toast still shows
+  }
 }
 
 /** True once audio is unlocked and running (the page can show "click to enable sound" until then). */

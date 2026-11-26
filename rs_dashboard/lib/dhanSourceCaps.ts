@@ -22,6 +22,8 @@ export const SOURCE_QTY_CAPS: Record<string, number> = {
   fm: 1500,
   // 'isx' = Index Scalper (/index-scalper): MAX_LOTS (20, lib/indexScalperPositions.ts) x 75, the largest index lot seen.
   isx: 1500,
+  // 'pa' = Price Alerts (lib/priceAlertServer.ts): MAX_ALERT_LOTS (10, lib/priceAlerts.ts) x 75, the largest index lot seen.
+  pa: 750,
 };
 
 /** The same backstop where Dhan's order quantity is LOTS (MCX_COMM), not units: 1500 there would mean 1500 lots. */
@@ -34,6 +36,8 @@ export const SOURCE_QTY_CAPS_MCX: Record<string, number> = {
   isx: 20,
   // 'isxc' = Index Scalper on full-size CRUDEOIL (100 bbl a lot): 5 lots (INSTRUMENTS.CRUDEOIL.maxLots).
   isxc: 5,
+  // 'pa' = Price Alerts: MAX_ALERT_LOTS (10). Without it the NSE 750 would apply: 750 MCX lots.
+  pa: 10,
   // 'orba' = Signal Orb (CRUDEOIL / CRUDEOILM futures and options) is deliberately uncapped (the user removed its lot cap on 2026-11-20).
   // 'gbx' = Gearbox Drive (CRUDEOIL / CRUDEOILM options): MAX_REAL_LOTS 1 until it has run live
   gbx: 1,

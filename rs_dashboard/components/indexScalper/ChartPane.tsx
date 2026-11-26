@@ -24,6 +24,9 @@ import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { isMcx, type Underlying } from '@/lib/indexScalperInstrument';
 import { toIsoDate } from '@/components/DataChip';
 import { cn } from '@/lib/utils';
+import { alertsFor, postAlertAction, priceAlertsStore, usePriceAlertsUi } from '@/lib/priceAlertsUi';
+import { CONDITIONS, type InstrumentSpec } from '@/lib/priceAlerts';
+import { toast } from 'sonner';
 import type { TrailState } from '@/lib/indexScalperTrail';
 
 export interface PaneCfg { source: ChartSource; interval: Interval }
@@ -147,6 +150,44 @@ function ChartPane(p: Props) {
   const placeOrder = useCallback((req: ChartOrderReq) => onPlaceChartOrder(contract, req), [onPlaceChartOrder, contract]);
   const openTicket = useCallback((req: { price: number; lots: number; orderType: 'LIMIT' }) => onOpenTicket(contract, req), [onOpenTicket, contract]);
 
+  // Price Alerts: what this pane shows, as an alert instrument (the "+" menu's "Add alert" opens the alert dialog on it)
+  // and its Dhan id (the active alerts on it are drawn as bell lines, draggable to a new level).
+  const alertTarget = useMemo<{ spec: InstrumentSpec; segment: string; securityId: string | null } | null>(() => {
+    const mcx = isMcx(underlying);
+    if (isOption) {
+      if (resolved.strike === null || resolved.type === null || !feed.expiry) return null;
+      return { spec: { kind: 'option', underlying, expiry: feed.expiry, strike: resolved.strike, optType: resolved.type }, segment: mcx ? 'MCX_COMM' : 'NSE_FNO', securityId: resolved.dhanId };
+    }
+    if (isFuture) {
+      const f = feed.indexFuture;
+      return f ? { spec: { kind: 'future', underlying, expiry: f.expiry }, segment: 'NSE_FNO', securityId: f.dhanId } : null;
+    }
+    if (mcx) {
+      const f = feed.future;
+      return f?.expiry ? { spec: { kind: 'future', underlying, expiry: f.expiry }, segment: 'MCX_COMM', securityId: f.dhanId } : null;
+    }
+    return { spec: { kind: 'index', symbol: underlying }, segment: 'IDX_I', securityId: underlying === 'NIFTY' ? '13' : null };
+  }, [underlying, isOption, isFuture, resolved.strike, resolved.type, resolved.dhanId, feed.expiry, feed.indexFuture, feed.future]);
+  const alertsView = usePriceAlertsUi().view;
+  const alertLines = useMemo(() => {
+    if (!alertTarget?.securityId) return [];
+    return alertsFor(alertsView, alertTarget.segment, alertTarget.securityId).map(a => ({
+      id: a.id, price: a.value, paused: a.status === 'paused',
+      title: `${CONDITIONS[a.condition]}${a.action.kind === 'trade' ? ` · ${a.action.side} ${a.action.lots}L` : ''}`,
+    }));
+  }, [alertsView, alertTarget]);
+  const { onAlert } = p;
+  const addAlert = useCallback((sym: string, price: number) => {
+    if (!alertTarget) { onAlert(sym, price); return; }
+    priceAlertsStore.openDialog({ instrument: alertTarget.spec, instrumentLabel: sym, value: price });
+  }, [alertTarget, onAlert]);
+  const moveAlert = useCallback((id: string, value: number) => {
+    postAlertAction({ action: 'move', id, value }).then(
+      () => toast.success(`Alert moved to ${value}`),
+      (e: Error) => toast.error(`Alert not moved: ${e.message}`),
+    );
+  }, []);
+
   // Keep identity while nothing on this pane changed (legsKey), so the memoised chart skips feed pushes.
   const paneLegsAll = useMemo(() => p.legs.filter(l => legOnChart(l, resolved)), [p.legs, resolved]);
   const legsSig = legsKey(paneLegsAll);
@@ -261,7 +302,9 @@ function ChartPane(p: Props) {
           onCancelOrder={p.onCancelOrder} onModifyOrder={p.onModifyOrder}
           onPlaceLimitOrder={placeOrder}
           onOpenTicket={openTicket}
-          onAlert={p.onAlert}
+          onAlert={addAlert}
+          alertLines={alertLines}
+          onMoveAlert={moveAlert}
           simBrackets={p.simBrackets}
           onSetBracket={p.onSetBracket}
           onCancelBracket={p.onCancelBracket}

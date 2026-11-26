@@ -14,3 +14,10 @@ test('isxx (the Index Scalper\'s closing orders) is uncapped: a 10-lot CRUDEOIL 
   assert.equal(dhanSourceCapError(10, 'isxx', 'MCX_COMM'), null);
   assert.equal(dhanSourceCapError(5000, 'isxx', 'NSE_FNO'), null);
 });
+
+test('Price Alerts (pa): 10 lots — NSE units (10 x 75), MCX lots', () => {
+  assert.equal(dhanSourceCapError(650, 'pa', 'NSE_FNO'), null);   // NIFTY 10 x 65
+  assert.match(dhanSourceCapError(751, 'pa', 'NSE_FNO')!, /pa per-order cap of 750/);
+  assert.equal(dhanSourceCapError(10, 'pa', 'MCX_COMM'), null);
+  assert.notEqual(dhanSourceCapError(11, 'pa', 'MCX_COMM'), null);
+});

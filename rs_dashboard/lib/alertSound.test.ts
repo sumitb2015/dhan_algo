@@ -13,7 +13,7 @@ class FakeCtx {
     oscillators++;
     return { type: '', frequency: { value: 0 }, connect() {}, start() {}, stop() {} };
   }
-  createGain() { return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {} }; }
+  createGain() { return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {}, disconnect() {} }; }
 }
 (globalThis as unknown as { window: unknown }).window = {
   AudioContext: FakeCtx,
@@ -56,4 +56,16 @@ test('signal chimes (bull / bear / neutral) share the unlock and the throttle', 
   assert.equal(oscillators, 6);
   assert.equal(playNeutralChime(44_000), true);
   assert.equal(oscillators, 8);
+});
+
+test('alarm: schedules the chime for its whole duration up front, outside the throttle; stop() disconnects it', async () => {
+  const { playAlarm, ALARM_REPEAT_MS } = await import('./alertSound.ts');
+  playAlertChime(Date.now());                                // takes the shared throttle slot
+  oscillators = 0;
+  const stop = playAlarm(3 * ALARM_REPEAT_MS);
+  assert.equal(oscillators, 9, 'three chimes of three tones, all scheduled now, despite the throttle window');
+  stop(); stop();                                            // idempotent
+  oscillators = 0;
+  playAlarm(100);
+  assert.equal(oscillators, 3, 'a short alarm still plays one chime');
 });

@@ -2122,7 +2122,8 @@ export default function IndexScalperTerminal() {
       flash({ ok: false, text: 'No contract identifier for chart order' });
     }
   }, [flash]);
-  const onChartAlert = useCallback((sym: string, p: number) => { flash({ ok: true, text: `Alert set on ${sym} at ₹${p.toFixed(2)}` }); }, [flash]);
+  // The pane opens the Price Alerts dialog itself (ChartPane addAlert); this only runs when it cannot name the instrument yet.
+  const onChartAlert = useCallback((sym: string) => { flash({ ok: false, text: `${sym}: the contract is still loading — try the alert again in a moment` }); }, [flash]);
 
   return (
     <div ref={rootRef} data-testid="index-scalper" className={cn('flex flex-col h-screen overflow-hidden bg-zinc-950 text-white', real && 'ring-2 ring-inset ring-rose-600/70')}>

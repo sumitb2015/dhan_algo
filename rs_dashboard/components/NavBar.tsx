@@ -1,10 +1,11 @@
 'use client';
 import { useRouter } from 'next/navigation';
 import { memo, useState } from 'react';
-import { Bell, DatabaseZap, GitPullRequest, LogOut, RefreshCw, Settings } from 'lucide-react';
+import { AlarmClock, Bell, DatabaseZap, GitPullRequest, LogOut, RefreshCw, Settings } from 'lucide-react';
 import { toast } from 'sonner';
 import { useRefreshStatus } from '@/lib/useRefreshStatus';
 import { useWhatsNew } from '@/lib/whatsNewStore';
+import { priceAlertsStore, usePriceAlertsUi } from '@/lib/priceAlertsUi';
 import WhatsNewPanel from './WhatsNewPanel';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import DataRefreshPanel from './DataRefreshPanel';
@@ -25,6 +26,9 @@ function NavBar({ compact = false }: { compact?: boolean } = {}) {
   const [whatsNewOpen, setWhatsNewOpen] = useState(false);
   const sync = useRefreshStatus();
   const { unread } = useWhatsNew();
+  const alertsView = usePriceAlertsUi().view;
+  const activeAlerts = alertsView?.alerts.filter(a => a.status === 'active').length ?? 0;
+  const alertsArmed = !!alertsView?.armedToday;
 
   async function handleDisconnect() {
     try {
@@ -57,6 +61,28 @@ function NavBar({ compact = false }: { compact?: boolean } = {}) {
         </TooltipTrigger>
         <TooltipContent>
           Settings — MCX trading cutoff, theme &amp; typography
+        </TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger
+          onClick={priceAlertsStore.openPanel}
+          render={
+            <button
+              type="button"
+              aria-label={activeAlerts > 0 ? `Price alerts, ${activeAlerts} active` : 'Price alerts'}
+              className="relative flex items-center justify-center h-7 w-7 rounded-xl border border-zinc-700/60 dark:border-zinc-800 bg-zinc-900/80 text-zinc-300 transition-all duration-200 cursor-pointer hover:text-amber-400 hover:border-amber-500/40 hover:bg-zinc-800 active:scale-[0.94]"
+            />
+          }
+        >
+          <AlarmClock className="h-3.5 w-3.5" />
+          {activeAlerts > 0 && (
+            <span className={`absolute -top-1 -right-1 flex items-center justify-center min-w-[14px] h-[14px] px-0.5 rounded-full ${alertsArmed ? 'bg-red-500' : 'bg-amber-500'} text-oncolor text-[9px] font-bold leading-none`}>
+              {activeAlerts > 99 ? '99+' : activeAlerts}
+            </span>
+          )}
+        </TooltipTrigger>
+        <TooltipContent>
+          {activeAlerts > 0 ? `Price alerts — ${activeAlerts} active${alertsArmed ? ', REAL orders armed' : ''}` : 'Price alerts'}
         </TooltipContent>
       </Tooltip>
       <Tooltip>

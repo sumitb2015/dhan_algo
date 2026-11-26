@@ -112,6 +112,9 @@ interface Props {
   onPlaceLimitOrder?: (req: { side: 'BUY' | 'SELL'; price: number; lots: number; orderType?: 'LIMIT' | 'STOP_LOSS' }) => void;
   onOpenTicket?: (req: { price: number; lots: number; orderType: 'LIMIT' }) => void;
   onAlert?: (symbol: string, price: number) => void;
+  /** Price Alerts on this chart's instrument, drawn as bell lines; their chip drags them to a new level (onMoveAlert, on release). */
+  alertLines?: AlertLine[];
+  onMoveAlert?: (id: string, price: number) => void;
   simBrackets?: Record<string, { tp?: number; sl?: number }>;
   onSetBracket?: (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }) => void;
   onCancelBracket?: (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => void;
@@ -187,11 +190,15 @@ function seriesData(s: OutSeries, bars: Bar[]) {
   });
 }
 
+export interface AlertLine { id: string; price: number; title: string; paused: boolean }
+const NO_ALERT_LINES: AlertLine[] = [];
+const ALERT_COLOR = '#f59e0b';
+
 function ScalperChart(props: Props) {
   const {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, showGrid = true, showVolume = true, volumeMaLen = 20, legs, entrySpots,
     onExitLeg, onAdjustLeg, adjustLots = 1, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
-    contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, ordersEnabled = true, onPlaceLimitOrder, onOpenTicket, onAlert,
+    contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, ordersEnabled = true, onPlaceLimitOrder, onOpenTicket, onAlert, alertLines = NO_ALERT_LINES, onMoveAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, trails, onSetTrail, onCancelTrail, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
     premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, resetSeq = 0, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false, premiumOrders,
   } = props;
@@ -240,6 +247,10 @@ function ScalperChart(props: Props) {
   // The dragged-to price lives in a ref: the drag effect may re-run mid-drag, and a local would reset to the start, so
   // a release then sent nothing ("sometimes it does not drag").
   const ordDragPriceRef = useRef(0);
+  // Price Alert lines (one price line each) and the alert being dragged by its chip (price kept in a ref, like ordDrag).
+  const alertLinesRef = useRef<Map<string, IPriceLine>>(new Map());
+  const [alertDrag, setAlertDrag] = useState<{ id: string; startPrice: number } | null>(null);
+  const alertDragPriceRef = useRef(0);
   const [hoverScale, setHoverScale] = useState<{ y: number; price: number } | null>(null);
   const plusRef = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<{ y: number; price: number } | null>(null);
@@ -1031,6 +1042,56 @@ function ScalperChart(props: Props) {
     for (const [id, l] of lines) if (!seen.has(id)) { try { candles.removePriceLine(l); } catch { /* gone */ } lines.delete(id); }
   }, [regularOrders, activeOrd]);
 
+  // ── Price Alert lines: amber dashed (paused: grey dotted), repainted only when the alert set changes ──
+  useEffect(() => {
+    const candles = candleRef.current;
+    if (!candles) return;
+    const lines = alertLinesRef.current;
+    const seen = new Set<string>();
+    for (const a of alertLines) {
+      seen.add(a.id);
+      if (alertDrag?.id === a.id) continue;          // the drag owns this line's price until release
+      const opts = {
+        price: a.price, color: a.paused ? chrome.textMuted : ALERT_COLOR, lineWidth: 1 as const,
+        lineStyle: a.paused ? LineStyle.Dotted : LineStyle.Dashed, axisLabelVisible: true, title: `🔔 ${a.title}${a.paused ? ' (paused)' : ''}`,
+      };
+      const ex = lines.get(a.id);
+      if (ex) ex.applyOptions(opts); else lines.set(a.id, candles.createPriceLine(opts));
+    }
+    for (const [id, l] of lines) if (!seen.has(id)) { try { candles.removePriceLine(l); } catch { /* gone */ } lines.delete(id); }
+  }, [alertLines, alertDrag, chrome.textMuted]);
+
+  // Dragging an alert by its chip: the line follows the mouse (snapped to the tick); release saves the new level, Esc reverts.
+  useEffect(() => {
+    const candles = candleRef.current;
+    const box = boxRef.current;
+    if (!alertDrag || !candles || !box) return;
+    const line = alertLinesRef.current.get(alertDrag.id);
+    const onMove = (e: MouseEvent) => {
+      const raw = candles.coordinateToPrice(e.clientY - box.getBoundingClientRect().top);
+      if (raw === null || !(raw > 0)) return;
+      const price = Number((Math.round(raw / tickSize) * tickSize).toFixed(2));
+      alertDragPriceRef.current = price;
+      line?.applyOptions({ price });
+    };
+    const finish = (send: boolean) => {
+      const price = alertDragPriceRef.current;
+      setAlertDrag(null);
+      if (send && Math.abs(price - alertDrag.startPrice) > 1e-9) onMoveAlert?.(alertDrag.id, price);
+      else line?.applyOptions({ price: alertDrag.startPrice });
+    };
+    const onUp = () => finish(true);
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') finish(false); };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [alertDrag, onMoveAlert, tickSize]);
+
   // Chip y-positions follow the price scale (zoom / pan / autoscale move it with no event), so re-read them on a short timer.
   useEffect(() => {
     const candles = candleRef.current;
@@ -1070,6 +1131,11 @@ function ScalperChart(props: Props) {
         const y = p ? candles.priceToCoordinate(p) : null;
         if (y !== null) out[`oline_${ord.id}`] = Number(y);
       }
+      // Alert chips sit on their own line (left edge), not pushed apart; a dragged one follows the drag.
+      for (const a of alertLines) {
+        const y = candles.priceToCoordinate(alertDrag?.id === a.id ? alertDragPriceRef.current : a.price);
+        if (y !== null) out[`alert_${a.id}`] = Number(y);
+      }
       setChipTops(prev => {
         const ks = Object.keys(out);
         if (ks.length === Object.keys(prev).length && ks.every(k => Math.abs((prev[k] ?? -9) - out[k]) < 0.5)) return prev;
@@ -1079,7 +1145,7 @@ function ScalperChart(props: Props) {
     tick();
     const t = setInterval(tick, 150);
     return () => clearInterval(t);
-  }, [placed, activeBrackets, regularOrders]);
+  }, [placed, activeBrackets, regularOrders, alertLines, alertDrag]);
 
   // ── OI profile: Call / Put OI bars at each strike's level ─────────────
   // Drawn on one canvas over the plot, behind the chips, ignoring the mouse. Zoom / pan / autoscale fire no event, so it
@@ -1464,6 +1530,29 @@ function ScalperChart(props: Props) {
           </button>
         </div>
       )}
+
+      {/* Price Alert chips: bell + level at the left edge of each alert line; press and drag to move the alert */}
+      {alertLines.map(a => {
+        const top = chipTops[`alert_${a.id}`];
+        if (top === undefined) return null;
+        const dragging = alertDrag?.id === a.id;
+        return (
+          <div key={`alert_${a.id}`} data-testid="alert-chip" data-alert-id={a.id} style={{ top: top - 10 }}
+            title={onMoveAlert ? 'Price alert — drag to move it to a new level (Esc cancels)' : 'Price alert'}
+            onMouseDown={e => {
+              if (!onMoveAlert) return;
+              e.stopPropagation(); e.preventDefault();
+              alertDragPriceRef.current = a.price;
+              setAlertDrag({ id: a.id, startPrice: a.price });
+            }}
+            className={cn('absolute left-2 z-[55] flex items-center gap-1 px-1.5 h-[20px] rounded border text-[11px] font-mono bg-zinc-900 shadow select-none',
+              a.paused ? 'border-zinc-600 text-zinc-400' : 'border-amber-500/60 text-amber-400',
+              onMoveAlert && (dragging ? 'cursor-grabbing ring-1 ring-amber-400' : 'cursor-ns-resize'))}>
+            <Bell className="w-3 h-3" />
+            <span className="font-semibold">{fmt(dragging ? alertDragPriceRef.current : a.price)}</span>
+          </div>
+        );
+      })}
 
       {/* working order chips on chart: this page's own Limit / SL / SL-M orders can be dragged to a new price (chip or
           line) and have their lots edited; another placer's order is shown with its x only */}

@@ -1264,6 +1264,59 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('Price Alerts: "+" menu opens the alert dialog on the chart\'s instrument; an alert on it is a draggable bell line', async ({ page, context }) => {
+    const state = newState();
+    const moves: Record<string, unknown>[] = [];
+    await signIn(context);
+    await mockApi(page, state);
+    // registered after mockApi, so it wins for the alerts routes: one active NIFTY index alert just above spot
+    const alert = {
+      id: 'al1', createdAt: 1, updatedAt: 1,
+      instrument: { kind: 'index', segment: 'IDX_I', securityId: '13', displayName: 'NIFTY', underlying: 'NIFTY', expiry: null, lot: 1 },
+      condition: 'crossUp', value: SPOT + 20, trigger: 'once', expiresAt: null, soundSec: 3, message: '', action: { kind: 'notify' },
+      status: 'active', firedCount: 0, lastFiredAt: null, lastFiredPrice: null,
+    };
+    const alertView = () => ({ success: true, data: { alerts: [alert], armedToday: false, defaultSoundSec: 3, version: 1 + moves.length, log: [] } });
+    await page.route('**/api/price-alerts**', async (route: Route) => {
+      const req = route.request();
+      const p = new URL(req.url()).pathname;
+      if (p === '/api/price-alerts/stream') return route.fulfill({ status: 200, contentType: 'text/event-stream', body: `data: ${JSON.stringify(alertView())}\n\n` });
+      if (req.method() === 'POST') { const b = req.postDataJSON() as Record<string, unknown>; moves.push(b); alert.value = Number(b.value); }
+      return json(route, alertView());
+    });
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    const pane = page.getByTestId('chart-pane-0');
+    await expect(pane.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+
+    // the alert is drawn on the NIFTY index chart with its chip; dragging the chip moves the alert (one POST on release)
+    const chip = pane.getByTestId('alert-chip');
+    await expect(chip).toBeVisible();
+    await expect(chip).toContainText(String(SPOT + 20).replace(/(\d)(\d{3})$/, '$1,$2'));
+    await dragFrom(page, chip, 60);
+    await expect.poll(() => moves.length).toBe(1);
+    expect(moves[0]).toMatchObject({ action: 'move', id: 'al1' });
+    expect(Number(moves[0].value)).toBeLessThan(SPOT + 20);
+
+    // "+" -> Add alert: the dialog opens on NIFTY with the clicked price
+    await page.waitForTimeout(500);
+    const box = (await pane.locator('canvas').first().boundingBox())!;
+    const paneBox = (await pane.boundingBox())!;
+    await page.mouse.move(paneBox.x + paneBox.width - 110, box.y + box.height * 0.4);
+    const plus = pane.getByRole('button', { name: /^Order options at / });
+    await expect(plus).toBeVisible();
+    await plus.click();
+    await pane.getByTestId('chart-scale-menu').getByRole('button', { name: /^Add alert on/ }).click();
+    const dlg = page.getByRole('dialog', { name: 'Create alert' });
+    await expect(dlg).toBeVisible();
+    await expect(dlg.getByRole('heading')).toContainText('NIFTY');
+    const v = Number(await dlg.getByLabel('Value', { exact: true }).inputValue());
+    expect(v).toBeGreaterThan(SPOT - 1000);
+    expect(v).toBeLessThan(SPOT + 1000);
+    await dlg.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dlg).toHaveCount(0);
+    expect(state.blocked).toEqual([]);
+  });
+
   test('2-chart layout: right pane plots the ATM CE premium, picks a PE and its own timeframe, survives a reload', async ({ page, context }) => {
     const state = newState();
     await signIn(context);

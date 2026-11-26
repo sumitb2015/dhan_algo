@@ -189,6 +189,11 @@ if (process.env.DASHBOARD_NO_BACKGROUND === '1') {
   import('./lib/priceLadderServer').then(m => m.startPriceLadderLoop()).catch(err => {
     console.warn('[price-ladder] could not start the watcher:', err);
   });
+  // Price Alerts: evaluates the header's TradingView-style alerts (notify / one Dhan order) with every tab closed.
+  // Idle (one stat every 500 ms) without an active alert.
+  import('./lib/priceAlertServer').then(m => m.startPriceAlertLoop()).catch(err => {
+    console.warn('[price-alerts] could not start the watcher:', err);
+  });
   // Fresh Money: fires per-position target / stop-loss exits with every tab closed. Idle while no position has levels.
   import('./lib/freshMoneyExitServer').then(m => m.startFreshMoneyExitLoop()).catch(err => {
     console.warn('[fm-exit] could not start the watcher:', err);

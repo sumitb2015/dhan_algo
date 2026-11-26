@@ -4,6 +4,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import ThemeInit from "@/components/ThemeInit";
 import Sidebar from "@/components/Sidebar";
 import KotakGuardBanner from "@/components/KotakGuardBanner";
+import PriceAlertListener from "@/components/priceAlerts/PriceAlertListener";
 import { Toaster } from "sonner";
 import ThemeInitScript from "@/components/ThemeInitScript";
 import "./globals.css";
@@ -116,10 +117,13 @@ export default function RootLayout({
               success: '!border-emerald-500/30',
               error: '!border-red-500/30',
               icon: 'text-amber-400',
+              actionButton: '!ml-auto shrink-0 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-[11px] font-bold text-zinc-100 hover:bg-zinc-700 cursor-pointer',
             },
           }}
         />
         <KotakGuardBanner />
+        {/* Price Alerts: one stream + alarm per tab, plus the header bell's panel and dialog (lib/priceAlertsUi.ts). */}
+        <PriceAlertListener />
         <TooltipProvider>{children}</TooltipProvider>
       </body>
     </html>

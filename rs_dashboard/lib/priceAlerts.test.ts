@@ -1,0 +1,128 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  conditionMet, stepAlert, expiryReason, alertOrderQty, sessionOpen, tradeBlock, parseAlertInput, appendLog, alertCorrelationId,
+  EVERY_COOLDOWN_MS, MAX_ALERT_LOTS, MAX_LOG, type PriceAlert, type AlertEvent, type AlertMemory,
+} from './priceAlerts.ts';
+
+// 2026-11-26 is a Thursday. IST = UTC + 5:30.
+const ist = (hh: number, mm: number, day = '2026-11-26') => Date.parse(`${day}T00:00:00Z`) + ((hh * 60 + mm) - 330) * 60_000;
+
+test('conditions: crossings need a previous price; Greater/Less Than are states', () => {
+  assert.equal(conditionMet('crossUp', 100, null, 105), false);
+  assert.equal(conditionMet('crossUp', 100, 99, 100), true);
+  assert.equal(conditionMet('crossUp', 100, 100, 101), false);       // already at the level: not a new crossing
+  assert.equal(conditionMet('crossUp', 100, 101, 99), false);
+  assert.equal(conditionMet('crossDown', 100, 101, 100), true);
+  assert.equal(conditionMet('crossDown', 100, 99, 101), false);
+  assert.equal(conditionMet('cross', 100, 99, 101), true);
+  assert.equal(conditionMet('cross', 100, 101, 99), true);
+  assert.equal(conditionMet('cross', 100, 101, 102), false);
+  assert.equal(conditionMet('gt', 100, null, 100.5), true);
+  assert.equal(conditionMet('gt', 100, null, 100), false);
+  assert.equal(conditionMet('lt', 100, null, 99), true);
+});
+
+test('first sample is a baseline: a crossing alert never fires on it', () => {
+  const a = { condition: 'crossUp' as const, value: 100, trigger: 'once' as const };
+  const r1 = stepAlert(a, undefined, 150, 1000);
+  assert.equal(r1.fire, false);
+  const r2 = stepAlert(a, r1.mem, 90, 2000);
+  assert.equal(r2.fire, false);
+  const r3 = stepAlert(a, r2.mem, 100, 3000);
+  assert.equal(r3.fire, true);
+});
+
+test('every time: Greater Than re-arms only after the condition went false, and waits out the cooldown', () => {
+  const a = { condition: 'gt' as const, value: 100, trigger: 'every' as const };
+  let mem: AlertMemory | undefined;
+  let r = stepAlert(a, mem, 101, 0); assert.equal(r.fire, true); mem = r.mem;
+  r = stepAlert(a, mem, 102, 20_000); assert.equal(r.fire, false, 'still above: no repeat'); mem = r.mem;
+  r = stepAlert(a, mem, 99, 21_000); assert.equal(r.fire, false); mem = r.mem;
+  r = stepAlert(a, mem, 101, 22_000); assert.equal(r.fire, true, 're-armed after dipping below'); mem = r.mem;
+  r = stepAlert(a, mem, 99, 23_000); mem = r.mem;
+  r = stepAlert(a, mem, 101, 24_000); assert.equal(r.fire, false, 'inside the cooldown'); mem = r.mem;
+  r = stepAlert(a, mem, 99, 22_000 + EVERY_COOLDOWN_MS); mem = r.mem;
+  r = stepAlert(a, mem, 101, 22_000 + EVERY_COOLDOWN_MS + 1); assert.equal(r.fire, true);
+});
+
+test('every time crossing: a price hovering on the level fires at most once per cooldown', () => {
+  const a = { condition: 'cross' as const, value: 100, trigger: 'every' as const };
+  let mem = stepAlert(a, undefined, 99, 0).mem;
+  let r = stepAlert(a, mem, 101, 1000); assert.equal(r.fire, true); mem = r.mem;
+  r = stepAlert(a, mem, 99, 2000); assert.equal(r.fire, false); mem = r.mem;
+  r = stepAlert(a, mem, 101, 3000); assert.equal(r.fire, false); mem = r.mem;
+  r = stepAlert(a, mem, 99, 1000 + EVERY_COOLDOWN_MS); assert.equal(r.fire, true);
+});
+
+const base = (over: Partial<PriceAlert> = {}): PriceAlert => ({
+  id: 'abc123', createdAt: 0, updatedAt: 0,
+  instrument: { kind: 'index', segment: 'IDX_I', securityId: '13', displayName: 'NIFTY', underlying: 'NIFTY', expiry: null, lot: 1 },
+  condition: 'crossUp', value: 24000, trigger: 'once', expiresAt: null, soundSec: 3, message: '',
+  action: {
+    kind: 'trade', side: 'BUY', lots: 2, product: 'INTRADAY',
+    contract: { kind: 'option', segment: 'NSE_FNO', securityId: '555', displayName: 'NIFTY 24000 CE', underlying: 'NIFTY', expiry: '2026-12-01', lot: 65 },
+  },
+  status: 'active', firedCount: 0, lastFiredAt: null, lastFiredPrice: null, ...over,
+});
+
+test('expiry: own expiry time, and an expired watched or traded contract', () => {
+  assert.equal(expiryReason(base(), ist(10, 0)), null);
+  assert.equal(expiryReason(base({ expiresAt: ist(9, 0) }), ist(10, 0)), 'Alert expired');
+  assert.match(String(expiryReason(base(), ist(10, 0, '2026-12-02'))), /NIFTY 24000 CE expired/);
+  assert.equal(expiryReason(base(), ist(23, 0, '2026-12-01')), null, 'still live on its expiry day');
+});
+
+test('order quantity: NSE units = lots x lot, MCX = lots, out-of-range lots refused', () => {
+  assert.equal(alertOrderQty({ segment: 'NSE_FNO', lot: 65 }, 2), 130);
+  assert.equal(alertOrderQty({ segment: 'MCX_COMM', lot: 10 }, 3), 3);
+  assert.equal(alertOrderQty({ segment: 'NSE_FNO', lot: 65 }, MAX_ALERT_LOTS + 1), 0);
+  assert.equal(alertOrderQty({ segment: 'NSE_FNO', lot: 0 }, 1), 0);
+  assert.equal(alertOrderQty({ segment: 'NSE_FNO', lot: 65 }, 1.5), 0);
+});
+
+test('sessions: NSE 09:15-15:30 on trading days, MCX evening', () => {
+  assert.equal(sessionOpen('NSE_FNO', ist(9, 14)), false);
+  assert.equal(sessionOpen('NSE_FNO', ist(9, 15)), true);
+  assert.equal(sessionOpen('NSE_FNO', ist(15, 30)), false);
+  assert.equal(sessionOpen('NSE_FNO', ist(11, 0, '2026-11-28')), false, 'Saturday');
+  assert.equal(sessionOpen('MCX_COMM', ist(21, 0)), true);
+  assert.equal(sessionOpen('MCX_COMM', ist(8, 0)), false);
+});
+
+test('trade block: not armed, closed market, expired contract', () => {
+  const now = ist(10, 0);
+  assert.match(String(tradeBlock({ armedOn: null }, base(), now)), /not armed/);
+  assert.match(String(tradeBlock({ armedOn: '2026-11-25' }, base(), now)), /not armed/, 'yesterday\'s arm does not count');
+  assert.equal(tradeBlock({ armedOn: '2026-11-26' }, base(), now), null);
+  assert.match(String(tradeBlock({ armedOn: '2026-11-26' }, base(), ist(16, 0))), /closed/);
+});
+
+test('input: trade alerts are forced to once only, and indices cannot be traded', () => {
+  const now = 1_000;
+  const ok = parseAlertInput({
+    instrument: { kind: 'index', symbol: 'nifty' }, condition: 'crossUp', value: 24000, trigger: 'every',
+    action: { kind: 'trade', contract: { kind: 'option', underlying: 'NIFTY', expiry: '2026-12-01', strike: 24000, optType: 'CE' }, side: 'BUY', lots: 1 },
+  }, now);
+  assert.ok(typeof ok !== 'string');
+  assert.equal(ok.trigger, 'once');
+  assert.equal(ok.soundSec, 3);
+  assert.deepEqual(ok.instrument, { kind: 'index', symbol: 'NIFTY' });
+  assert.match(String(parseAlertInput({ instrument: { kind: 'index', symbol: 'NIFTY' }, condition: 'gt', value: 1,
+    action: { kind: 'trade', contract: { kind: 'index', symbol: 'NIFTY' }, side: 'BUY', lots: 1 } }, now)), /cannot be traded/);
+  assert.match(String(parseAlertInput({ instrument: { kind: 'index', symbol: 'NIFTY' }, condition: 'gt', value: 1,
+    action: { kind: 'trade', contract: { kind: 'future', underlying: 'NIFTY', expiry: '2026-12-30' }, side: 'BUY', lots: 11 } }, now)), /Lots/);
+  assert.match(String(parseAlertInput({ instrument: { kind: 'index', symbol: 'NIFTY' }, condition: 'bad', value: 1 }, now)), /condition/);
+  assert.match(String(parseAlertInput({ instrument: { kind: 'index', symbol: 'NIFTY' }, condition: 'gt', value: -1 }, now)), /Value/);
+  assert.match(String(parseAlertInput({ instrument: { kind: 'index', symbol: 'NIFTY' }, condition: 'gt', value: 1, soundSec: 0 }, now)), /Sound/);
+  assert.match(String(parseAlertInput({ instrument: { kind: 'index', symbol: 'NIFTY' }, condition: 'gt', value: 1, expiresAt: 500 }, now)), /future/);
+});
+
+test('log is capped, correlation ids are Dhan-valid', () => {
+  const ev = (i: number) => ({ id: String(i) }) as AlertEvent;
+  const log = appendLog(Array.from({ length: MAX_LOG }, (_, i) => ev(i)), [ev(MAX_LOG)]);
+  assert.equal(log.length, MAX_LOG);
+  assert.equal(log.at(-1)?.id, String(MAX_LOG));
+  const cid = alertCorrelationId('lx9a2-Zq81', Date.now());
+  assert.match(cid, /^pa[a-z0-9]{6,23}$/);
+});
