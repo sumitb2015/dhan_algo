@@ -128,7 +128,7 @@ export default function OrderTicket({
   return (
     <div style={{ left: pos.x, top: pos.y }} data-testid="order-ticket"
       onKeyDown={e => { if (e.key === 'Escape') onClose(); }}
-      className={cn('fixed z-50 w-[320px] rounded-lg border bg-zinc-900 shadow-2xl select-none', real ? 'border-rose-500/70' : 'border-zinc-700')}>
+      className={cn('fixed z-[58] w-[320px] rounded-lg border bg-zinc-900 shadow-2xl select-none', real ? 'border-rose-500/70' : 'border-zinc-700')}>
       <div {...handle} className="flex items-center justify-between gap-2 px-3 py-2 border-b border-zinc-800 cursor-move">
         <div className="min-w-0">
           <div className="text-sm font-bold text-white truncate">{underlying} {title}</div>

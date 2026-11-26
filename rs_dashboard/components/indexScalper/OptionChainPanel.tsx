@@ -122,7 +122,7 @@ export default function OptionChainPanel({ feed, onPick, onTrade, oneClick, onCl
 
   return (
     <div style={{ left: pos.x, top: pos.y }}
-      className="fixed z-40 w-[860px] max-w-[calc(100vw-16px)] rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl select-none" data-testid="option-chain-panel">
+      className="fixed z-[57] w-[860px] max-w-[calc(100vw-16px)] rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl select-none" data-testid="option-chain-panel">
       <div {...handle} className="flex items-center justify-between gap-3 px-3 py-2 border-b border-zinc-800 cursor-move">
         <span className="flex items-center gap-2 text-sm font-bold text-white">Option Chain
           {feed.chainSource === 'live' && <span className="px-1.5 py-px rounded border border-emerald-500/40 text-[10px] font-bold text-emerald-400">LIVE</span>}

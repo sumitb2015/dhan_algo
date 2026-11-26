@@ -129,6 +129,8 @@ test.describe('Index Scalper', () => {
     await expect(chip.getByTestId('position-lots')).toHaveAttribute('aria-label', 'Long 1 lot (65 units)');
     await expect(chip).toContainText('SIM');
 
+    // the ticket floats above the chart chips: close it to reach the chip's Exit
+    await ticket.getByRole('button', { name: 'Close order ticket' }).click();
     await page.getByRole('button', { name: 'Exit PE 25350' }).click();
     await expect(page.getByTestId('position-chip')).toHaveCount(0);
 

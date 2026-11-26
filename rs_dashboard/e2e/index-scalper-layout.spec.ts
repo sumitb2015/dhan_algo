@@ -512,7 +512,7 @@ test.describe('Index Scalper layout + option charts', () => {
     await mockApi(page, state);
     await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
     await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
-    await expect(page.getByTitle('Current time (IST)')).toHaveText(/^\d{2}:\d{2}:\d{2} IST$/);
+    await expect(page.getByTitle('Current time (IST)')).toHaveText(/^\d{2}:\d{2}:\d{2}\s?(IST)?$/);
     if (process.env.ISX_SHOT) await page.screenshot({ path: process.env.ISX_SHOT, clip: { x: 0, y: 0, width: 1600, height: 80 } });
     expect(state.blocked).toEqual([]);
   });

@@ -170,9 +170,12 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
     await expect(crudeBtn).toBeVisible();
     await crudeBtn.click();
 
-    // Verify Buy FUT and Sell FUT buttons appear in toolbar
+    // The header has no Buy / Sell FUT buttons (the Scalper window has them): open it and check both are there
+    await expect(page.getByRole('button', { name: 'Buy FUT', exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Scalper', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Buy FUT', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Sell FUT', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Scalper', exact: true }).click(); // closes the window again
 
     // Verify option chain displays the pinned FUT row
     await page.getByRole('button', { name: 'Option chain' }).click();
@@ -190,7 +193,7 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
     // One-click (Scalper) mode: without it Buy FUT only opens the order ticket
     await page.getByRole('button', { name: 'Scalper', exact: true }).click();
     // Click Buy FUT in Dhan REAL mode: should send fast-order with exchangeSegment: 'MCX_COMM' and quantity: 1 lot
-    await page.getByRole('button', { name: 'Buy FUT', exact: true }).first().click(); // the toolbar's (the Scalper window has one too)
+    await page.getByRole('button', { name: 'Buy FUT', exact: true }).first().click();
     await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
     const dhanCall = state.calls[0];
     expect(dhanCall.path).toBe('/api/scalper/fast-order');
@@ -227,7 +230,7 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
 
     await page.getByRole('button', { name: 'Scalper', exact: true }).click();
     // Click Buy FUT in Kotak REAL mode: should send kotak-order with exchange: 'mcx_fo' and quantity: 10 barrels
-    await page.getByRole('button', { name: 'Buy FUT', exact: true }).first().click(); // the toolbar's (the Scalper window has one too)
+    await page.getByRole('button', { name: 'Buy FUT', exact: true }).first().click();
     await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
     const kotakCall = state.calls[0];
     expect(kotakCall.path).toBe('/api/index-scalper/kotak-order');
@@ -345,7 +348,11 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
     const ticket = page.getByTestId('order-ticket');
     const panel = page.getByTestId('account-panel');
     const place = async (side: 'Buy' | 'Sell', type: 'Limit' | 'Stop', px: string) => {
-      await page.getByRole('button', { name: 'Buy FUT', exact: true }).first().click(); // no Scalper: opens the ticket
+      // the chain's FUT row opens the ticket; the chain is closed again so the ticket (which can sit over it on a
+      // narrow window) never covers the row for the next order
+      await page.getByRole('button', { name: 'Option chain', exact: true }).click();
+      await page.getByRole('button', { name: 'Trade Future' }).click();
+      await page.getByRole('button', { name: 'Close option chain' }).click(); // no Scalper: the chain's FUT row opens the ticket
       await ticket.getByRole('button', { name: type, exact: true }).click();
       await ticket.getByLabel(type === 'Limit' ? 'Price' : 'Trigger price').fill(px);
       await ticket.getByRole('button', { name: new RegExp(`^${side} `) }).click();
@@ -427,8 +434,9 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
     await expect(page.getByTestId('chart-pane-0')).toContainText('CRUDEOIL FUT', { timeout: 30_000 });
     await page.getByRole('button', { name: 'REAL' }).click();
     await page.getByRole('button', { name: /Arm REAL on Dhan/i }).click();
-    // without one-click mode, Buy FUT opens the ticket
-    await page.getByRole('button', { name: 'Buy FUT', exact: true }).first().click();
+    // without one-click mode, the chain's FUT row opens the ticket
+    await page.getByRole('button', { name: 'Option chain', exact: true }).click();
+    await page.getByRole('button', { name: 'Trade Future' }).click();
     const ticket = page.getByTestId('order-ticket');
     await expect(ticket).toContainText('max 5');
     await ticket.getByLabel(/Lots/).fill('6');

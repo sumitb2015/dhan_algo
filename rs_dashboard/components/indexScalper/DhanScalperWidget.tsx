@@ -261,7 +261,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
   return (
     <>
       <div style={{ left: pos.x, top: pos.y }} data-testid="dhan-scalper-widget"
-        className={cn('fixed z-50 w-[360px] rounded-2xl shadow-2xl select-none bg-zinc-900 border border-zinc-700', real ? 'ring-2 ring-rose-500/80' : 'ring-1 ring-zinc-700/60')}>
+        className={cn('fixed z-[58] w-[360px] rounded-2xl shadow-2xl select-none bg-zinc-900 border border-zinc-700', real ? 'ring-2 ring-rose-500/80' : 'ring-1 ring-zinc-700/60')}>
         <div {...handle} className="flex items-center justify-between px-3 py-2.5 border-b border-zinc-800 cursor-move">
           <div className="flex items-center gap-2 min-w-0">
             <Zap className="w-4 h-4 text-sky-400 fill-sky-400 shrink-0" />
@@ -364,7 +364,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
 
       {settingsOpen && (
         <div style={{ left: manageLeft(pos.x), top: pos.y }}
-          data-testid="manage-scrips-panel" className="fixed z-50 w-[320px] rounded-2xl shadow-2xl select-none bg-zinc-900 border border-zinc-700 p-3.5 ring-1 ring-zinc-700/60">
+          data-testid="manage-scrips-panel" className="fixed z-[58] w-[320px] rounded-2xl shadow-2xl select-none bg-zinc-900 border border-zinc-700 p-3.5 ring-1 ring-zinc-700/60">
           <div className="flex items-center justify-between pb-2.5 border-b border-zinc-800">
             <div className="flex items-center gap-2">
               <Settings className="w-4 h-4 text-zinc-400" />

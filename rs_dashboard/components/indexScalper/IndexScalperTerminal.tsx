@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AreaChart, BarChart3, Building2, CandlestickChart, Columns2, Gauge, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Scaling, Target, Trash2, TrendingUp, Volume2, VolumeX, Zap,
+  AreaChart, OctagonX, BarChart3, Building2, CandlestickChart, Columns2, Gauge, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Scaling, Target, Trash2, TrendingUp, Volume2, VolumeX, Zap,
 } from 'lucide-react';
 import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { useTabLeader } from '@/hooks/useTabLeader';
@@ -1263,27 +1263,6 @@ export default function IndexScalperTerminal() {
     for (const [leg, t] of fire) void fireTrail(leg, t);
   }, [legs, real, broker, bookReady, trailTick, saveTrails, fireTrail]);
 
-  // ── one-click scalper (buy ATM CE / PE) ────────────────────────────
-  const atmContract = useCallback((type: 'CE' | 'PE'): PickedContract | null => {
-    const q = feed.quotes;
-    if (!q || !q.atm) return null;
-    const ids = feed.strikeIds.get(q.atm);
-    const sd = q.strikes?.[String(q.atm)] ?? Object.values(q.strikes ?? {}).find(r => r.strike === q.atm);
-    const id = type === 'CE' ? ids?.ceId : ids?.peId;
-    const ltp = type === 'CE' ? sd?.ce?.ltp : sd?.pe?.ltp;
-    const prevClose = type === 'CE' ? sd?.ce?.prev_close : sd?.pe?.prev_close;
-    const finalLtp = ltp && ltp > 0 ? ltp : (prevClose && prevClose > 0 ? prevClose : null);
-    const kotakSym = type === 'CE' ? feed.kotak?.strikes?.get(q.atm)?.ceSymbol : feed.kotak?.strikes?.get(q.atm)?.peSymbol;
-    return {
-      strike: q.atm,
-      type,
-      securityId: id ?? kotakSym ?? null,
-      ltp: finalLtp,
-      expiry: feed.expiry,
-      tradingSymbol: kotakSym,
-    };
-  }, [feed.quotes, feed.strikeIds, feed.kotak, feed.expiry]);
-
   /** Cancel any working order on the broker's book (this page's, the mobile app's, another terminal's). */
   const sendCancel = useCallback(async (orderId: string) => {
     placedChecksRef.current.delete(orderId);
@@ -1335,30 +1314,6 @@ export default function IndexScalperTerminal() {
       setTicketBusy(false);
     }
   }, [scalperOn, ticketBusy, placeContract, scalpLots, flash]);
-
-  const quickBuy = useCallback((type: 'CE' | 'PE') => {
-    const c = atmContract(type);
-    if (!c) { flash({ ok: false, text: 'ATM contract not ready yet' }); return; }
-    void tradeNow(c, 'BUY');
-  }, [atmContract, tradeNow, flash]);
-
-  const quickTradeFut = useCallback((side: 'BUY' | 'SELL') => {
-    const f = feed.future;
-    const isKotak = brokerRef.current === 'kotak';
-    if (!f || (isKotak ? !f.kotakSymbol : !f.dhanId)) {
-      flash({ ok: false, text: 'Future contract not ready yet' });
-      return;
-    }
-    const c: PickedContract = {
-      strike: 0,
-      type: 'FUT',
-      securityId: f.dhanId ?? f.kotakSymbol ?? null,
-      ltp: f.ltp,
-      expiry: f.expiry ?? feed.expiry,
-      tradingSymbol: f.kotakSymbol ?? undefined,
-    };
-    void tradeNow(c, side);
-  }, [feed.future, feed.expiry, tradeNow, flash]);
 
   // The chart's contract (the future on screen). Keyed on its identity only, never its price: feed.future is a new object
   // on every feed push, and the chart callbacks built from this would re-render the memoised chart 20-40 times a second.
@@ -2097,7 +2052,7 @@ export default function IndexScalperTerminal() {
   const orderQtyMult = real ? pnlMultiplier(underlying, broker) : 1;
   const notLive = feed.feedAgeSec === null && feed.chainSource === 'snapshot';
 
-  const btn = 'h-7 px-2 rounded text-xs font-semibold text-zinc-300 hover:bg-zinc-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60 transition-colors';
+  const btn = 'h-7 px-1.5 whitespace-nowrap rounded text-xs font-semibold text-zinc-300 hover:bg-zinc-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60 transition-colors';
   const sep = <span className="w-px h-5 bg-zinc-800 shrink-0" />;
   const scaleBtn = 'h-6 px-1.5 rounded hover:text-white hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60 transition-colors';
 
@@ -2130,17 +2085,18 @@ export default function IndexScalperTerminal() {
   return (
     <div ref={rootRef} data-testid="index-scalper" className={cn('flex flex-col h-screen overflow-hidden bg-zinc-950 text-white', real && 'ring-2 ring-inset ring-rose-600/70')}>
       {/* header toolbar */}
-      {/* Wraps onto a second line when the controls do not fit (a laptop width): overlapping groups hid REAL / SIM. */}
-      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 px-3 py-1.5 min-h-11 border-b border-zinc-800 bg-zinc-950 shrink-0">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0 whitespace-nowrap [&>*]:shrink-0">
-          <div className="flex items-center gap-1.5">
+      {/* One row where it fits. The left group is display:contents so every cluster is a direct item of this row: on a narrow window it
+          wraps between clusters (never clips a control; overlapping groups once hid REAL / SIM and Exit All). */}
+      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 px-2 py-1.5 min-h-11 border-b border-zinc-800 bg-zinc-950 shrink-0">
+        <div className="contents whitespace-nowrap [&>*]:shrink-0">
+          <div className="flex items-center gap-1">
           <div role="group" aria-label="Underlying" className="flex rounded border border-zinc-700 overflow-hidden" title={real ? 'Switch to SIM to change underlying: a REAL session trades one account' : undefined}>
             <button
               type="button"
               aria-pressed={underlying === 'NIFTY'}
               disabled={real}
               onClick={() => selectUnderlying('NIFTY')}
-              className={cn('h-7 px-2 text-xs font-bold transition-colors disabled:opacity-50', underlying === 'NIFTY' ? 'bg-sky-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}
+              className={cn('h-7 px-1.5 text-xs font-bold transition-colors disabled:opacity-50', underlying === 'NIFTY' ? 'bg-sky-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}
             >
               NIFTY
             </button>
@@ -2152,7 +2108,7 @@ export default function IndexScalperTerminal() {
                 disabled={real}
                 title={u === 'CRUDEOIL' ? 'Full-size crude: 100 barrels a lot, max 5 lots per order' : 'Mini crude: 10 barrels a lot'}
                 onClick={() => selectUnderlying(u)}
-                className={cn('h-7 px-2 text-xs font-bold transition-colors disabled:opacity-50', underlying === u ? 'bg-amber-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}
+                className={cn('h-7 px-1.5 text-xs font-bold transition-colors disabled:opacity-50', underlying === u ? 'bg-amber-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}
               >
                 {u}
               </button>
@@ -2169,16 +2125,16 @@ export default function IndexScalperTerminal() {
           <label className="flex items-center gap-1.5 h-7 px-1.5 rounded text-xs font-semibold text-zinc-300 cursor-pointer select-none hover:bg-zinc-800"
             title="OI profile: Call (red) and Put (green) open interest at each strike, on the index / future chart">
             <AlignRight className="w-4 h-4" aria-hidden />
-            OI
+            <span className="hidden min-[2200px]:inline">OI</span>
             <Switch size="sm" checked={showOi} onCheckedChange={setOi} aria-label="OI profile" />
-            <span className={cn('w-6 text-[10px] font-bold', showOi ? 'text-emerald-400' : 'text-zinc-500')} aria-hidden>{showOi ? 'ON' : 'OFF'}</span>
+            <span className={cn('w-6 text-[10px] font-bold hidden min-[2200px]:inline', showOi ? 'text-emerald-400' : 'text-zinc-500')} aria-hidden>{showOi ? 'ON' : 'OFF'}</span>
           </label>
           {sep}
           <div className="relative flex items-center">
             <label className="flex items-center gap-1.5 h-7 px-1.5 rounded text-xs font-semibold text-zinc-300 cursor-pointer select-none hover:bg-zinc-800"
               title="Quick Trade: every strike on the chart shows its live Call / Put price; click one to Buy or Sell your preset lots at market">
               <Crosshair className="w-4 h-4" aria-hidden />
-              Quick
+              <span className="hidden min-[2200px]:inline">Quick</span>
               <Switch size="sm" checked={quickOn} onCheckedChange={setQuickOn} aria-label="Quick Trade" />
             </label>
             <button type="button" aria-label="Quick Trade settings" aria-expanded={quickMenu} disabled={!quickOn}
@@ -2198,7 +2154,7 @@ export default function IndexScalperTerminal() {
                 ? `Every new option position opened here at market gets a target ${defBrackets.tpPct}% and a stop ${defBrackets.slPct}% from its entry premium`
                 : 'Default target / stop is off: new positions get no automatic levels'}
               onClick={() => setDefMenu(v => !v)}
-              className={cn(btn, 'px-1.5 gap-1 text-xs font-semibold', defMenu && 'bg-zinc-800 text-white')}>
+              className={cn(btn, 'flex items-center px-1.5 gap-1 text-xs font-semibold', defMenu && 'bg-zinc-800 text-white')}>
               <Target className={cn('w-4 h-4', defBrackets.on ? 'text-emerald-400' : 'text-zinc-500')} aria-hidden />
               <span data-testid="default-brackets-chip" className={defBrackets.on ? 'text-zinc-200' : 'text-zinc-500'}>
                 {defBrackets.on ? `TP ${defBrackets.tpPct}% · SL ${defBrackets.slPct}%` : 'TP/SL off'}
@@ -2212,44 +2168,24 @@ export default function IndexScalperTerminal() {
             {([['total', 'Total'], ['change', 'Chg']] as const).map(([m, label]) => (
               <button key={m} type="button" aria-pressed={oiMode === m} disabled={!showOi} onClick={() => setOiMode(m)}
                 aria-label={m === 'total' ? 'Total OI' : 'Change in OI'}
-                className={cn('h-6 px-2 text-[11px] font-bold transition-colors disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
+                className={cn('h-6 px-1.5 text-[11px] font-bold transition-colors disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
                   oiMode === m ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}>{label}</button>
             ))}
           </div>
           {sep}
-          <button type="button" onClick={() => { setEditId(null); setPickerOpen(true); }} className={cn(btn, 'flex items-center gap-1')}>
-            <BarChart3 className="w-4 h-4" />Indicators{indicators.length > 0 && <span className="text-sky-400">{indicators.length}</span>}
+          <button type="button" aria-label={`Indicators${indicators.length > 0 ? ` ${indicators.length}` : ''}`} title="Indicators" onClick={() => { setEditId(null); setPickerOpen(true); }} className={cn(btn, 'flex items-center gap-1')}>
+            <BarChart3 className="w-4 h-4" /><span className="hidden min-[2200px]:inline">Indicators</span>{indicators.length > 0 && <span className="text-sky-400">{indicators.length}</span>}
           </button>
           </div>
-          <div className="flex items-center gap-1.5">
-          {isMcx(underlying) && (
-            <>
-              <button
-                type="button"
-                onClick={() => quickTradeFut('BUY')}
-                className="h-7 px-2.5 rounded bg-emerald-600 hover:bg-emerald-500 text-oncolor text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
-              >
-                Buy FUT
-              </button>
-              <button
-                type="button"
-                onClick={() => quickTradeFut('SELL')}
-                className="h-7 px-2.5 rounded bg-rose-600 hover:bg-rose-500 text-oncolor text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300"
-              >
-                Sell FUT
-              </button>
-            </>
-          )}
-          <button type="button" onClick={() => quickBuy('PE')} className="h-7 px-3 rounded bg-rose-600 hover:bg-rose-500 text-oncolor text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300">Buy PE</button>
-          <button type="button" onClick={() => quickBuy('CE')} className="h-7 px-3 rounded bg-sky-600 hover:bg-sky-500 text-oncolor text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300">Buy CE</button>
-          <button type="button" aria-pressed={scalperOn} onClick={() => setScalperOn(v => !v)}
+          <div className="flex items-center gap-1">
+          <button type="button" aria-pressed={scalperOn} aria-label="Scalper" onClick={() => setScalperOn(v => !v)}
             title="Scalper: opens the instant-order window and arms one-click (Buy CE / Buy PE and the chain's B / S trade at once). Close it to disarm."
             className={cn('h-7 px-2 rounded border text-xs font-bold flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
               scalperOn ? 'border-amber-400 text-amber-300 bg-amber-500/10' : 'border-sky-500/60 text-sky-300 hover:bg-sky-500/10')}>
-            <Zap className="w-3.5 h-3.5" />Scalper
+            <Zap className="w-3.5 h-3.5" /><span className="hidden min-[2200px]:inline">Scalper</span>
           </button>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1">
           <button type="button" aria-pressed={!soundOn} aria-label={soundOn ? 'Mute trade chimes' : 'Unmute trade chimes'}
             title={soundOn ? 'Trade chimes on: entry, exit and order problems (sounds start after your first click on the page). Click to mute.' : 'Trade chimes muted. Click to turn them on.'}
             onClick={() => setSoundOn(!soundOn)} className={cn(btn, !soundOn && 'text-zinc-500')}>
@@ -2257,15 +2193,15 @@ export default function IndexScalperTerminal() {
           </button>
           <button type="button" aria-pressed={watchIdx} aria-label="Top indices" title="Top indices: live Nifty, Bank Nifty, sectors and India VIX (watch only)"
             onClick={() => setWatchIdx(v => !v)} className={cn(btn, 'flex items-center gap-1', watchIdx && 'bg-zinc-800 text-white')}>
-            <Gauge className="w-4 h-4" aria-hidden />Indices
+            <Gauge className="w-4 h-4" aria-hidden /><span className="hidden min-[2200px]:inline">Indices</span>
           </button>
           <button type="button" aria-pressed={watchStk} aria-label="Top 10 stocks" title="Top 10 stocks: the heaviest Nifty 50 weights, live (watch only)"
             onClick={() => setWatchStk(v => !v)} className={cn(btn, 'flex items-center gap-1', watchStk && 'bg-zinc-800 text-white')}>
-            <Building2 className="w-4 h-4" aria-hidden />Top 10
+            <Building2 className="w-4 h-4" aria-hidden /><span className="hidden min-[2200px]:inline">Top 10</span>
           </button>
-          <button type="button" aria-pressed={cumOiOpen} aria-label="Cumulative OI"
+          <button type="button" aria-pressed={cumOiOpen} aria-label="Cumulative OI" title="Cumulative OI: call and put open interest across strikes"
             onClick={() => setCumOiOpen(v => !v)} className={cn(btn, 'flex items-center gap-1', cumOiOpen && 'bg-zinc-800 text-white')}>
-            <AreaChart className="w-4 h-4" aria-hidden />Cum OI
+            <AreaChart className="w-4 h-4" aria-hidden /><span className="hidden min-[2200px]:inline">Cum OI</span>
           </button>
           {sep}
           <button type="button" aria-pressed={chainOpen} aria-label="Option chain" title="Option chain" onClick={() => setChainOpen(v => !v)} className={cn(btn, chainOpen && 'bg-zinc-800 text-white')}><LayoutList className="w-4 h-4" /></button>
@@ -2273,24 +2209,24 @@ export default function IndexScalperTerminal() {
             onClick={() => { setAutoScale(true); setResetSeq(n => n + 1); }} className={btn}><Scaling className="w-4 h-4" /></button>
           <button type="button" aria-label="Refresh candles" title="Refresh candles" onClick={() => setRefreshTick(n => n + 1)} className={btn}><RefreshCw className={cn('w-4 h-4', loadingBars && 'animate-spin')} /></button>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1">
           <MtmGuardControl settings={mtm} onChange={onMtmChange} note={mtmShownNote} pnl={dayTotal.pnl} scope={underlying} />
-          <button type="button" disabled={legs.length === 0 || exitingId !== null} onClick={() => void exitAll()}
-            className="h-7 px-2 rounded border border-rose-500/70 text-rose-300 hover:bg-rose-500/10 text-xs font-bold disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400">
-            Exit All
+          <button type="button" aria-label="Exit All" title="Exit All: close every position on this underlying" disabled={legs.length === 0 || exitingId !== null} onClick={() => void exitAll()}
+            className="h-7 px-1.5 rounded border border-rose-500/70 text-rose-300 hover:bg-rose-500/10 text-xs font-bold disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400">
+            <span className="flex items-center gap-1"><OctagonX className="w-4 h-4" aria-hidden /><span className="hidden min-[2200px]:inline">Exit All</span></span>
           </button>
           </div>
         </div>
-        <div className="flex items-center gap-2 shrink-0 ml-auto">
-          <IstClock suffix=" IST" title="Current time (IST)" className="h-7 px-2 flex items-center rounded border border-zinc-700 bg-zinc-900 text-xs font-bold tabular-nums font-mono text-zinc-100" />
-          <span className={cn('text-[11px] tabular-nums font-mono', feed.stale ? 'text-amber-400' : 'text-zinc-400')} title="Live tick bridge">
-            {spotDisplay ? spotDisplay.toFixed(2) : '—'} <span className={cn('inline-block w-1.5 h-1.5 rounded-full align-middle', feed.feedAgeSec === null ? 'bg-zinc-600' : feed.stale ? 'bg-amber-400' : 'bg-emerald-400')} />
+        <div className="flex items-center gap-1 shrink-0 ml-auto whitespace-nowrap">
+          <span title="Current time (IST)" className="h-7 px-1.5 flex items-center gap-1 rounded border border-zinc-700 bg-zinc-900 text-xs font-bold tabular-nums font-mono text-zinc-100"><IstClock /><span className="hidden min-[2200px]:inline">IST</span></span>
+          <span className={cn('text-[11px] tabular-nums font-mono', feed.stale ? 'text-amber-400' : 'text-zinc-400')} title={`Live tick bridge${spotDisplay ? `: ${spotDisplay.toFixed(2)}` : ''}`}>
+            <span className="hidden min-[2200px]:inline">{spotDisplay ? spotDisplay.toFixed(2) : '—'} </span><span className={cn('inline-block w-1.5 h-1.5 rounded-full align-middle', feed.feedAgeSec === null ? 'bg-zinc-600' : feed.stale ? 'bg-amber-400' : 'bg-emerald-400')} />
           </span>
           <BrokerPicker value={broker} onChange={setBroker} brokers={['dhan', 'kotak']} disabled={real || !brokerLoaded}
             disabledReason={real ? 'Switch to SIM to change the broker: a REAL session trades one account' : 'Loading the saved broker'} />
           <div role="group" aria-label="Order mode" className="flex rounded border border-zinc-700 overflow-hidden">
-            <button type="button" aria-pressed={!real} onClick={goSim} className={cn('h-7 px-2 text-xs font-bold', !real ? 'bg-amber-500/20 text-amber-300' : 'text-zinc-400 hover:bg-zinc-800')}>SIM</button>
-            <button type="button" aria-pressed={real} onClick={() => (real ? undefined : setArmOpen(true))} className={cn('h-7 px-2 text-xs font-bold', real ? 'bg-rose-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}>REAL</button>
+            <button type="button" aria-pressed={!real} onClick={goSim} className={cn('h-7 px-1.5 text-xs font-bold', !real ? 'bg-amber-500/20 text-amber-300' : 'text-zinc-400 hover:bg-zinc-800')}>SIM</button>
+            <button type="button" aria-pressed={real} onClick={() => (real ? undefined : setArmOpen(true))} className={cn('h-7 px-1.5 text-xs font-bold', real ? 'bg-rose-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}>REAL</button>
           </div>
           <DataChip date={dataDate} />
           <button type="button" aria-label="Fullscreen" title="Fullscreen" className={btn}
