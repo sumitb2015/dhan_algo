@@ -58,8 +58,10 @@ export function bracketKind(orderType: string, price: number, anchor: number, is
  * first drew a stop dragged to 82.00 at its 86.10 limit, and the next drag of that line re-placed the trigger at 86.10
  * (2026-11-26). Null when the order has no positive level.
  */
-export function orderLevel(o: { orderType: string; price: number | null; trigger: number | null }): number | null {
-  const t = (o.orderType || '').toUpperCase().replace(/[\s_-]/g, '');
+export function orderLevel(o: { orderType: string; rawType?: string; price: number | null; trigger: number | null }): number | null {
+  // The broker-vocabulary type first: a triggered SIM stop-limit is shown as "SL (triggered)" but rests as a LIMIT at its
+  // price (rawType 'LIMIT'), which is what the editor and a drag move.
+  const t = (o.rawType || o.orderType || '').toUpperCase().replace(/[\s_-]/g, '');
   const isStop = t.includes('STOP') || t.startsWith('SL');
   const first = isStop ? o.trigger : o.price;
   const second = isStop ? o.price : o.trigger;

@@ -2472,7 +2472,7 @@ export default function IndexScalperTerminal() {
           <div role="alertdialog" aria-label="Cancel an order placed elsewhere" className="w-[400px] rounded-lg border border-amber-500/70 bg-zinc-900 p-5 shadow-2xl">
             <h2 className="text-sm font-bold text-amber-300 mb-2">Cancel an order this page did not place?</h2>
             <p className="text-xs text-zinc-300 mb-2">It may be a strategy&apos;s or another terminal&apos;s stop protecting a position: cancelling it leaves that position without it.</p>
-            <p className="mb-4 text-xs font-mono text-zinc-200">{cancelAsk.symbol} · {cancelAsk.side} {cancelAsk.qty ?? ''} {cancelAsk.orderType} {cancelAsk.price ?? cancelAsk.trigger ?? ''} · order {cancelAsk.id}</p>
+            <p className="mb-4 text-xs font-mono text-zinc-200">{cancelAsk.symbol} · {cancelAsk.side} {cancelAsk.qty ?? ''} {cancelAsk.orderType} {cancelAsk.trigger && cancelAsk.trigger > 0 ? `trigger ${cancelAsk.trigger.toFixed(2)}${cancelAsk.price && cancelAsk.price > 0 ? ` / limit ${cancelAsk.price.toFixed(2)}` : ''}` : (cancelAsk.price ?? '')} · order {cancelAsk.id}</p>
             <div className="flex justify-end gap-2">
               <button type="button" autoFocus onClick={() => setCancelAsk(null)} className="h-8 px-3 rounded text-xs font-semibold text-zinc-300 hover:bg-zinc-800">Keep it</button>
               <button type="button" onClick={() => { const id = cancelAsk.id; setCancelAsk(null); void sendCancel(id); }} className="h-8 px-3 rounded bg-amber-600 hover:bg-amber-500 text-oncolor text-xs font-bold">Cancel order {cancelAsk.id}</button>

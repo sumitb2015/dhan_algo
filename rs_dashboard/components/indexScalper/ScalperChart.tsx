@@ -156,6 +156,18 @@ const fmt = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2,
 
 function toTime(t: number): UTCTimestamp { return (t + IST_SHIFT) as UTCTimestamp; }
 
+/** Default view (no 1D / 1W ... range picked): the last RECENT_BARS candles with RECENT_GAP bars of space after the live
+ *  one for the position / TP / SL chips and the OI profile. fitContent() squeezed 3-5 days of history onto the screen. */
+const RECENT_BARS = 60;
+const RECENT_GAP = 55;
+function frameRecent(ts: { setVisibleLogicalRange: (r: { from: number; to: number }) => void }, n: number): void {
+  const last = n - 1;
+  // A short history (a fresh option chart early in the day) starts at its first bar with a proportional gap, instead of
+  // leaving its few candles in a thin strip between empty space on both sides.
+  if (n < RECENT_BARS) ts.setVisibleLogicalRange({ from: -0.5, to: last + Math.max(6, Math.round(n * RECENT_GAP / RECENT_BARS)) });
+  else ts.setVisibleLogicalRange({ from: last - RECENT_BARS, to: last + RECENT_GAP });
+}
+
 function istLabel(shifted: number): string {
   const d = new Date(shifted * 1000);
   return d.toLocaleString('en-GB', { timeZone: 'UTC', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
@@ -631,7 +643,7 @@ function ScalperChart(props: Props) {
         const end = b[b.length - 1].t + IST_SHIFT;
         ts.setVisibleRange({ from: (end - focus.seconds) as UTCTimestamp, to: (end + 20 * 60) as UTCTimestamp });
       } else {
-        ts.fitContent();
+        frameRecent(ts, b.length);
       }
     } catch { ts.fitContent(); }
   }, [viewKey, hasBars, focus]);
@@ -649,7 +661,7 @@ function ScalperChart(props: Props) {
         const end = b[b.length - 1].t + IST_SHIFT;
         ts.setVisibleRange({ from: (end - focus.seconds) as UTCTimestamp, to: (end + 20 * 60) as UTCTimestamp });
       } else {
-        ts.fitContent();
+        frameRecent(ts, b.length);
       }
     } catch { ts.fitContent(); }
   }, [focus]);
@@ -684,7 +696,12 @@ function ScalperChart(props: Props) {
     if (!ts || !r) return;
     const width = r.to - r.from;
     const next = Math.min(Math.max(width * factor, 10), 5000); // at least 10 bars on screen, at most 5,000
-    ts.setVisibleLogicalRange({ from: r.to - next, to: r.to });
+    // The empty space right of the live candle scales with the window, so the live candle keeps its place on screen.
+    // Keeping the right edge fixed zoomed into that space: after a reset (55 bars of gap) three Zoom in showed no candle.
+    const last = barsRef.current.length - 1;
+    const gap = r.to > last ? (r.to - last) * (next / width) : 0;
+    const to = r.to > last ? last + gap : r.to;
+    ts.setVisibleLogicalRange({ from: to - next, to });
     noteRange();
   }, [noteRange]);
 
@@ -1233,7 +1250,7 @@ function ScalperChart(props: Props) {
       {/* Zoom out / reset / zoom in, above the time axis (same controls as the other charts) */}
       <div ref={zoomBarRef} data-testid="chart-zoom" className="absolute bottom-8 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1">
         <button type="button" onClick={() => zoomBy(1 / 0.7)} title="Zoom out" aria-label="Zoom out" className={zoomBtn}>−</button>
-        <button type="button" onClick={() => { resetView(); noteRange(); }} title="Reset zoom: auto-scale the price axis and fit the bars" aria-label="Reset zoom" className={zoomBtn}>↺</button>
+        <button type="button" onClick={() => { resetView(); noteRange(); }} title="Reset zoom: auto-scale the price axis and show the latest bars" aria-label="Reset zoom" className={zoomBtn}>↺</button>
         <button type="button" onClick={() => zoomBy(0.7)} title="Zoom in" aria-label="Zoom in" className={zoomBtn}>+</button>
       </div>
       {oiProfile && <canvas ref={oiCanvasRef} data-testid="oi-profile" aria-hidden className="absolute inset-0 w-full h-full pointer-events-none z-[1]" />}

@@ -29,15 +29,24 @@ export function isEditable(o: EditableOrder): boolean {
 const snap = (v: number, tick: number) => Number((Math.round(v / tick) * tick).toFixed(2));
 
 /** The order's levels after its line moves to `level` (a Limit's line sits at its price, a stop's at its TRIGGER:
- *  `orderLevel`). A Limit moves its price; an SL-M its trigger; an SL-limit's trigger goes to the line and its limit moves
- *  by the same amount, so the cushion stays. */
+ *  `orderLevel`). A Limit moves its price; an SL-M its trigger; an SL-limit's trigger goes to the line and its limit keeps
+ *  the same cushion AS A SHARE of the trigger (the page places option stops 5% beyond: optionStopLimit), snapped away from
+ *  the trigger and at least one tick beyond it. A rupee gap kept as-is thinned a 5% cushion to 2% on a stop dragged from
+ *  82 to 200, and a thin cushion may not fill when the premium jumps past it. */
 export function movedLevels(o: EditableOrder, level: number, tick: number): { price: number; trigger: number } {
   const lv = snap(level, tick);
   if (o.rawType === 'LIMIT') return { price: lv, trigger: 0 };
   if (o.rawType === 'STOP_LOSS_MARKET') return { price: 0, trigger: lv };
-  const from = o.trigger !== null && o.trigger > 0 ? o.trigger : o.price ?? lv;
-  const delta = lv - from;
-  return { price: snap((o.price !== null && o.price > 0 ? o.price : from) + delta, tick), trigger: lv };
+  const fromT = o.trigger !== null && o.trigger > 0 ? o.trigger : o.price ?? lv;
+  const fromP = o.price !== null && o.price > 0 ? o.price : fromT;
+  const gap = fromP - fromT;
+  if (!(fromT > 0) || gap === 0) return { price: lv, trigger: lv };
+  const up = gap > 0; // a Buy stop's limit sits above its trigger, a Sell stop's below
+  const raw = lv + gap * (lv / fromT);
+  const steps = raw / tick;
+  let px = Number(((up ? Math.ceil(steps - 1e-9) : Math.floor(steps + 1e-9)) * tick).toFixed(2));
+  px = up ? Math.max(px, snap(lv + tick, tick)) : Math.max(tick, Math.min(px, snap(lv - tick, tick)));
+  return { price: px, trigger: lv };
 }
 
 /**

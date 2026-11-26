@@ -554,4 +554,7 @@ test('orderLevel: a stop is drawn at its trigger, a limit at its price', async (
   assert.equal(orderLevel({ orderType: 'LIMIT', price: 67.7, trigger: null }), 67.7);
   assert.equal(orderLevel({ orderType: 'STOP_LOSS', price: 86.1, trigger: null }), 86.1); // no trigger known: its price
   assert.equal(orderLevel({ orderType: 'LIMIT', price: null, trigger: null }), null);
+  // a triggered SIM stop-limit rests as a limit at its price: rawType wins over the "SL (triggered)" label
+  assert.equal(orderLevel({ orderType: 'SL (triggered)', rawType: 'LIMIT', price: 86.1, trigger: 82 }), 86.1);
+  assert.equal(orderLevel({ orderType: 'Stop Limit', rawType: 'STOP_LOSS', price: 86.1, trigger: 82 }), 82);
 });

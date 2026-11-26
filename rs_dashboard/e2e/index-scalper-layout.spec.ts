@@ -349,7 +349,7 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
-  test('zoom buttons at the bottom of each chart: in keeps the live edge, out widens, reset fits the bars again', async ({ page, context }) => {
+  test('zoom buttons at the bottom of each chart: in keeps the live candle in place, out widens, reset shows the latest bars again', async ({ page, context }) => {
     const state = newState();
     await signIn(context);
     await mockApi(page, state);
@@ -369,18 +369,28 @@ test.describe('Index Scalper layout + option charts', () => {
     await click('Reset zoom');
     const fit = await range();
     const w0 = fit.to - fit.from;
-    expect(w0).toBeGreaterThan(20);
-    // zoom in: 70 % of the bars, the right edge (the live candle) kept where it was
+    // the latest 60 bars plus 55 bars of space for the chips, never the whole multi-day history (fitContent did that)
+    expect(w0).toBeCloseTo(115, 0);
+    // zoom in: 70 % of the bars, the live candle (55 bars left of the reset view's right edge) kept at its place on screen:
+    // the space after it shrinks with the window, so three clicks never zoom into the empty gap
+    const live = fit.to - 55;
     await click('Zoom in');
     const zin = await range();
-    expect(zin.to).toBeCloseTo(fit.to, 1);
     expect(zin.to - zin.from).toBeCloseTo(w0 * 0.7, 0);
+    expect((live - zin.from) / (zin.to - zin.from)).toBeCloseTo((live - fit.from) / w0, 2);
+    await click('Zoom in');
+    await click('Zoom in');
+    const deep = await range();
+    expect(deep.from).toBeLessThan(live);
+    expect(deep.to).toBeGreaterThan(live);
+    await click('Zoom out');
+    await click('Zoom out');
     // zoom out twice: wider than the fitted view
     await click('Zoom out');
     await click('Zoom out');
     const zout = await range();
     expect(zout.to - zout.from).toBeGreaterThan(w0);
-    // reset: back to the fitted range
+    // reset: back to the latest-bars range
     await click('Reset zoom');
     const again = await range();
     expect(again.to - again.from).toBeCloseTo(w0, 0);

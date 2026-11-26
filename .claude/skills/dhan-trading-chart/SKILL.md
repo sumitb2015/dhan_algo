@@ -176,7 +176,7 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
   unconditionally reset the user's hand-scaled axis on every new trade (fixed 2026-11-25, e2e "a new trade keeps a
   price axis the user scaled by hand").
 - **Reset scale** (header button, `Scaling` icon): bumps `resetSeq` -> the chart turns price auto-scale back on and
-  re-frames time on the chosen range (else `fitContent`), like a fresh instrument. It is the way back after a hand zoom.
+  re-frames time on the chosen range, else the latest 60 bars plus 55 bars of space for the chips (`frameRecent`; the bottom ↺ and a page load / new instrument do the same). `fitContent` squeezed 3-5 days of history on screen (2026-11-26). It is the way back after a hand zoom.
   A click is consumed even if the chart is not created yet; a pending one would otherwise fire on the next range click.
 - **% TP / SL rounds AWAY from entry** (`snapAway`: ceil above, floor below) and a level equal to entry is refused;
   nearest-tick rounding put 10% of a 0.20 premium on 0.20. Typed values are plain decimals only (`Number("1e3")` is

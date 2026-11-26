@@ -18,11 +18,16 @@ test('only this page\'s own working Limit / SL / SL-M orders are editable', () =
 test('moving the line: Limit moves its price, SL-M its trigger, SL-limit both by the same amount (on the tick)', () => {
   assert.deepEqual(movedLevels(o(), 175.03, 0.05), { price: 175.05, trigger: 0 });
   assert.deepEqual(movedLevels(o({ rawType: 'STOP_LOSS_MARKET', price: null, trigger: 220 }), 225, 0.05), { price: 0, trigger: 225 });
-  // SL-limit buy: its line sits at the TRIGGER (220, limit 231 = 5% cushion). Dragged to 230: trigger 230, limit 241,
-  // cushion kept. Reading the limit as the line put a stop dragged to 82.00 on screen at 86.10 (2026-11-26).
-  assert.deepEqual(movedLevels(o({ rawType: 'STOP_LOSS', price: 231, trigger: 220 }), 230, 0.05), { price: 241, trigger: 230 });
-  // the 2026-11-26 order: BUY trigger 82.00 / limit 86.10, line moved to 80.00 -> trigger 80.00, limit 84.10
-  assert.deepEqual(movedLevels(o({ rawType: 'STOP_LOSS', price: 86.1, trigger: 82 }), 80, 0.05), { price: 84.1, trigger: 80 });
+  // SL-limit buy: its line sits at the TRIGGER (220, limit 231 = 5% cushion). Dragged to 230: trigger 230, limit 241.50,
+  // the 5% kept. Reading the limit as the line put a stop dragged to 82.00 on screen at 86.10 (2026-11-26).
+  assert.deepEqual(movedLevels(o({ rawType: 'STOP_LOSS', price: 231, trigger: 220 }), 230, 0.05), { price: 241.5, trigger: 230 });
+  // the 2026-11-26 order: BUY trigger 82.00 / limit 86.10 -> 80.00: limit 84.00; -> 200: limit 210 (not 204.10, a 2% cushion)
+  assert.deepEqual(movedLevels(o({ rawType: 'STOP_LOSS', price: 86.1, trigger: 82 }), 80, 0.05), { price: 84, trigger: 80 });
+  assert.deepEqual(movedLevels(o({ rawType: 'STOP_LOSS', price: 86.1, trigger: 82 }), 200, 0.05), { price: 210, trigger: 200 });
+  // SELL stop-limit: limit below the trigger, never under one tick, at least one tick away
+  assert.deepEqual(movedLevels(o({ side: 'SELL', rawType: 'STOP_LOSS', price: 95, trigger: 100 }), 50, 0.05), { price: 47.5, trigger: 50 });
+  assert.deepEqual(movedLevels(o({ side: 'SELL', rawType: 'STOP_LOSS', price: 95, trigger: 100 }), 0.1, 0.05), { price: 0.05, trigger: 0.1 });
+  assert.deepEqual(movedLevels(o({ rawType: 'STOP_LOSS', price: 2.1, trigger: 2 }), 1, 0.05), { price: 1.05, trigger: 1 });
 });
 
 test('edits are checked against the live price like a new order', () => {
