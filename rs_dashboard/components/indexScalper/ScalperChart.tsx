@@ -230,6 +230,16 @@ function ScalperChart(props: Props) {
   const plusRef = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<{ y: number; price: number } | null>(null);
   const [tentativeBrackets, setTentativeBrackets] = useState<Record<string, { tp?: number; sl?: number }>>({});
+  /** Set (price) or drop (null) one tentative level of a leg. */
+  const setTentative = useCallback((legId: string, kind: 'TP' | 'SL', price: number | null) => {
+    const k = kind === 'TP' ? 'tp' : 'sl';
+    setTentativeBrackets(prev => {
+      if (price === null && prev[legId]?.[k] === undefined) return prev;
+      const next = { ...prev, [legId]: { ...prev[legId] } };
+      if (price === null) delete next[legId][k]; else next[legId][k] = price;
+      return next;
+    });
+  }, []);
   const [dragState, setDragState] = useState<{
     kind: 'TP' | 'SL';
     leg: ScalperLeg;
@@ -695,10 +705,6 @@ function ScalperChart(props: Props) {
       if (simB?.tp && simB.tp > 0) tp = { price: simB.tp, isSim: true };
       if (simB?.sl && simB.sl > 0) sl = { price: simB.sl, isSim: true };
 
-      // Tentative / optimistic drag release values
-      if (!tp && tent?.tp && tent.tp > 0) tp = { price: tent.tp, isSim: false };
-      if (!sl && tent?.sl && tent.sl > 0) sl = { price: tent.sl, isSim: false };
-
       const isLong = p.leg.netQty > 0;
       const oppSide = isLong ? 'SELL' : 'BUY';
 
@@ -722,6 +728,11 @@ function ScalperChart(props: Props) {
           sl = { price: ordPrice, orderId: ord.id, isSim: false };
         }
       }
+
+      // Tentative (just released / typed) levels only fill in until the order book shows the order: the book wins, so a
+      // level replaced or cancelled elsewhere is not kept on screen at its old price.
+      if (!tp && tent?.tp && tent.tp > 0) tp = { price: tent.tp, isSim: false };
+      if (!sl && tent?.sl && tent.sl > 0) sl = { price: tent.sl, isSim: false };
 
       res[legId] = { tp, sl };
     }
@@ -1689,11 +1700,33 @@ function ScalperChart(props: Props) {
             style={{ top: top - 11 }}
             className="absolute right-[84px] z-[55] flex items-center gap-1.5 px-1.5 h-[24px] rounded border border-sky-500/70 bg-zinc-900 shadow-md font-mono text-[11px]"
           >
-            {canBracket(p.leg) ? (<>
+            {p.leg.type !== 'FUT' && (premium || (strikeAnchor && optOnIndex)) ? (
+              // An option leg gets the same chip on its own premium chart as on the index chart (Quick Trade): leg label,
+              // typed TP / SL (a premium or % of entry), TSL. On the premium chart its levels are also drawn as
+              // draggable lines, so the badges read the same brackets the lines do (activeBrackets).
+              <PremiumBracketControls leg={p.leg} units={totalUnits} tick={INSTRUMENTS[underlying].optTick}
+                brackets={premium
+                  ? { tp: b?.tp ? { price: b.tp.price, orderId: b.tp.orderId, sim: b.tp.isSim } : undefined,
+                      sl: b?.sl ? { price: b.sl.price, orderId: b.sl.orderId, sim: b.sl.isSim } : undefined }
+                  : premiumBracketsFor(p.leg, premiumOrders ?? [], simBrackets?.[p.leg.id])}
+                onSet={(kind, price) => {
+                  // On the premium chart a dragged level is held as tentative and shown ahead of the order book, so a
+                  // typed level must replace it (else the badge and line kept the old dragged price).
+                  if (premium) setTentative(p.leg.id, kind, price);
+                  onSetBracket?.({ leg: p.leg, kind, price });
+                }}
+                onCancel={(kind, orderId) => {
+                  if (premium) setTentative(p.leg.id, kind, null);
+                  onCancelBracket?.({ legId: p.leg.id, kind, orderId });
+                }}
+                trail={trails?.[p.leg.id]}
+                onSetTrail={onSetTrail ? pts => onSetTrail(p.leg, pts, INSTRUMENTS[underlying].optTick) : undefined}
+                onCancelTrail={onCancelTrail ? () => onCancelTrail(p.leg.id) : undefined}
+                onDragStart={premium ? kind => startDrag(kind, p.leg, p.anchor.level, isLong, lots, totalUnits, kind === 'TP' ? b?.tp?.price : b?.sl?.price) : undefined} />
+            ) : canBracket(p.leg) ? (<>
             {/* TP draggable button */}
             <button
               type="button"
-              aria-label={`Drag to set target ${p.leg.type} ${p.leg.strike || ''}`}
               onMouseDown={(e) => {
                 e.stopPropagation();
                 e.preventDefault();
@@ -1707,7 +1740,6 @@ function ScalperChart(props: Props) {
             {/* SL draggable button */}
             <button
               type="button"
-              aria-label={`Drag to set stop loss ${p.leg.type} ${p.leg.strike || ''}`}
               onMouseDown={(e) => {
                 e.stopPropagation();
                 e.preventDefault();
@@ -1723,15 +1755,7 @@ function ScalperChart(props: Props) {
                 onSet={pts => onSetTrail(p.leg, pts, p.leg.type === 'FUT' ? INSTRUMENTS[underlying].futTick : INSTRUMENTS[underlying].optTick)}
                 onCancel={() => onCancelTrail(p.leg.id)} />
             )}
-            </>) : strikeAnchor && optOnIndex ? (
-              <PremiumBracketControls leg={p.leg} units={totalUnits} tick={INSTRUMENTS[underlying].optTick}
-                brackets={premiumBracketsFor(p.leg, premiumOrders ?? [], simBrackets?.[p.leg.id])}
-                onSet={(kind, price) => onSetBracket?.({ leg: p.leg, kind, price })}
-                onCancel={(kind, orderId) => onCancelBracket?.({ legId: p.leg.id, kind, orderId })}
-                trail={trails?.[p.leg.id]}
-                onSetTrail={onSetTrail ? pts => onSetTrail(p.leg, pts, INSTRUMENTS[underlying].optTick) : undefined}
-                onCancelTrail={onCancelTrail ? () => onCancelTrail(p.leg.id) : undefined} />
-            ) : (
+            </>) : (
               <span className="text-[10px] text-zinc-500">
                 <span className={isLong ? 'text-emerald-400' : 'text-rose-400'}>{isLong ? 'B' : 'S'}</span> {p.leg.type} {p.leg.strike}
               </span>
@@ -1751,18 +1775,18 @@ function ScalperChart(props: Props) {
             </button>
 
             {/* Lots quantity; Quick Trade adds - / + around it on an option leg */}
-            {onAdjustLeg && optOnIndex && (
+            {onAdjustLeg && p.leg.type !== 'FUT' && (
               <button type="button" aria-label={`Fewer lots ${p.leg.type} ${p.leg.strike}`} disabled={lots <= 1 || exitingId !== null}
                 onClick={e => { e.stopPropagation(); onAdjustLeg(p.leg, -1); }}
-                className="h-[18px] w-[18px] flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold leading-none disabled:opacity-35 disabled:cursor-not-allowed">−</button>
+                className="h-[18px] min-w-[18px] px-0.5 flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold leading-none disabled:opacity-35 disabled:cursor-not-allowed">−{adjustLots > 1 ? adjustLots : ''}</button>
             )}
             <span data-testid="position-lots" aria-label={`${isLong ? 'Long' : 'Short'} ${lots} lot${lots === 1 ? '' : 's'} (${Math.abs(totalUnits)} units)`} className="h-[18px] px-1.5 min-w-[26px] flex items-center justify-center tabular-nums rounded bg-zinc-800/80 text-zinc-200 border border-zinc-700 text-[10px] font-semibold">
               {lots}
             </span>
-            {onAdjustLeg && optOnIndex && (
+            {onAdjustLeg && p.leg.type !== 'FUT' && (
               <button type="button" aria-label={`More lots ${p.leg.type} ${p.leg.strike}`} disabled={exitingId !== null}
                 onClick={e => { e.stopPropagation(); onAdjustLeg(p.leg, 1); }}
-                className="h-[18px] w-[18px] flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold leading-none disabled:opacity-35 disabled:cursor-not-allowed">+</button>
+                className="h-[18px] min-w-[18px] px-0.5 flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold leading-none disabled:opacity-35 disabled:cursor-not-allowed">+{adjustLots > 1 ? adjustLots : ''}</button>
             )}
 
             {/* Live P&L INR (+0.00%) */}

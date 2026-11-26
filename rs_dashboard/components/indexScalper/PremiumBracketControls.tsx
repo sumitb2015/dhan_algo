@@ -1,12 +1,13 @@
 'use client';
 
-// Target / stop loss for an OPTION position from its strike chip on the underlying chart (Quick Trade). The index axis is
-// not the option's price, so the level is typed (not dragged): a PREMIUM ("245.50") or a percentage of the entry premium
+// Target / stop loss for an OPTION position, on its strike chip on the underlying chart (Quick Trade) and on its chip on
+// the option's own premium chart (same chip on both). On the index axis the level is typed (not dragged): a PREMIUM ("245.50") or a percentage of the entry premium
 // ending in "%" ("20%"), turned into a premium on the tick, validated against the live premium, and sent through the
-// terminal's onSetBracket: REAL a LIMIT target / SL-M stop on that contract (isx), SIM the paper watcher.
+// terminal's onSetBracket: REAL a LIMIT target / SL-M stop on that contract (isx), SIM the paper watcher. On the premium
+// chart TP / SL can also be dragged (onDragStart hands the press to the chart's drag).
 // Rules in lib/indexScalperPremiumBrackets.ts.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { X } from 'lucide-react';
 import type { ScalperLeg } from '@/lib/indexScalperPositions';
 import {
@@ -30,13 +31,46 @@ interface Props {
   trail?: TrailState;
   onSetTrail?: (pts: number) => void;
   onCancelTrail?: () => void;
+  /** On the option's own premium chart the level can also be dragged: a press on TP / SL (button or badge) that moves more than a few
+   *  pixels hands over to the chart's drag (which sets the level on release); a plain click opens the editor. */
+  onDragStart?: (kind: 'TP' | 'SL') => void;
 }
 
-export default function PremiumBracketControls({ leg, units, tick, brackets, onSet, onCancel, trail, onSetTrail, onCancelTrail }: Props) {
+const DRAG_PX = 4;
+
+export default function PremiumBracketControls({ leg, units, tick, brackets, onSet, onCancel, trail, onSetTrail, onCancelTrail, onDragStart }: Props) {
   const isLong = leg.netQty > 0;
   const [edit, setEdit] = useState<'TP' | 'SL' | null>(null);
   const [draft, setDraft] = useState('');
   const boxRef = useRef<HTMLDivElement>(null);
+  const draggedRef = useRef(false);
+  const pressCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => pressCleanupRef.current?.(), []);
+
+  // A press that moves becomes a chart drag; one that does not stays a click (handled by onClick).
+  const onPress = (kind: 'TP' | 'SL', e: ReactMouseEvent) => {
+    if (!onDragStart || e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    draggedRef.current = false;
+    const y0 = e.clientY, x0 = e.clientX;
+    const cleanup = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', cleanup);
+      pressCleanupRef.current = null;
+    };
+    const onMove = (ev: MouseEvent) => {
+      if (Math.abs(ev.clientY - y0) < DRAG_PX && Math.abs(ev.clientX - x0) < DRAG_PX) return;
+      draggedRef.current = true;
+      cleanup();
+      setEdit(null);
+      onDragStart(kind);
+    };
+    pressCleanupRef.current?.();
+    pressCleanupRef.current = cleanup;
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', cleanup);
+  };
 
   const open = (kind: 'TP' | 'SL') => {
     if (edit === kind) { setEdit(null); return; }
@@ -76,8 +110,9 @@ export default function PremiumBracketControls({ leg, units, tick, brackets, onS
         className={cn('h-[18px] pl-1 pr-0.5 flex items-center gap-1 rounded border text-[10px] font-semibold',
           kind === 'TP' ? 'border-emerald-500/60 text-emerald-400' : 'border-rose-500/60 text-rose-400')}>
         <button type="button" aria-label={`Edit ${kind} ${leg.type} ${leg.strike}`} aria-expanded={edit === kind}
-          onClick={e => { e.stopPropagation(); open(kind); }}
-          className={cn('flex items-center gap-1 rounded px-0.5 hover:bg-zinc-800', edit === kind && 'ring-1 ring-sky-400')}>
+          onMouseDown={onDragStart ? e => onPress(kind, e) : undefined}
+          onClick={e => { e.stopPropagation(); if (draggedRef.current) { draggedRef.current = false; return; } open(kind); }}
+          className={cn('flex items-center gap-1 rounded px-0.5 hover:bg-zinc-800', onDragStart && 'cursor-grab active:cursor-grabbing', edit === kind && 'ring-1 ring-sky-400')}>
           {kind} {b.price.toFixed(2)} <span className="text-zinc-400">{inr(pnl)}</span>
         </button>
         <button type="button" aria-label={`Cancel ${kind} ${leg.type} ${leg.strike}`} onClick={e => { e.stopPropagation(); onCancel(kind, b.orderId); }}
@@ -88,8 +123,9 @@ export default function PremiumBracketControls({ leg, units, tick, brackets, onS
 
   const btn = (kind: 'TP' | 'SL') => (
     <button type="button" aria-label={`${kind === 'TP' ? 'Target' : 'Stop loss'} for ${leg.type} ${leg.strike}`} aria-expanded={edit === kind}
-      onClick={e => { e.stopPropagation(); open(kind); }}
-      className={cn('h-[18px] px-1.5 rounded bg-zinc-800 border text-[10px] font-bold transition-colors',
+      onMouseDown={onDragStart ? e => onPress(kind, e) : undefined}
+      onClick={e => { e.stopPropagation(); if (draggedRef.current) { draggedRef.current = false; return; } open(kind); }}
+      className={cn('h-[18px] px-1.5 rounded bg-zinc-800 border text-[10px] font-bold transition-colors', onDragStart && 'cursor-grab active:cursor-grabbing',
         kind === 'TP' ? 'text-emerald-400 border-emerald-500/50 hover:bg-emerald-600/30' : 'text-rose-400 border-rose-500/50 hover:bg-rose-600/30',
         edit === kind && 'ring-1 ring-sky-400')}>{kind}</button>
   );

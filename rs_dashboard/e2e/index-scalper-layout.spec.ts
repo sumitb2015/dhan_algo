@@ -1278,9 +1278,13 @@ test.describe('Index Scalper layout + option charts', () => {
     await expect(leftChip).toBeVisible();
     // index chart: no TP / SL handles for an option leg
     await expect(leftChip.getByRole('button', { name: 'TP', exact: true })).toHaveCount(0);
-    await expect(rightChip.getByRole('button', { name: 'SL', exact: true })).toBeVisible();
+    // the option's own chart: the same chip as the index chart's strike chip (label, typed TP / SL, - / + lots)
+    await expect(rightChip.getByTestId('leg-label')).toHaveText('B CE 25350');
+    await expect(rightChip.getByRole('button', { name: 'More lots CE 25350' })).toBeVisible();
+    await expect(rightChip.getByRole('button', { name: 'Fewer lots CE 25350' })).toBeDisabled(); // one lot: Exit closes it
+    await expect(rightChip.getByRole('button', { name: 'Stop loss for CE 25350' })).toBeVisible();
 
-    await dragFrom(page, rightChip.getByRole('button', { name: 'SL', exact: true }), 60);
+    await dragFrom(page, rightChip.getByRole('button', { name: 'Stop loss for CE 25350' }), 60);
     const toast = page.getByRole('status').filter({ hasText: 'SIM SL set at' });
     await expect(toast).toBeVisible({ timeout: 10_000 });
     const px = Number((await toast.textContent())!.replace(/[^0-9.]/g, ''));
@@ -1312,7 +1316,7 @@ test.describe('Index Scalper layout + option charts', () => {
 
     const chip = right.getByTestId('position-chip');
     await expect(chip).toBeVisible({ timeout: 15_000 });
-    await dragFrom(page, chip.getByRole('button', { name: 'SL', exact: true }), 60);
+    await dragFrom(page, chip.getByRole('button', { name: 'Stop loss for CE 25350' }), 60);
     await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/fast-order').length, { timeout: 15_000 }).toBe(1);
     const sent = state.calls.find(c => c.path === '/api/scalper/fast-order')!.body!;
     expect(sent).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'STOP_LOSS_MARKET', quantity: 65, source: 'isxx', exchangeSegment: 'NSE_FNO' });

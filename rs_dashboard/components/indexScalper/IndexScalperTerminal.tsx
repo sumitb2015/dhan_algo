@@ -2172,7 +2172,7 @@ export default function IndexScalperTerminal() {
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
               onReversePosition={onReversePosition} trails={trails} onSetTrail={onSetTrail} onCancelTrail={onCancelTrail} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
-              quick={quickProp} real={real} onQuickTrade={onTradeContract}
+              quick={quickProp} stepLots={quickEff.stepLots} real={real} onQuickTrade={onTradeContract}
             />
               {layout === 2 && <div className="w-px bg-zinc-800 shrink-0" />}
               {layout === 2 && (
@@ -2188,7 +2188,7 @@ export default function IndexScalperTerminal() {
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
               onReversePosition={onReversePosition} trails={trails} onSetTrail={onSetTrail} onCancelTrail={onCancelTrail} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
-              quick={quickProp} real={real} onQuickTrade={onTradeContract}
+              quick={quickProp} stepLots={quickEff.stepLots} real={real} onQuickTrade={onTradeContract}
             />
               )}
             </>

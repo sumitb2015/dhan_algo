@@ -258,6 +258,15 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
   isx; SIM: the paper watcher on `leg.ltp`). Badges read SIM levels or this contract's working orders by security id;
   × cancels; a click on the badge re-opens the editor prefilled with that level (Set replaces this page's order:
   cancel + place; the same level sends nothing). Those orders are not drawn as lines on the index axis.
+- **An option leg's chip is the same on its own premium chart** (2026-11-26): `PremiumBracketControls` (label, typed
+  TP / SL, TSL) and - / + lots there too (`ChartPane` passes `onAdjustLeg` for an option pane even with Quick Trade off).
+  Its badges read `activeBrackets` (the same levels the draggable lines show), and a press on TP / SL that moves > 4 px
+  hands over to the chart's `startDrag` (`onDragStart`; on the button and on a set badge); a plain click opens the
+  editor. A typed set / × also updates the chart's tentative level (`setTentative`), and in `activeBrackets` the order
+  book wins over a tentative level (it only fills in until the book shows the order): a stale dragged price used to stay
+  on screen after the order was replaced or cancelled. The - / + step is the terminal's `stepLots` prop (passed even with
+  Quick Trade off) and shows on the button when > 1 ("+3"). Only FUT legs keep the plain drag-only TP / SL buttons. e2e
+  names: "Target for CE 25350" / "Stop loss for CE 25350".
 - **TSL** (`TrailControl.tsx`) sits after SL on both the strike chip (`PremiumBracketControls`) and the draggable
   chip (FUT legs, an option on its premium pane); on those same-axis panes the trailed stop is a dashed amber "TSL"
   price line. Browser-only; rules in `dhan-index-scalper` "Trailing stop loss".

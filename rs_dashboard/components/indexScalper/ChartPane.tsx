@@ -91,6 +91,8 @@ interface Props {
   oiMode: OiMode;
   /** Quick Trade settings when it is on (strike lines with live C / P chips on underlying panes); null = off. */
   quick: QuickSettings | null;
+  /** The position chip's - / + step in lots (Quick Trade's "Lots per + / -"), also used while Quick Trade is off. */
+  stepLots: number;
   real: boolean;
   onQuickTrade: (c: PickedContract, side: 'BUY' | 'SELL', lots: number, product: 'INTRADAY' | 'MARGIN') => Promise<{ ok: boolean; text: string }>;
 }
@@ -248,7 +250,7 @@ function ChartPane(p: Props) {
           key={drawKey}
           bars={bars} indicators={p.indicators} tool={p.tool} onToolDone={p.onToolDone} clearToken={p.clearToken}
           logScale={p.logScale} pctScale={p.pctScale} autoScale={p.autoScale} showGrid={p.showGrid} showVolume={p.showVolume} volumeMaLen={p.volumeMaLen}
-          legs={paneLegs} entrySpots={p.entrySpots} onExitLeg={p.onExitLeg} onAdjustLeg={quickOn ? p.onAdjustLeg : undefined} adjustLots={p.quick?.stepLots ?? 1} exitingId={p.exitingId}
+          legs={paneLegs} entrySpots={p.entrySpots} onExitLeg={p.onExitLeg} onAdjustLeg={quickOn || isOption ? p.onAdjustLeg : undefined} adjustLots={p.stepLots} exitingId={p.exitingId}
           onToggleIndicator={p.onToggleIndicator} onRemoveIndicator={p.onRemoveIndicator} onEditIndicator={p.onEditIndicator}
           symbolLabel={isOption ? `${label} · ${tfLabel}` : isFuture ? `NIFTY · ${tfLabel} · FUT` : (isMcx(underlying) ? `${underlying} · ${tfLabel} · FUT` : `NIFTY · ${tfLabel} · IDX`)}
           focus={p.focus} resetSeq={p.resetSeq}
