@@ -109,11 +109,15 @@ function MiniStat({ label, value, sub, color = 'text-zinc-100' }: { label: strin
   );
 }
 
+const chartBoxCls = (compact: boolean) => (compact ? 'w-full h-[300px]' : 'w-full h-[450px]');
+
 // ─── Main ─────────────────────────────────────────────────────────
 
 type CollectorStatus = 'RUNNING' | 'STOPPED' | 'UNKNOWN';
 
-export default function CrudeOilCumulativeOITab({ expiry: _expiry }: { expiry: string }) {
+/** `chartsOnly`: the two charts side by side and no stats / controls bar once there is data (the Index Scalper's Cum OI
+ *  pop-up). The bar still shows while there is none, so the collector can be started from there. */
+export default function CrudeOilCumulativeOITab({ expiry: _expiry, chartsOnly = false }: { expiry: string; chartsOnly?: boolean }) {
   const [response, setResponse]   = useState<CumulativeResponse | null>(null);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState('');
@@ -206,6 +210,7 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry }: { expiry: s
   return (
     <div className="flex flex-col gap-4">
       {/* Top Bar controls */}
+      {!(chartsOnly && data.length > 0) && (
       <div className="flex items-center justify-between border border-zinc-800 bg-zinc-900/40 rounded-xl px-4 py-3 gap-4 flex-wrap">
         <div className="flex items-center gap-8 flex-wrap">
           <MiniStat
@@ -281,6 +286,7 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry }: { expiry: s
           <span className="text-[10px] text-zinc-500 font-semibold">(strike step 100)</span>
         </div>
       </div>
+      )}
 
       {error && (
         <div className="px-4 py-3 bg-red-900/15 border border-red-700/30 rounded-xl text-xs font-medium text-red-400">
@@ -294,15 +300,15 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry }: { expiry: s
       )}
 
       {data.length > 0 && (
-        <div className="flex flex-col gap-6">
+        <div className={chartsOnly ? 'grid grid-cols-2 gap-4' : 'flex flex-col gap-6'}>
           {/* Cumulative Area Chart */}
-          <div className="border border-zinc-800 bg-zinc-950 rounded-xl p-6 flex flex-col gap-3 min-h-[520px]">
+          <div className={`border border-zinc-800 bg-zinc-950 rounded-xl flex flex-col gap-3 ${chartsOnly ? 'p-4' : 'p-6 min-h-[520px]'}`}>
             <div>
               <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-widest">Cumulative Open Interest</h3>
               <p className="text-[10px] text-zinc-500 mt-0.5">Sum of CE vs PE contracts within ATM ± {wingCount} strikes</p>
             </div>
 
-            <div className="w-full h-[450px]">
+            <div className={chartBoxCls(chartsOnly)}>
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={data} margin={{ top: 10, right: 5, left: -25, bottom: 5 }}>
                   <defs>
@@ -357,13 +363,13 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry }: { expiry: s
           </div>
 
           {/* Difference Line Chart */}
-          <div className="border border-zinc-800 bg-zinc-950 rounded-xl p-6 flex flex-col gap-3 min-h-[520px]">
+          <div className={`border border-zinc-800 bg-zinc-950 rounded-xl flex flex-col gap-3 ${chartsOnly ? 'p-4' : 'p-6 min-h-[520px]'}`}>
             <div>
               <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-widest">OI Difference (PE − CE)</h3>
               <p className="text-[10px] text-zinc-500 mt-0.5">Bullish/Bearish bias indicator over the session</p>
             </div>
 
-            <div className="w-full h-[450px]">
+            <div className={chartBoxCls(chartsOnly)}>
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={data} margin={{ top: 10, right: 5, left: -25, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="4 4" stroke="#27272a" vertical={false} />

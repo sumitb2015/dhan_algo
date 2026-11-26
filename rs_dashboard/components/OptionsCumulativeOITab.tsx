@@ -226,7 +226,8 @@ function StatChip({ label, value, sub, color = 'text-white' }: {
 
 // ─── Main ─────────────────────────────────────────────────────────
 
-export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: string }) {
+/** `chartsOnly`: just the two charts (CE vs PE, PE minus CE), as the Index Scalper's Cum OI pop-up shows them. */
+export default function OptionsCumulativeOITab({ expiry: _expiry, chartsOnly = false }: { expiry: string; chartsOnly?: boolean }) {
   const [response, setResponse]   = useState<CumulativeResponse | null>(null);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState('');
@@ -330,6 +331,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
   return (
     <div className="flex flex-col gap-6 py-2">
       {/* ── Top Bar ──────────────────────────────────────────────────── */}
+      {!chartsOnly && (
       <div className="flex items-center justify-between flex-wrap gap-4 bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4">
         <div className="flex items-center gap-3">
           <div>
@@ -361,6 +363,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
           </span>
         </div>
       </div>
+      )}
 
       {data.length === 0 ? (
         <div className="flex items-center justify-center py-24 text-zinc-500 text-sm">
@@ -369,7 +372,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
       ) : (
         <>
         {/* ── Options Regime Score ────────────────────────────────────── */}
-        {regime && (
+        {!chartsOnly && regime && (
           <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 space-y-4">
             {regime.warmingUp ? (
               <div className="flex items-center gap-3 py-2">
@@ -484,7 +487,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
         )}
 
         {/* ── Regime Timeline ─────────────────────────────────────────── */}
-        {data.length > 1 && (
+        {!chartsOnly && data.length > 1 && (
           <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
             <div className="flex items-center justify-between mb-3">
               <div>
@@ -647,6 +650,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
         </div>
 
         {/* ── Chart 3: OI Divergence / Slope / WPI — standardized (Z-score) ── */}
+        {!chartsOnly && (
         <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 space-y-4">
           <div className="flex items-center justify-between flex-wrap gap-3">
             <div>
@@ -822,6 +826,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
             </LineChart>
           </ResponsiveContainer>
         </div>
+        )}
         </>
       )}
     </div>

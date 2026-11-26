@@ -18,8 +18,11 @@ const CrudeOilCumulativeOITab = dynamic(() => import('./CrudeOilCumulativeOITab'
 });
 
 /** The live cumulative OI view (ATM ± wings), opened over a page without leaving it. NIFTY by default; `crude` shows
- *  the MCX crude view. `zClass` raises it over a page whose own floating layers sit above z-50 (the Index Scalper). */
-export default function CumulativeOIModal({ onClose, crude = false, zClass = 'z-50' }: { onClose: () => void; crude?: boolean; zClass?: string }) {
+ *  the MCX crude view. `zClass` raises it over a page whose own floating layers sit above z-50 (the Index Scalper).
+ *  `chartsOnly` shows just the two charts (CE vs PE, PE minus CE) without the regime panels. */
+export default function CumulativeOIModal({ onClose, crude = false, zClass = 'z-50', chartsOnly = false }: {
+  onClose: () => void; crude?: boolean; zClass?: string; chartsOnly?: boolean;
+}) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
@@ -47,7 +50,7 @@ export default function CumulativeOIModal({ onClose, crude = false, zClass = 'z-
           </div>
         </div>
         <div className="px-5 py-4">
-          {crude ? <CrudeOilCumulativeOITab expiry="" /> : <OptionsCumulativeOITab expiry="" />}
+          {crude ? <CrudeOilCumulativeOITab expiry="" chartsOnly={chartsOnly} /> : <OptionsCumulativeOITab expiry="" chartsOnly={chartsOnly} />}
         </div>
       </div>
     </div>

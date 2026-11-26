@@ -2133,7 +2133,7 @@ export default function IndexScalperTerminal() {
         </div>
       </div>
 
-      {cumOiOpen && <CumulativeOIModal crude={underlying !== 'NIFTY'} zClass="z-[80]" onClose={() => setCumOiOpen(false)} />}
+      {cumOiOpen && <CumulativeOIModal crude={underlying !== 'NIFTY'} zClass="z-[80]" chartsOnly onClose={() => setCumOiOpen(false)} />}
 
       {(candleErr || posErr || feed.stale || notLive || !feed.marketOpen || feed.kotakError) && (
         <div role="alert" className="px-3 py-1 text-[11px] text-amber-300 bg-amber-500/10 border-b border-amber-500/30">
