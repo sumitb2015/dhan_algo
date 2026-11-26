@@ -1007,7 +1007,9 @@ function ScalperChart(props: Props) {
           if (y !== null) raw.push({ id: `ord_${ord.id}`, y: Number(y) });
         }
       }
-      raw.sort((a, b) => a.y - b.y);
+      // Ties (a CE and a PE on the same strike line) break by id: the broker's row order can change between polls, and
+      // following it made the two chips swap places under the mouse.
+      raw.sort((a, b) => a.y - b.y || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       const out: Record<string, number> = {};
       let floor = -Infinity;
       for (const r of raw) { const y = Math.max(r.y, floor + 26); out[r.id] = y; floor = y; }
@@ -1746,7 +1748,7 @@ function ScalperChart(props: Props) {
                 onClick={e => { e.stopPropagation(); onAdjustLeg(p.leg, -1); }}
                 className="h-[18px] w-[18px] flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold leading-none disabled:opacity-35 disabled:cursor-not-allowed">−</button>
             )}
-            <span data-testid="position-lots" title={`${isLong ? 'Long' : 'Short'} ${lots} lot${lots === 1 ? '' : 's'} (${Math.abs(totalUnits)} units)`} className="h-[18px] px-1.5 flex items-center rounded bg-zinc-800/80 text-zinc-200 border border-zinc-700 text-[10px] font-semibold">
+            <span data-testid="position-lots" title={`${isLong ? 'Long' : 'Short'} ${lots} lot${lots === 1 ? '' : 's'} (${Math.abs(totalUnits)} units)`} className="h-[18px] px-1.5 min-w-[26px] flex items-center justify-center tabular-nums rounded bg-zinc-800/80 text-zinc-200 border border-zinc-700 text-[10px] font-semibold">
               {lots}
             </span>
             {onAdjustLeg && optOnIndex && (
@@ -1757,7 +1759,9 @@ function ScalperChart(props: Props) {
             )}
 
             {/* Live P&L INR (+0.00%) */}
-            <span className={cn('h-[18px] px-1 flex items-center text-[10px] font-semibold', pnlCls)}>
+            {/* Fixed width, right-aligned, equal-width digits: the chip is pinned at its right edge, so a P&L that changed
+                length on every tick slid the - / + buttons sideways under the mouse. 24 characters fit "-1,23,456 INR (-123.45%)"; only a larger figure grows it. */}
+            <span className={cn('h-[18px] px-1 min-w-[calc(24ch+8px)] flex items-center justify-end tabular-nums whitespace-nowrap text-[10px] font-semibold', pnlCls)}>
               {curPnl === null
                 ? <span title="No live premium for this option">— INR</span>
                 : <>{curPnl >= 0 ? '+' : ''}{inrWhole(curPnl)} INR ({(curPct ?? 0) >= 0 ? '+' : ''}{(curPct ?? 0).toFixed(2)}%)</>}
