@@ -514,3 +514,21 @@ test('CRUDEOIL and CRUDEOILM never read each other\'s contracts; CRUDEOIL\'s 5-l
   assert.deepEqual(orderUnits(6, 1, 5), { ok: false, error: 'Max 5 lots per order' });
   assert.deepEqual(orderUnits(20, 65), { ok: true, units: 1300 }); // default cap 20
 });
+
+test('Day High / Low: PDH / PDL from the previous day, DH / DL running within today', () => {
+  const ist = (iso: string) => Date.parse(`${iso}+05:30`) / 1000;
+  const bars = [
+    { t: ist('2026-11-20T09:15:00'), o: 10, h: 12, l: 9, c: 11 },
+    { t: ist('2026-11-20T15:25:00'), o: 11, h: 15, l: 10, c: 14 },
+    { t: ist('2026-11-23T09:15:00'), o: 14, h: 16, l: 13, c: 15 },
+    { t: ist('2026-11-23T09:20:00'), o: 15, h: 17, l: 12, c: 16 },
+    { t: ist('2026-11-23T09:25:00'), o: 16, h: 16.5, l: 14, c: 15 },
+  ];
+  const out = computeIndicator(bars, newIndicator('daylevels', 'd'));
+  const by = Object.fromEntries(out.series.map(s => [s.axisLabel, s.values]));
+  assert.deepEqual(by.PDH, [null, null, 15, 15, 15]);
+  assert.deepEqual(by.PDL, [null, null, 9, 9, 9]);
+  assert.deepEqual(by.DH, [12, 15, 16, 17, 17]);
+  assert.deepEqual(by.DL, [9, 9, 13, 12, 12]);
+  assert.equal(pointColor(out.series[2], 1), 'transparent'); // no slanted join from Friday's DH to Monday's
+});

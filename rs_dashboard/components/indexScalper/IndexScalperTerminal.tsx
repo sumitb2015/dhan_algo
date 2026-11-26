@@ -69,6 +69,7 @@ const GRID_KEY = 'indexScalper.grid';
 // The old scale-bar volume switch (read once, to add the Volume indicator hidden for a viewer who had turned it off).
 const VOL_KEY = 'indexScalper.volume';
 const VOL_ADDED_KEY = 'indexScalper.volumeIndicatorAdded';
+const DAY_HL_ADDED_KEY = 'indexScalper.dayLevelsIndicatorAdded';
 /** Dhan tag for this page's CLOSING orders: no per-order cap (none is listed for it), still an 'isx…' order. */
 const CLOSE_SOURCE = 'isxx';
 const OI_MODE_KEY = 'indexScalper.oiMode';
@@ -119,7 +120,7 @@ function loadJson<T>(key: string, fallback: T): T {
 }
 
 function defaultIndicators(): IndicatorInstance[] {
-  return [newIndicator('supertrend', nextId()), newIndicator('ema', nextId()), newIndicator('volume', nextId())];
+  return [newIndicator('supertrend', nextId()), newIndicator('ema', nextId()), newIndicator('volume', nextId()), newIndicator('daylevels', nextId())];
 }
 
 interface Toast { ok: boolean; text: string }
@@ -288,6 +289,9 @@ export default function IndexScalperTerminal() {
     // only, so a viewer who later removes it keeps it removed.
     if (Array.isArray(saved) && readPref(VOL_ADDED_KEY) !== '1') saved = withVolume(saved, nextId(), readPref(VOL_KEY) !== '0');
     savePref(VOL_ADDED_KEY, '1');
+    // Day High / Low (PDH, PDL, DH, DL) added 2026-11-26: switched on once for a saved list, so removing it sticks.
+    if (Array.isArray(saved) && readPref(DAY_HL_ADDED_KEY) !== '1' && !saved.some(i => i.kind === 'daylevels')) saved = [...saved, newIndicator('daylevels', nextId())];
+    savePref(DAY_HL_ADDED_KEY, '1');
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setIndicators(Array.isArray(saved) ? saved : defaultIndicators());
     setIndReady(true);

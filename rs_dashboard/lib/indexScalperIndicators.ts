@@ -9,7 +9,7 @@ import type { Underlying } from './indexScalperInstrument.ts';
 /** `v` = traded volume in the bar, when the instrument has one (a future, an option); an index has none. */
 export interface Bar { t: number; o: number; h: number; l: number; c: number; v?: number }
 
-export type IndicatorKind = 'volume' | 'ema' | 'emacross' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'rsi' | 'stochrsi' | 'macd' | 'adx';
+export type IndicatorKind = 'volume' | 'ema' | 'emacross' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'daylevels' | 'rsi' | 'stochrsi' | 'macd' | 'adx';
 
 export interface IndicatorInstance {
   id: string;
@@ -60,6 +60,9 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
   // Standard", Traditional; the CPR is the same pivot with its BC / TC).
   { kind: 'cpr', label: 'CPR (central pivot range)', pane: 'price', color: '#a855f7', params: [] },
   { kind: 'pivots', label: 'Pivot S / R (S1-S4, R1-R4)', pane: 'price', color: '#f59e0b', params: [{ key: 'levels', label: 'Levels (1-4)', def: 4, min: 1, max: 4 }] },
+  // PDH / PDL = the previous IST day's high / low (same day as the pivots use); DH / DL = today's high / low so far
+  // (steps out as the day makes new extremes; no look-ahead, so a past bar shows the level as it stood then).
+  { kind: 'daylevels', label: 'Day High / Low (PDH, PDL, DH, DL)', pane: 'price', color: '#0ea5e9', params: [] },
   // Two EMAs (TradingView ta.ema) with a small circle where they cross: green when the fast crosses above, red below.
   {
     kind: 'emacross', label: 'EMA Cross', pane: 'price', color: '#22d3ee',
@@ -122,7 +125,7 @@ export function newIndicator(kind: IndicatorKind, id: string): IndicatorInstance
 export function indicatorLabel(ind: IndicatorInstance): string {
   const c = catalogEntry(ind.kind);
   const ps = c.params.map(p => ind.params[p.key] ?? p.def).join(', ');
-  const name = ind.kind === 'vwap' ? 'VWAP' : ind.kind === 'cpr' ? 'CPR' : ind.kind === 'pivots' ? 'Pivots S/R' : c.label;
+  const name = ind.kind === 'vwap' ? 'VWAP' : ind.kind === 'cpr' ? 'CPR' : ind.kind === 'pivots' ? 'Pivots S/R' : ind.kind === 'daylevels' ? 'Day H/L' : c.label;
   return ps ? `${name} (${ps})` : name;
 }
 
@@ -228,6 +231,19 @@ export function pivotLevels(h: number, l: number, c: number) {
   };
 }
 
+/** Today's running high / low per bar: the highest high and lowest low of the bar's own IST day up to and including
+ *  that bar (DH / DL as they stood at the time). */
+export function dayRunningHl(bars: Bar[]): { h: number; l: number }[] {
+  const out: { h: number; l: number }[] = [];
+  let day = -1, h = 0, l = 0;
+  for (const b of bars) {
+    const d = istDay(b.t);
+    if (d !== day) { day = d; h = b.h; l = b.l; } else { h = Math.max(h, b.h); l = Math.min(l, b.l); }
+    out.push({ h, l });
+  }
+  return out;
+}
+
 /** Day-boundary breaks for daily-level lines: true on the last bar of each IST day that has a next bar. */
 export function dayBreaks(bars: Bar[]): boolean[] {
   return bars.map((b, i) => i + 1 < bars.length && istDay(bars[i + 1].t) !== istDay(b.t));
@@ -327,6 +343,23 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
         series.push(level(S[k], S[k].toUpperCase(), UP));
       }
       return { pane: 'price', series };
+    }
+    case 'daylevels': {
+      const prev = prevDayHlc(bars);
+      const cur = dayRunningHl(bars);
+      const breaks = dayBreaks(bars);
+      const line = (key: string, name: string, color: string, values: (number | null)[]): OutSeries => ({
+        key, label: `${label} ${name}`, axisLabel: name, color, style: 'line', lineWidth: 1, breaks, values,
+      });
+      return {
+        pane: 'price',
+        series: [
+          line('pdh', 'PDH', DOWN, prev.map(x => (x ? x.h : null))),
+          line('pdl', 'PDL', UP, prev.map(x => (x ? x.l : null))),
+          line('dh', 'DH', ind.color, cur.map(x => x.h)),
+          line('dl', 'DL', ind.color, cur.map(x => x.l)),
+        ],
+      };
     }
     case 'rsi':
       return { pane: 'sub', series: [{ key: 'v', label, axisLabel: `RSI(${p('period')})`, color: ind.color, style: 'line', values: rsiArray(closes, p('period')), guides: [30, 70] }] };
