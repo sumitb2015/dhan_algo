@@ -112,14 +112,22 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
   strategy will not know.
 
 ### Global MTM target / stop (header, 2026-11-26)
-- `MtmGuardControl.tsx` beside Exit All; rules `lib/indexScalperMtmGuard.ts`. Watches the account panel's "Today's Position
-  P&L" (`dayPnl` over `panelPositions`: realized + open, the mode's book for the underlying on screen) and runs
-  `exitAll(true)` (no "opened elsewhere" question) once when it reaches +target or -stop; then switches itself OFF (re-arm
-  by the switch; re-arming while already past a level is refused with a message). Defaults ON, ₹8,000 / ₹8,000, saved
-  per browser in `indexScalper.mtmGuard.v1`; 0 = that side off. Amounts commit on blur / Enter only.
-- Never trips with no open position, a partial total (an unpriced position) or stale prices (`feedAgeSec`). Browser-only:
-  REAL needs the page open and armed. Web Lock `index-scalper-mtm-exit` + a 2 s hold so a second tab's Exit All re-reads a
-  flat book. Because realized P&L counts, a day already past -stop exits any NEW position at once while the guard is on.
+- `MtmGuardControl.tsx` beside Exit All; rules `lib/indexScalperMtmGuard.ts`. Watches the day P&L (`dayPnl`: realized +
+  open) of the **underlying on screen**: REAL broker rows are the whole account, so only `guardScopeIds` rows count (the
+  legs' own symbol rules; the Kotak NIFTY future is out, as it is not a leg). The control shows that figure; the account
+  panel's "Today's Position P&L" is account-wide and can differ. An account-wide total let another underlying's loss
+  exit this one (review 2026-11-26).
+- Runs `exitAll(true)` (no "opened elsewhere" question) once at +target / -stop, then switches itself OFF. `exitAll`
+  returns false when anything was refused / unknown: the guard then warns loudly (it is already off).
+- Defaults ON, ₹8,000 / ₹8,000, saved per browser (`indexScalper.mtmGuard.v1`); 0 = that side off; amounts commit on
+  blur / Enter, and a refused edit puts the box back. Acts only after the saved settings load (`mtmLoaded`).
+- Never fires on: no open position, a partial total (unpriced position), stale prices, a book not read yet
+  (`bookReady`). The FIRST priced look after a mode / broker / instrument change is a baseline: already past a level ->
+  switched OFF with a message, never an instant Exit All (arming REAL after a loss). Switching on / editing to a level
+  the P&L is already past is refused.
+- Browser-only (REAL: page open and armed). Web Lock `index-scalper-mtm-exit` + 2 s hold so a second tab's Exit All
+  re-reads a flat book. Realized counts: once a day is past -stop, a NEW position is exited at its first priced look
+  after the baseline.
 
 ### Reverse position (rebuilt 2026-11-25; rules `lib/indexScalperReverse.ts`)
 - REAL asks first (`Reverse position` dialog), then: fresh positions read (never the chip's 3 s-old qty) -> fresh order

@@ -1,5 +1,5 @@
-// Index Scalper global MTM target / stop (header, beside Exit All). It watches the page's "Today's Position P&L" (the
-// account panel's day total: realized + open, the mode's book for the underlying on screen) and, when that reaches the
+// Index Scalper global MTM target / stop (header, beside Exit All). It watches the day P&L (realized + open) of the
+// underlying on screen (see Scope below; the figure is shown in the control) and, when that reaches the
 // target or falls to minus the stop, runs Exit All. Like the Price Ladder's MTM guard it then switches itself OFF:
 // re-arm it to carry on. It never trips on a partial total (an open position with no price) or with no open position.
 // Browser-only: the page must be open (and, for REAL, armed). Pure: no React. Tested in indexScalperMtmGuard.test.ts.

@@ -1059,14 +1059,18 @@ export default function IndexScalperTerminal() {
   }, [exitingId, legs, real, openedHere, exitSimLeg, readExitState, exitRealRow, refreshAfterOrder, flash]);
 
   // ── global MTM target / stop (lib/indexScalperMtmGuard.ts) ────────────────────────────────────────────────────────
-  // Watches the account panel's "Today's Position P&L" (same number, same book) and runs Exit All once when it reaches the
+  // Watches the day P&L (realized + open) of the underlying on screen (REAL: only its rows of the account's book, shown in
+  // the control; the account panel's total is account-wide) and runs Exit All once when it reaches the
   // target or falls to minus the stop, then switches itself off (re-arm to carry on), like the Price Ladder's guard.
   // Paused on stale prices or a partial total. Browser-only: the page must be open (REAL: armed). A Web Lock and a
   // 2 s hold after the exit keep a second open tab from closing the same book twice (its Exit All re-reads it).
   const [mtm, setMtm] = useState<MtmGuardSettings>(MTM_GUARD_DEFAULTS);
+  // The guard acts only on the SAVED settings (read after mount), never on the defaults of the first render.
+  const [mtmLoaded, setMtmLoaded] = useState(false);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- per-viewer settings read after mount (no SSR mismatch)
     setMtm(readMtmGuard(readPref(MTM_KEY)));
+    setMtmLoaded(true);
   }, []);
   const saveMtm = useCallback((next: MtmGuardSettings) => { setMtm(next); savePref(MTM_KEY, JSON.stringify(next)); }, []);
   const [mtmNote, setMtmNote] = useState<string | null>(null);
@@ -1082,14 +1086,13 @@ export default function IndexScalperTerminal() {
   const mtmBaseRef = useRef<string | null>(null);
   const mtmScopeKey = `${real ? 'real' : 'sim'}|${broker}|${underlying}`;
   useEffect(() => {
-    if (!mtm.on || mtmFiringRef.current || exitingId !== null || legs.length === 0) return;
+    if (!mtmLoaded || !mtm.on || mtmFiringRef.current || exitingId !== null || legs.length === 0) return;
     if (!pricesLive || !bookReady) return; // a P&L on old prices / a book not read yet must not exit (or hold) anything
     const trip = mtmGuardTrip(mtm, dayTotal.pnl, dayTotal.unpriced, legs.length);
     const firstLook = mtmBaseRef.current !== mtmScopeKey;
     if (dayTotal.pnl !== null && dayTotal.unpriced === 0) mtmBaseRef.current = mtmScopeKey;
     if (!trip) return;
     if (firstLook) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- switching off a guard the loaded book is already past
       saveMtm({ ...mtm, on: false });
       setMtmNote(`already past the ${trip.kind} at load: off`);
       flash({ ok: false, text: `MTM exit switched OFF, not fired: this book's day P&L ${Math.round(trip.pnl).toLocaleString('en-IN')} was already past the ${trip.kind} (₹${trip.level.toLocaleString('en-IN')}) when it loaded. Change the level, then switch it on.` });
@@ -1097,7 +1100,6 @@ export default function IndexScalperTerminal() {
       return;
     }
     mtmFiringRef.current = true;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- switching the guard off for the trip the P&L update just caused
     saveMtm({ ...mtm, on: false });
     const what = trip.kind === 'target' ? `target ₹${trip.level.toLocaleString('en-IN')} reached` : `stop loss ₹${trip.level.toLocaleString('en-IN')} hit`;
     const text = `MTM ${what} (P&L ${trip.pnl >= 0 ? '+' : ''}${Math.round(trip.pnl).toLocaleString('en-IN')}): Exit All${real ? '' : ' (SIM)'}. The MTM exit is now off; switch it on to re-arm.`;
@@ -1116,7 +1118,7 @@ export default function IndexScalperTerminal() {
     };
     const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
     void (locks?.request ? locks.request('index-scalper-mtm-exit', run) : run()).finally(() => { mtmFiringRef.current = false; });
-  }, [mtm, dayTotal, legs.length, exitingId, pricesLive, bookReady, mtmScopeKey, real, saveMtm, exitAll, flash]);
+  }, [mtm, mtmLoaded, dayTotal, legs.length, exitingId, pricesLive, bookReady, mtmScopeKey, real, saveMtm, exitAll, flash]);
   const onMtmChange = useCallback((next: MtmGuardSettings): boolean => {
     if (next.on) {
       // Switching on, or editing a level while on, so that the current P&L is already past it would exit at once: refuse.
@@ -1126,7 +1128,7 @@ export default function IndexScalperTerminal() {
     setMtmNote(null);
     saveMtm(next);
     return true;
-  }, [mtm.on, dayTotal, legs.length, saveMtm, flash]);
+  }, [dayTotal, legs.length, saveMtm, flash]);
   const mtmShownNote = mtmNote ?? (mtm.on && legs.length > 0
     ? (!pricesLive ? 'paused: prices stale' : dayTotal.unpriced > 0 ? 'paused: a position has no price' : null)
     : null);
