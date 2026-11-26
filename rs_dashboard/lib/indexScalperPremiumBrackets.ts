@@ -38,6 +38,25 @@ function snapAway(price: number, tick: number, up: boolean): number {
   return Number((n * tick).toFixed(2));
 }
 
+/** Limit-price cushion beyond the trigger of an option stop (the rule lib/dhan_helper.py place_sl_market uses). */
+export const OPTION_STOP_CUSHION = 0.05;
+
+/**
+ * An option stop is sent as a stop-LIMIT, never a stop-market: Kotak's RMS rejects SL-M on NSE options ("STOP LOSS MARKET
+ * ORDER NOT ALLOWED IN OPTIONS", 2026-11-26), and lib/dhan_helper.py says the same of Dhan. The limit sits a 5% cushion
+ * beyond the trigger, so it still fills when the price gaps past it: a BUY stop's limit above the trigger, a SELL stop's
+ * below, on the tick and at least one tick away; a SELL limit never below one tick.
+ */
+export function optionStopLimit(side: 'BUY' | 'SELL', trigger: number, tick: number): { price: number; trigger: number } {
+  const trg = snapPremium(trigger, tick);
+  if (side === 'BUY') {
+    const px = Math.max(snapAway(trg * (1 + OPTION_STOP_CUSHION), tick, true), Number((trg + tick).toFixed(2)));
+    return { price: px, trigger: trg };
+  }
+  const px = Math.min(snapAway(trg * (1 - OPTION_STOP_CUSHION), tick, false), Number((trg - tick).toFixed(2)));
+  return { price: Math.max(px, tick), trigger: trg };
+}
+
 /** Snap to the premium tick (NSE options 0.05, MCX crude options 0.10). */
 export function snapPremium(price: number, tick: number): number {
   return Number((Math.round(price / tick) * tick).toFixed(2));
@@ -110,4 +129,20 @@ export function legPremiumPnl(leg: ScalperLeg): { pnl: number; pct: number } | n
   if (pnl === null || leg.ltp === null || !(leg.avg > 0)) return null;
   const isLong = leg.netQty > 0;
   return { pnl, pct: ((isLong ? leg.ltp - leg.avg : leg.avg - leg.ltp) / leg.avg) * 100 };
+}
+
+/**
+ * What the order book says about an order this page just placed (raw Dhan rows, or Kotak rows from kotakShape: both carry
+ * `orderId` / `orderStatus`; the reason is Dhan's `omsErrorDescription` or Kotak's `reason`). A broker can accept an order
+ * (order number returned) and reject it a moment later in RMS (Kotak: SL-M on options), so "placed" is not "working".
+ */
+export function placedOrderState(book: Record<string, unknown>[], orderId: string):
+  { state: 'rejected' | 'cancelled' | 'live' | 'missing'; reason: string } {
+  const row = book.find(o => String(o.orderId ?? '') === orderId);
+  if (!row) return { state: 'missing', reason: '' };
+  const st = String(row.orderStatus ?? '').toUpperCase();
+  const reason = String(row.omsErrorDescription ?? row.reason ?? '').trim();
+  if (st.includes('REJECT')) return { state: 'rejected', reason: reason && reason !== '--' ? reason : 'no reason given' };
+  if (st.includes('CANCEL')) return { state: 'cancelled', reason: '' };
+  return { state: 'live', reason: '' };
 }

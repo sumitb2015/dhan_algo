@@ -708,7 +708,7 @@ test.describe('Index Scalper layout + option charts', () => {
     await sl.getByLabel('SL premium').press('Enter');
     await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/fast-order').length, { timeout: 15_000 }).toBe(1);
     expect(state.calls.find(c => c.path === '/api/scalper/fast-order')!.body).toMatchObject({
-      securityId: '302', side: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 190, quantity: 65, productType: 'INTRADAY', source: 'isxx',
+      securityId: '302', side: 'SELL', orderType: 'STOP_LOSS', triggerPrice: 190, price: 180.5, quantity: 65, productType: 'INTRADAY', source: 'isxx',
     });
 
     // the order book now shows it: the chip's badge reads it, and its x cancels that order
@@ -831,6 +831,41 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('REAL lots added: this page\'s target and stop grow to the whole position (a 1-lot target on a 4-lot short)', async ({ page, context }) => {
+    test.setTimeout(90_000);
+    const state = newState();
+    const pos = { tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY', netQty: -65, buyAvg: 0, costPrice: 200, sellAvg: 200, positionType: 'SHORT' };
+    const o = (orderId: string, correlationId: string, orderType: string, extra: Record<string, unknown>) => ({
+      orderId, correlationId, securityId: '302', tradingSymbol: 'NIFTY-Dec2026-25350-CE', productType: 'INTRADAY', transactionType: 'BUY',
+      orderType, quantity: 65, filledQty: 0, orderStatus: 'PENDING', drvOptionType: 'CALL', drvStrikePrice: 25350, drvExpiryDate: '2026-12-01', ...extra,
+    });
+    state.positions = [pos];
+    state.orders = [
+      o('TP1', 'isxtp', 'LIMIT', { price: 150, triggerPrice: 0 }),
+      o('SL1', 'isxsl', 'STOP_LOSS', { price: 252, triggerPrice: 240 }),
+      o('ST9', 'strategy', 'STOP_LOSS', { price: 270, triggerPrice: 260 }),
+    ];
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    await expect(page.getByTestId('chart-pane-0').getByTestId('position-chip')).toHaveCount(1, { timeout: 15_000 });
+    await page.waitForTimeout(4_000);
+    expect(state.calls).toEqual([]);
+
+    // 3 more lots sold (elsewhere, or from the ticket): short 4 lots
+    state.positions = [{ ...pos, netQty: -260 }];
+    const patches = () => state.calls.filter(c => c.path === '/api/scalper/orders#PATCH');
+    await expect.poll(() => patches().length, { timeout: 15_000 }).toBe(2);
+    expect(patches().map(c => [c.body?.orderId, c.body?.quantity]).sort()).toEqual([['SL1', 260], ['TP1', 260]]);
+    await page.waitForTimeout(4_000);
+    expect(patches().length).toBe(2); // once each, and never the strategy's ST9
+    expect(state.calls.filter(c => c.path === '/api/scalper/fast-order')).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
   test('SIM: a paper target does not come back on the next position after an Exit', async ({ page, context }) => {
     const state = newState();
     await signIn(context);
@@ -941,7 +976,7 @@ test.describe('Index Scalper layout + option charts', () => {
     await expect(sl).toContainText('10% of entry → Books about -1,300 at 180.00');
     await sl.getByLabel('SL premium').press('Enter');
     await expect.poll(() => orders().length, { timeout: 15_000 }).toBe(1);
-    expect(orders()[0].body).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 180, quantity: 65 });
+    expect(orders()[0].body).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'STOP_LOSS', triggerPrice: 180, price: 171, quantity: 65 });
 
     // TP 2% above entry = 204.00 is below the live 210.50: refused, nothing sent; 15% = 230.00 goes as a LIMIT
     await chip.getByRole('button', { name: 'Target for CE 25350' }).click();
@@ -1051,7 +1086,7 @@ test.describe('Index Scalper layout + option charts', () => {
     await sl.getByLabel('SL premium').press('Enter');
     await expect.poll(() => sends().length, { timeout: 15_000 }).toBe(1);
     expect(cancels()).toEqual(['SL1']);
-    expect(sends()[0].body).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 180, quantity: 65 });
+    expect(sends()[0].body).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'STOP_LOSS', triggerPrice: 180, price: 171, quantity: 65 });
     expect(state.blocked).toEqual([]);
   });
 
@@ -1297,7 +1332,7 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
-  test('REAL option leg: dragging SL on its premium chart sends an SL-M on that option, tagged isxx (a close)', async ({ page, context }) => {
+  test('REAL option leg: dragging SL on its premium chart sends a stop-limit on that option, tagged isxx (a close)', async ({ page, context }) => {
     const state = newState();
     state.positions = [{
       tradingSymbol: 'NIFTY-Dec2026-25350-CE', securityId: '302', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY',
@@ -1319,10 +1354,14 @@ test.describe('Index Scalper layout + option charts', () => {
     await dragFrom(page, chip.getByRole('button', { name: 'Stop loss for CE 25350' }), 60);
     await expect.poll(() => state.calls.filter(c => c.path === '/api/scalper/fast-order').length, { timeout: 15_000 }).toBe(1);
     const sent = state.calls.find(c => c.path === '/api/scalper/fast-order')!.body!;
-    expect(sent).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'STOP_LOSS_MARKET', quantity: 65, source: 'isxx', exchangeSegment: 'NSE_FNO' });
+    // an option stop is a stop-LIMIT a 5% cushion below the trigger (brokers refuse SL-M on options)
+    expect(sent).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'STOP_LOSS', quantity: 65, source: 'isxx', exchangeSegment: 'NSE_FNO' });
     const trig = Number(sent.triggerPrice ?? sent.trigger);
     expect(trig).toBeGreaterThan(100);
     expect(trig).toBeLessThan(200);
+    const px = Number(sent.price);
+    expect(px).toBeLessThan(trig);
+    expect(Math.abs(px - Math.floor(trig * 0.95 / 0.05 + 1e-9) * 0.05)).toBeLessThan(1e-6);
     expect(state.blocked).toEqual([]);
   });
 
@@ -1401,7 +1440,7 @@ test.describe('Index Scalper layout + option charts', () => {
     }];
     await expect.poll(() => sends().length, { timeout: 15_000 }).toBe(3);
     expect(sends()[1].body).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'LIMIT', price: 273.65, quantity: 65 });
-    expect(sends()[2].body).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'STOP_LOSS_MARKET', triggerPrice: 168.4, quantity: 65 });
+    expect(sends()[2].body).toMatchObject({ securityId: '302', side: 'SELL', orderType: 'STOP_LOSS', triggerPrice: 168.4, price: 159.95, quantity: 65 });
     // at most once: the order book still shows neither order, yet nothing more is sent
     await page.waitForTimeout(4000);
     expect(sends()).toHaveLength(3);

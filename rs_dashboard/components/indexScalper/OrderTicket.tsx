@@ -59,7 +59,12 @@ export default function OrderTicket({
 }) {
   // Right of the chain panel and left of the chart's position chips, so neither is covered by default.
   const { pos, handle } = useDraggable({ x: Math.max(16, (typeof window === 'undefined' ? 1200 : window.innerWidth) - 800), y: 190 });
-  const [orderType, setOrderType] = useState<TicketOrderType>(initialOrderType ?? 'MARKET');
+  // No stop-market on an option: brokers refuse SL-M on options (Kotak RMS-rejects it after returning an order number,
+  // 2026-11-26), so an option offers Stop Limit only; a future keeps Stop (SL-M).
+  const isOptionContract = contract.type !== 'FUT';
+  const types = isOptionContract ? TYPES.filter(t => t.v !== 'STOP_LOSS_MARKET') : TYPES;
+  const [orderType, setOrderType] = useState<TicketOrderType>(
+    initialOrderType === 'STOP_LOSS_MARKET' && isOptionContract ? 'STOP_LOSS' : (initialOrderType ?? 'MARKET'));
   // MCX crude is NRML only (Intraday disabled): Kotak's RMS refuses a fresh MIS crude position.
   const crudeNrml = nrmlOnly(underlying);
   const [productDraft, setProduct] = useState<TicketProduct>('INTRADAY');
@@ -135,7 +140,7 @@ export default function OrderTicket({
         </div>
 
         <div className="flex items-center gap-3 text-xs border-b border-zinc-800">
-          {TYPES.map(t => (
+          {types.map(t => (
             <button key={t.v} type="button" onClick={() => setOrderType(t.v)}
               title={!real && t.v !== 'MARKET' ? 'SIM: a limit away from the price, a stop or a stop-limit waits as a paper order and fills when the price gets there' : undefined}
               className={cn('pb-1.5 -mb-px border-b-2 font-semibold disabled:opacity-40', orderType === t.v ? 'text-white border-sky-500' : 'text-zinc-400 border-transparent hover:text-zinc-200')}>

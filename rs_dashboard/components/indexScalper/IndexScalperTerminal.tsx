@@ -62,7 +62,7 @@ import { Switch } from '@/components/ui/switch';
 import type { OiMode } from '@/lib/indexScalperOiProfile';
 import { editLotsError, isEditable, movedLevels, orderEditError } from '@/lib/indexScalperOrderEdit';
 import { DEFAULT_BRACKETS, DEFAULT_BRACKETS_KEY, SL_PCT_OPTIONS, TP_PCT_OPTIONS, clampDefaultBrackets, defaultBracketPlan, opensPosition, pendingLeg, type DefaultBracketSettings, type PendingDefault } from '@/lib/indexScalperDefaultBrackets';
-import { premiumBracketsFor } from '@/lib/indexScalperPremiumBrackets';
+import { optionStopLimit, placedOrderState, premiumBracketsFor } from '@/lib/indexScalperPremiumBrackets';
 import { QUICK_ON_KEY, QUICK_SETTINGS_KEY, DEFAULT_QUICK, MAX_QUICK_RANGE, clampQuickSettings, lotsToRemove, type QuickSettings } from '@/lib/indexScalperQuickTrade';
 
 // v2: v1 could hold an ATM pin taken before any spot was known (the middle of the strike list, e.g. 24200). v1 is
@@ -253,6 +253,8 @@ export default function IndexScalperTerminal() {
   const [funds, setFunds] = useState<FundsView>(() => fundsView(null));
   // Dhan account reads for the bottom panel (read-only): order book and demat holdings.
   const [orderBook, setOrderBook] = useState<Record<string, unknown>[]>([]);
+  // Targets / stops just placed, awaiting the order book's word (watchPlaced). A cancel sent from here drops its check.
+  const placedChecksRef = useRef(new Map<string, { label: string; deadline: number }>());
   const [ordersErr, setOrdersErr] = useState<string | null>(null);
   const [holdingsRaw, setHoldingsRaw] = useState<Record<string, unknown>[]>([]);
   const [holdingsErr, setHoldingsErr] = useState<string | null>(null);
@@ -663,7 +665,7 @@ export default function IndexScalperTerminal() {
   const ordersView = useMemo(() => (real ? panelOrders : [...simOrderRows, ...panelOrders]), [real, panelOrders, simOrderRows]);
 
   // ── order placement ────────────────────────────────────────────────
-  interface Outcome { ok: boolean; unknown?: boolean; text: string }
+  interface Outcome { ok: boolean; unknown?: boolean; text: string; orderId?: string }
 
   /** One REAL order on the page's broker. Dhan: /api/scalper/fast-order (security id, `isx` correlation). Kotak: the
    *  page's own route, which records the order ID as this page's (trading symbol; opens capped, closes not). */
@@ -680,7 +682,7 @@ export default function IndexScalperTerminal() {
       });
       const j = await res.json() as { success: boolean; order_id?: string; error?: string; unknown?: boolean; warning?: string };
       if (kotak) void loadKotakRecords();
-      if (j.success) return { ok: true, text: `Order ${j.order_id ?? ''} placed${j.warning ? ` (${j.warning})` : ''}` };
+      if (j.success) return { ok: true, orderId: j.order_id, text: `Order ${j.order_id ?? ''} placed${j.warning ? ` (${j.warning})` : ''}` };
       if (j.unknown || res.status === 504) return { ok: false, unknown: true, text: j.error ?? 'Order status unknown: check Positions / Orders before retrying' };
       return { ok: false, text: j.error ?? 'Order rejected' };
     } catch (e) {
@@ -1139,6 +1141,7 @@ export default function IndexScalperTerminal() {
 
   /** Cancel any working order on the broker's book (this page's, the mobile app's, another terminal's). */
   const sendCancel = useCallback(async (orderId: string) => {
+    placedChecksRef.current.delete(orderId);
     if (cancellingId) return;
     setCancellingId(orderId);
     try {
@@ -1257,12 +1260,14 @@ export default function IndexScalperTerminal() {
     setTicketBusy(true);
     try {
       const isStop = req.orderType === 'STOP_LOSS';
+      // An option stop goes as a stop-LIMIT (brokers refuse SL-M on options: optionStopLimit); a future keeps SL-M.
+      const optStop = isStop && c.type !== 'FUT' ? optionStopLimit(req.side, req.price, INSTRUMENTS[underlying].optTick) : null;
       const out = await placeContract({
         contract: c,
         side: req.side,
-        orderType: isStop ? 'STOP_LOSS_MARKET' : 'LIMIT',
-        price: isStop ? null : req.price,
-        trigger: isStop ? req.price : null,
+        orderType: optStop ? 'STOP_LOSS' : isStop ? 'STOP_LOSS_MARKET' : 'LIMIT',
+        price: optStop ? optStop.price : isStop ? null : req.price,
+        trigger: optStop ? optStop.trigger : isStop ? req.price : null,
         product: 'INTRADAY',
         lots: req.lots,
       });
@@ -1274,7 +1279,7 @@ export default function IndexScalperTerminal() {
     } finally {
       setTicketBusy(false);
     }
-  }, [ticketBusy, placeContract, flash, loadOrders, loadPositions]);
+  }, [ticketBusy, placeContract, flash, loadOrders, loadPositions, underlying]);
 
   // In SIM mode: auto-execute brackets when market price crosses TP or SL
   useEffect(() => {
@@ -1348,6 +1353,36 @@ export default function IndexScalperTerminal() {
     }
   }, [real, simReady, feed.ltpById, feed.stale, feed.feedAgeSec, feed.marketOpen, underlying, simFill, setSimOrders, flash]);
 
+  // A placed target / stop is not a working one until the order book says so: a broker can return an order number and
+  // reject it a moment later in RMS (Kotak: SL-M on options, 2026-11-26). Each placed bracket is checked against the
+  // order book (an extra read 2.5 s after the send, then the regular poll) for up to 30 s; a rejection or cancel is
+  // reported loudly with its reason, and an order never seen in that time is reported too.
+  const watchPlaced = useCallback((orderId: string, label: string) => {
+    placedChecksRef.current.set(orderId, { label, deadline: Date.now() + 30_000 });
+    setTimeout(() => { void loadOrders(); }, 2500);
+    setTimeout(() => { setPlacedCheckSeq(n => n + 1); }, 31_000);
+  }, [loadOrders]);
+  const [placedCheckSeq, setPlacedCheckSeq] = useState(0);
+  useEffect(() => { placedChecksRef.current.clear(); }, [real, broker, underlying]);
+  useEffect(() => {
+    const checks = placedChecksRef.current;
+    if (!checks.size) return;
+    const now = Date.now();
+    for (const [id, c] of [...checks]) {
+      const v = placedOrderState(orderBook, id);
+      if (v.state === 'live') { checks.delete(id); continue; }
+      if (v.state === 'missing' && now < c.deadline) continue;
+      checks.delete(id);
+      const text = v.state === 'rejected'
+        ? `${c.label} REJECTED by the broker (order ${id}): ${v.reason}. The position has NO ${c.label.startsWith('Stop') ? 'stop' : 'target'}.`
+        : v.state === 'cancelled'
+          ? `${c.label} was cancelled at the broker (order ${id}): it is not working.`
+          : `${c.label} (order ${id}) is not in the order book after 30 s: check Orders before relying on it.`;
+      flash({ ok: false, text });
+      if (soundOnRef.current) playWarnChime();
+    }
+  }, [orderBook, placedCheckSeq, flash]);
+
   /** `quiet`: the caller shows one summary (the default target / stop) instead of a message per level. */
   const onSetBracket = useCallback(async (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }, opts?: { quiet?: boolean }): Promise<Outcome> => {
     const say = (o: Outcome): Outcome => { if (!opts?.quiet) flash(o); return o; };
@@ -1364,7 +1399,10 @@ export default function IndexScalperTerminal() {
 
     const isLong = req.leg.netQty > 0;
     const oppSide: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
-    const targetType: TicketOrderType = req.kind === 'TP' ? 'LIMIT' : 'STOP_LOSS_MARKET';
+    // An option's stop is a stop-LIMIT a 5% cushion beyond the trigger: Kotak's RMS rejects SL-M on NSE options (2026-11-26:
+    // accepted with an order number, then rejected, so the position had no stop). A future keeps SL-M.
+    const optStop = req.kind === 'SL' && req.leg.type !== 'FUT' ? optionStopLimit(oppSide, req.price, INSTRUMENTS[underlying].optTick) : null;
+    const targetType: TicketOrderType = req.kind === 'TP' ? 'LIMIT' : optStop ? 'STOP_LOSS' : 'STOP_LOSS_MARKET';
 
     // Replace this page's own bracket order of this kind on THIS contract (never another contract's). Another placer's
     // order of the same kind (a strategy's resting stop) is never cancelled from here: two would both close the leg.
@@ -1405,16 +1443,17 @@ export default function IndexScalperTerminal() {
       contract: c,
       side: oppSide,
       orderType: targetType,
-      price: req.kind === 'TP' ? req.price : null,
-      trigger: req.kind === 'SL' ? req.price : null,
+      price: req.kind === 'TP' ? req.price : optStop ? optStop.price : null,
+      trigger: req.kind === 'SL' ? (optStop ? optStop.trigger : req.price) : null,
       product: (req.leg.product as 'INTRADAY' | 'MARGIN') || 'INTRADAY',
       lots,
       // A TP / SL closes this leg: it keeps the leg's product (an MIS crude leg is squared off as MIS).
       closesLeg: true,
     });
     void loadOrders();
+    if (out.ok && out.orderId) watchPlaced(out.orderId, `${req.kind === 'TP' ? 'Target' : 'Stop loss'} on ${req.leg.type} ${req.leg.strike || ''}`.trim());
     return say(out);
-  }, [real, chartOpenOrders, chartContract, sendCancel, feed.expiry, feed.lotSize, underlying, placeContract, flash, loadOrders]);
+  }, [real, chartOpenOrders, chartContract, sendCancel, feed.expiry, feed.lotSize, underlying, placeContract, flash, loadOrders, watchPlaced]);
 
   // Default target / stop watcher: a queued default (queueDefaultBrackets) is placed once the book shows its leg on the
   // expected side and product, filled in full, with a live premium, through onSetBracket like a level typed on the chip.
@@ -1618,6 +1657,7 @@ export default function IndexScalperTerminal() {
 
   /** A cancel whose outcome the caller needs (Reverse); sendCancel is the panel's, with its own toast. */
   const cancelQuiet = useCallback(async (orderId: string): Promise<string | null> => {
+    placedChecksRef.current.delete(orderId);
     try {
       const r = brokerRef.current === 'kotak'
         ? await fetch('/api/scalper/kotak/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId }) })
@@ -1744,13 +1784,16 @@ export default function IndexScalperTerminal() {
       while (ocoQueueRef.current.length) {
         const events = ocoQueueRef.current.splice(0);
         let confirmed = events;
-        if (events.some(e => e.kind === 'flat')) {
+        if (events.some(e => e.kind === 'flat' || e.kind === 'increased')) {
           const fresh = await loadPositions(true);
-          if (!fresh) continue; // cannot confirm: never cancel a stop on an unconfirmed flat
+          if (!fresh) continue; // cannot confirm: never cancel a stop on an unconfirmed flat, nor grow one on an unconfirmed add
           const f = feedRef.current;
           const kotak = brokerRef.current === 'kotak';
           const now = netBySecurity(kotak ? legsFromKotakPositions(fresh, kotakSymbolsRef.current ?? {}, () => null, underlying) : legsFromDhanPositions(fresh, f.ltpById, underlying));
-          confirmed = events.filter(e => e.kind !== 'flat' || !now.has(e.securityId));
+          // An add is grown only to what the FRESH read shows on the same side (a later add makes its own event).
+          confirmed = events.filter(e => e.kind === 'flat' ? !now.has(e.securityId)
+            : e.kind === 'increased' ? Math.abs(now.get(e.securityId) ?? 0) === e.left && Math.sign(now.get(e.securityId) ?? 0) === (e.closeSide === 'SELL' ? 1 : -1)
+            : true);
         }
         if (!confirmed.length) continue;
         const rows = await freshOrderRows();
@@ -1762,13 +1805,21 @@ export default function IndexScalperTerminal() {
           const err = await cancelQuiet(o.id);
           if (err) failed.push(`${o.id} (${err})`); else done.push(o.id);
         }
+        const grown: string[] = [];
         for (const { order, qty } of acts.resize) {
           const mult = ocoPrevRef.current?.mult.get(order.securityId) ?? 1;
           const f = feedRef.current;
           const lots = qtyLots(underlying, qty, mult, brokerRef.current === 'kotak' ? f.kotak?.lotSize ?? null : f.lotSize);
-          if (lots === null || !(await onModifyOrder({ orderId: order.id, lots }))) failed.push(`${order.id} (could not cut it to ${qty})`);
+          const grow = order.qty !== null && qty > order.qty;
+          if (lots === null || !(await onModifyOrder({ orderId: order.id, lots }))) failed.push(`${order.id} (could not ${grow ? 'grow' : 'cut'} it to ${qty})`);
+          else if (grow) grown.push(`${order.rawType === 'LIMIT' ? 'target' : 'stop'} ${order.id} -> ${lots} lot${lots === 1 ? '' : 's'}`);
         }
         if (done.length) flash({ ok: true, text: `Position closed: cancelled its other target / stop order${done.length === 1 ? '' : 's'} ${done.join(', ')}` });
+        if (grown.length && !failed.length) flash({ ok: true, text: `Lots added: ${grown.join(', ')} so the whole position is covered` });
+        if (acts.ambiguous.length) {
+          flash({ ok: false, text: `Lots added, but ${acts.ambiguous.map(o => o.id).join(', ')} are two orders of one kind: not resized (the added lots may have no target / stop). Check Orders` });
+          if (soundOnRef.current) playWarnChime();
+        }
         if (failed.length) { flash({ ok: false, text: `Target / stop clean-up failed: ${failed.join(' · ')}. Check Orders` }); if (soundOnRef.current) playWarnChime(); }
         void loadOrders();
       }

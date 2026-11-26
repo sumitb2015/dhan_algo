@@ -211,10 +211,14 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
 - **While dragging:** snap every move to the **instrument's tick** (CRUDEOILM future ₹1, NSE options ₹0.05). The ghost
   chip shows the live estimated profit or loss, and the dashed drag line moves with it.
 - **On release:**
-  - Write a **tentative** bracket (`tentativeBrackets`), so the chip stays while the order book catches up. The
-    order book wins once it shows the order.
+  - Write a **tentative** bracket (`tentativeBrackets`, `setTentative`), so the chip stays while the order book catches
+    up. The order book wins once it shows the order, and a tentative level **expires after 15 s**
+    (`TENTATIVE_TTL_MS`): a broker can accept an order and RMS-reject it a moment later, and a stop line kept for it
+    looked like a working stop (Kotak option SL-M, 2026-11-26). The chip says "Stop Limit" on an option, "Stop
+    Market" on a future.
   - Then call `onSetBracket`. On REAL that cancels the existing bracket order of the same kind (same side; a limit
-    for TP, a stop for SL) and places the new one: a LIMIT for TP, an SL-M for SL, sized by `qtyLots` and
+    for TP, a stop for SL) and places the new one: a LIMIT for TP; for SL an SL-M on a future, a **stop-LIMIT on an
+      option** (`optionStopLimit`: 5% cushion beyond the trigger; brokers refuse SL-M on options), sized by `qtyLots` and
     `source: 'isx'`.
   - On SIM it stores the level, and an effect exits the paper leg when the live price crosses it.
 - **Reverse:** close, then open the other side. SIM opens the other side only if the close succeeded, otherwise
@@ -252,9 +256,9 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
 - **Target / stop on a strike position** (`PremiumBracketControls.tsx`, rules `lib/indexScalperPremiumBrackets.ts`):
   typed on the position chip, never dragged on the index axis: a PREMIUM ("245.50") or a % of the ENTRY (average)
   premium ending in "%" ("20%"; `parseBracketInput`: a long's target above entry / stop below, a short's the other way;
-  converted to a premium on the tick before Set, so REAL still sends a plain LIMIT / SL-M price). Validated against the LIVE premium (a long's
+  converted to a premium on the tick before Set, so REAL still sends a plain LIMIT / stop-limit price). Validated against the LIVE premium (a long's
   target above it, stop below; a short's the other way; none without a live premium) and the option tick
-  (`INSTRUMENTS[u].optTick`, not the chart's), then sent through `onSetBracket` (REAL: LIMIT / SL-M on that contract,
+  (`INSTRUMENTS[u].optTick`, not the chart's), then sent through `onSetBracket` (REAL: LIMIT / stop-limit on that contract,
   isx; SIM: the paper watcher on `leg.ltp`). Badges read SIM levels or this contract's working orders by security id;
   × cancels; a click on the badge re-opens the editor prefilled with that level (Set replaces this page's order:
   cancel + place; the same level sends nothing). Those orders are not drawn as lines on the index axis.

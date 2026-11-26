@@ -118,10 +118,25 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
   (refuse if already flipped) -> OPEN. Cancelling before the close left the position without its stop when the close
   was rejected (review 2026-11-25).
 
+### Option stops are stop-LIMIT; every placed TP / SL is checked (2026-11-26)
+- Kotak's RMS rejects SL-M on NSE options ("STOP LOSS MARKET ORDER NOT ALLOWED IN OPTIONS") **after** returning an order
+  number, so the page said "placed" and the chart drew a stop that never existed (vault incident
+  `2026-11-26-index-scalper-kotak-option-sl-rejected`). Kotak SL-limit on options is accepted and has filled (Renko rail,
+  2026-11-02). `lib/dhan_helper.py` says Dhan refuses SL-M on options too (not observed here).
+- So an OPTION stop (bracket SL in `onSetBracket`, the chart "+" menu's Buy / Sell Stop) is sent as `STOP_LOSS` with the
+  limit `optionStopLimit` (5% beyond the trigger, on the tick, at least one tick away). Futures keep SL-M. The order
+  ticket still offers "Stop" (SL-M) for a manual order.
+- `watchPlaced` checks each placed TP / SL against the order book (`placedOrderState`; one extra read 2.5 s after the
+  send, then the normal poll) for 30 s: rejected (with the broker's reason), cancelled, or never seen -> a 15 s error
+  toast + warn chime. A cancel sent from the page drops its check.
+
 ### One-cancels-other for REAL target / stop (`lib/indexScalperOco.ts`, added 2026-11-25)
 - Diffs the REAL book per contract (`netBySecurity` -> `ocoEvents`): FLAT -> cancel this page's own working LIMIT / SL /
   SL-M orders on the old closing side (a stop left on a flat position opens a new one); REDUCED -> cut this page's
-  untouched bigger target / stop to what is left (`onModifyOrder`), so it can never flip the position. Covers a target or
+  untouched bigger target / stop to what is left (`onModifyOrder`), so it can never flip the position.
+  INCREASED (lots added on the same side, 2026-11-26) -> grow this page's ONE untouched target and ONE untouched stop to
+  the whole position (confirmed by a fresh positions read first); two orders of one kind are left alone with a warning
+  (growing both would close more than is held). Before this a 1-lot target sat on a 4-lot short. Covers a target or
   stop filling, Exit / Exit All / TSL exits and closes done elsewhere.
 - A flat is confirmed by a fresh positions read before any cancel; the order book is re-read; market orders and other
   placers' orders are never touched; skipped while a Reverse runs (`reverseBusyRef`); Web Lock `index-scalper-oco`

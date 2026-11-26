@@ -39,6 +39,8 @@ const VOL_DOWN = '#ef444466';
 const VOL_MA = '#3b82f6';
 const UP = '#10b981';
 const DOWN = '#ef4444';
+/** How long a dragged / typed TP / SL level shows before the order book confirms it (then it is dropped). */
+const TENTATIVE_TTL_MS = 15_000;
 /** Drawings of the underlying chart; an option chart stores its own under `${DRAW_KEY}:<securityId>` (drawKey prop). */
 export const DRAW_KEY = 'indexScalper.drawings.v1';
 
@@ -229,17 +231,40 @@ function ScalperChart(props: Props) {
   const [hoverScale, setHoverScale] = useState<{ y: number; price: number } | null>(null);
   const plusRef = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<{ y: number; price: number } | null>(null);
-  const [tentativeBrackets, setTentativeBrackets] = useState<Record<string, { tp?: number; sl?: number }>>({});
+  // A level just dragged / typed, shown until the order book has the order (the book wins once it does). It expires after
+  // TENTATIVE_TTL_MS: an order the broker rejected (accepted, then RMS-rejected) never reaches the book, and a stop line
+  // kept on screen for it looked like a working stop (2026-11-26). The terminal reports the rejection itself.
+  const [tentativeBrackets, setTentativeBrackets] = useState<Record<string, Partial<Record<'tp' | 'sl', { price: number; at: number }>>>>({});
   /** Set (price) or drop (null) one tentative level of a leg. */
   const setTentative = useCallback((legId: string, kind: 'TP' | 'SL', price: number | null) => {
     const k = kind === 'TP' ? 'tp' : 'sl';
     setTentativeBrackets(prev => {
       if (price === null && prev[legId]?.[k] === undefined) return prev;
       const next = { ...prev, [legId]: { ...prev[legId] } };
-      if (price === null) delete next[legId][k]; else next[legId][k] = price;
+      if (price === null) delete next[legId][k]; else next[legId][k] = { price, at: Date.now() };
       return next;
     });
   }, []);
+  // Drop expired tentative levels (one timer, at the earliest expiry).
+  useEffect(() => {
+    let first = Infinity;
+    for (const v of Object.values(tentativeBrackets)) for (const t of [v.tp, v.sl]) if (t) first = Math.min(first, t.at + TENTATIVE_TTL_MS);
+    if (first === Infinity) return;
+    const id = window.setTimeout(() => {
+      const now = Date.now();
+      setTentativeBrackets(prev => {
+        const next: typeof prev = {};
+        for (const [leg, v] of Object.entries(prev)) {
+          const keep: (typeof prev)[string] = {};
+          if (v.tp && now - v.tp.at < TENTATIVE_TTL_MS) keep.tp = v.tp;
+          if (v.sl && now - v.sl.at < TENTATIVE_TTL_MS) keep.sl = v.sl;
+          if (keep.tp || keep.sl) next[leg] = keep;
+        }
+        return next;
+      });
+    }, Math.max(0, first - Date.now()) + 50);
+    return () => window.clearTimeout(id);
+  }, [tentativeBrackets]);
   const [dragState, setDragState] = useState<{
     kind: 'TP' | 'SL';
     leg: ScalperLeg;
@@ -731,8 +756,8 @@ function ScalperChart(props: Props) {
 
       // Tentative (just released / typed) levels only fill in until the order book shows the order: the book wins, so a
       // level replaced or cancelled elsewhere is not kept on screen at its old price.
-      if (!tp && tent?.tp && tent.tp > 0) tp = { price: tent.tp, isSim: false };
-      if (!sl && tent?.sl && tent.sl > 0) sl = { price: tent.sl, isSim: false };
+      if (!tp && tent?.tp && tent.tp.price > 0) tp = { price: tent.tp.price, isSim: false };
+      if (!sl && tent?.sl && tent.sl.price > 0) sl = { price: tent.sl.price, isSim: false };
 
       res[legId] = { tp, sl };
     }
@@ -886,13 +911,7 @@ function ScalperChart(props: Props) {
       const kind = dragState.kind;
       setDragState(null);
       if (finalPrice > 0) {
-        setTentativeBrackets(prev => ({
-          ...prev,
-          [leg.id]: {
-            ...prev[leg.id],
-            [kind === 'TP' ? 'tp' : 'sl']: finalPrice,
-          },
-        }));
+        setTentative(leg.id, kind, finalPrice);
         onSetBracket?.({ leg, kind, price: finalPrice });
       }
     };
@@ -903,7 +922,7 @@ function ScalperChart(props: Props) {
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     };
-  }, [dragState, onSetBracket, tickSize]);
+  }, [dragState, onSetBracket, tickSize, setTentative]);
 
   // ── open order lines (excluding matched brackets) ───────────────────
   const bracketOrderIds = useMemo(() => {
@@ -1559,12 +1578,7 @@ function ScalperChart(props: Props) {
                     title="Cancel Target"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setTentativeBrackets(prev => {
-                        if (!prev[p.leg.id]) return prev;
-                        const next = { ...prev, [p.leg.id]: { ...prev[p.leg.id] } };
-                        delete next[p.leg.id].tp;
-                        return next;
-                      });
+                      setTentative(p.leg.id, 'TP', null);
                       onCancelBracket?.({ legId: p.leg.id, kind: 'TP', orderId: b.tp!.orderId });
                     }}
                     className="h-[16px] w-[16px] rounded flex items-center justify-center text-zinc-400 hover:text-white hover:bg-rose-600 transition-colors"
@@ -1603,18 +1617,14 @@ function ScalperChart(props: Props) {
                   }}
                   className="h-[22px] px-2 rounded-r flex items-center gap-1.5 bg-zinc-900 border border-rose-500/60 border-l-0 text-zinc-200 cursor-grab active:cursor-grabbing select-none hover:brightness-110 transition-colors"
                 >
-                  <span>{lots} {isLong ? 'Sell' : 'Buy'} Stop Market</span>
+                  {/* An option's stop is sent as a stop-limit (brokers refuse SL-M on options); a future's as SL-M. */}
+                  <span>{lots} {isLong ? 'Sell' : 'Buy'} {p.leg.type === 'FUT' ? 'Stop Market' : 'Stop Limit'}</span>
                   <button
                     type="button"
                     title="Cancel Stop Loss"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setTentativeBrackets(prev => {
-                        if (!prev[p.leg.id]) return prev;
-                        const next = { ...prev, [p.leg.id]: { ...prev[p.leg.id] } };
-                        delete next[p.leg.id].sl;
-                        return next;
-                      });
+                      setTentative(p.leg.id, 'SL', null);
                       onCancelBracket?.({ legId: p.leg.id, kind: 'SL', orderId: b.sl!.orderId });
                     }}
                     className="h-[16px] w-[16px] rounded flex items-center justify-center text-zinc-400 hover:text-white hover:bg-rose-600 transition-colors"
@@ -1656,7 +1666,7 @@ function ScalperChart(props: Props) {
                   SL {dragPnl >= 0 ? '+' : ''}{inrWhole(dragPnl)} ({dragPct >= 0 ? '+' : ''}{dragPct.toFixed(2)}%)
                 </div>
                 <div className="h-[22px] px-2 rounded-r flex items-center bg-zinc-900 border border-rose-500/80 border-l-0 text-zinc-100">
-                  {dragState.lots} {dragState.isLong ? 'Sell' : 'Buy'} Stop Market
+                  {dragState.lots} {dragState.isLong ? 'Sell' : 'Buy'} {dragState.leg.type === 'FUT' ? 'Stop Market' : 'Stop Limit'}
                 </div>
               </>
             )}

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultPremiumLevel, legPremiumPnl, parseBracketInput, premiumBracketError, premiumBracketsFor, premiumPnlAt, snapPremium } from './indexScalperPremiumBrackets.ts';
+import { defaultPremiumLevel, optionStopLimit, placedOrderState, legPremiumPnl, parseBracketInput, premiumBracketError, premiumBracketsFor, premiumPnlAt, snapPremium } from './indexScalperPremiumBrackets.ts';
 import type { ScalperLeg } from './indexScalperPositions.ts';
 
 const leg = (o: Partial<ScalperLeg> = {}): ScalperLeg => ({
@@ -85,4 +85,40 @@ test('TP / SL box: plain decimals only, and a % never rounds onto (or past) the 
   assert.equal(parseBracketInput('10%', 'TP', false, 0.2, 0.05).price, 0.15);
   // exact tick multiples stay put (no float drift up a tick)
   assert.equal(parseBracketInput('50%', 'TP', true, 0.2, 0.1).price, 0.3);
+});
+
+test('option stop = stop-limit with a 5% cushion beyond the trigger, on the tick (Kotak rejects SL-M on options)', () => {
+  // the 2026-11-26 case: a short's BUY stop at 116.45
+  assert.deepEqual(optionStopLimit('BUY', 116.45, 0.05), { price: 122.3, trigger: 116.45 });
+  assert.deepEqual(optionStopLimit('SELL', 100, 0.05), { price: 95, trigger: 100 });
+  // never closer than one tick, never below one tick
+  assert.deepEqual(optionStopLimit('BUY', 0.5, 0.05), { price: 0.55, trigger: 0.5 });
+  assert.deepEqual(optionStopLimit('SELL', 0.1, 0.05), { price: 0.05, trigger: 0.1 });
+  assert.deepEqual(optionStopLimit('SELL', 0.05, 0.05), { price: 0.05, trigger: 0.05 });
+  // MCX crude option tick 0.10
+  assert.deepEqual(optionStopLimit('BUY', 50, 0.1), { price: 52.5, trigger: 50 });
+  for (const t of [0.05, 0.1]) for (const trg of [1.15, 7.35, 33.3, 245.5]) {
+    const b = optionStopLimit('BUY', trg, t), s = optionStopLimit('SELL', trg, t);
+    assert.ok(b.price > b.trigger && s.price < s.trigger, `${trg}/${t}`);
+    assert.equal(snapPremium(b.price, t), b.price);
+    assert.equal(snapPremium(s.price, t), s.price);
+  }
+});
+
+test('placed order state from the order book: RMS rejection after an accepted reply is caught', () => {
+  const book = [
+    { orderId: 'K1', orderStatus: 'REJECTED', reason: 'RMS:Blocked ... STOP LOSS MARKET ORDER NOT ALLOWED IN OPTIONS' },
+    { orderId: 'D1', orderStatus: 'REJECTED', omsErrorDescription: '' },
+    { orderId: 'K2', orderStatus: 'CANCELLED' },
+    { orderId: 'D2', orderStatus: 'PENDING' },
+    { orderId: 'D3', orderStatus: 'TRADED' },
+    { orderId: 'K3', orderStatus: 'OPEN', reason: '--' },
+  ];
+  assert.deepEqual(placedOrderState(book, 'K1'), { state: 'rejected', reason: 'RMS:Blocked ... STOP LOSS MARKET ORDER NOT ALLOWED IN OPTIONS' });
+  assert.deepEqual(placedOrderState(book, 'D1'), { state: 'rejected', reason: 'no reason given' });
+  assert.equal(placedOrderState(book, 'K2').state, 'cancelled');
+  assert.equal(placedOrderState(book, 'D2').state, 'live');
+  assert.equal(placedOrderState(book, 'D3').state, 'live');
+  assert.equal(placedOrderState(book, 'K3').state, 'live');
+  assert.equal(placedOrderState(book, 'nope').state, 'missing');
 });
