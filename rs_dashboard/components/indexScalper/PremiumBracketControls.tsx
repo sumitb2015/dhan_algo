@@ -73,7 +73,6 @@ export default function PremiumBracketControls({ leg, units, tick, brackets, onS
     const pnl = premiumPnlAt(b.price, leg.avg, units, isLong);
     return (
       <span data-testid={kind === 'TP' ? 'premium-tp' : 'premium-sl'}
-        title={`${kind === 'TP' ? 'Target' : 'Stop loss'} at premium ${b.price.toFixed(2)}${leg.avg > 0 ? ` (${fmtPct((b.price - leg.avg) / leg.avg * 100)} from entry ${leg.avg.toFixed(2)})` : ''}${b.sim ? ' (SIM)' : ` (order ${b.orderId})`}: books about ${inr(pnl)}. Click to edit, x to cancel`}
         className={cn('h-[18px] pl-1 pr-0.5 flex items-center gap-1 rounded border text-[10px] font-semibold',
           kind === 'TP' ? 'border-emerald-500/60 text-emerald-400' : 'border-rose-500/60 text-rose-400')}>
         <button type="button" aria-label={`Edit ${kind} ${leg.type} ${leg.strike}`} aria-expanded={edit === kind}
@@ -89,7 +88,6 @@ export default function PremiumBracketControls({ leg, units, tick, brackets, onS
 
   const btn = (kind: 'TP' | 'SL') => (
     <button type="button" aria-label={`${kind === 'TP' ? 'Target' : 'Stop loss'} for ${leg.type} ${leg.strike}`} aria-expanded={edit === kind}
-      title={`${kind === 'TP' ? 'Target' : 'Stop loss'}: the option premium to exit at (245.50), or a % of the entry premium (20%)`}
       onClick={e => { e.stopPropagation(); open(kind); }}
       className={cn('h-[18px] px-1.5 rounded bg-zinc-800 border text-[10px] font-bold transition-colors',
         kind === 'TP' ? 'text-emerald-400 border-emerald-500/50 hover:bg-emerald-600/30' : 'text-rose-400 border-rose-500/50 hover:bg-rose-600/30',
@@ -99,7 +97,7 @@ export default function PremiumBracketControls({ leg, units, tick, brackets, onS
   return (
     <div ref={boxRef} className="relative flex items-center gap-1">
       {/* Which leg this is: a straddle has two chips on one strike line (B = long, S = short). */}
-      <span data-testid="leg-label" className="text-[10px] font-semibold text-zinc-300 whitespace-nowrap" title={`${isLong ? 'Long' : 'Short'} ${leg.type} ${leg.strike}`}>
+      <span data-testid="leg-label" className="text-[10px] font-semibold text-zinc-300 whitespace-nowrap">
         <span className={isLong ? 'text-emerald-400' : 'text-rose-400'}>{isLong ? 'B' : 'S'}</span> {leg.type} {leg.strike}
       </span>
       {brackets.tp ? badge('TP') : btn('TP')}
@@ -116,7 +114,6 @@ export default function PremiumBracketControls({ leg, units, tick, brackets, onS
           </div>
           <div className="flex items-center gap-1">
             <input autoFocus inputMode="decimal" aria-label={`${edit} premium`} value={draft} placeholder="245.50 or 20%"
-              title="A premium (245.50), or a percentage of the entry premium ending in % (20%)"
               onChange={e => setDraft(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') setEdit(null); e.stopPropagation(); }}
               className="h-7 w-full px-1.5 rounded border border-zinc-700 bg-zinc-950 text-xs font-mono text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60" />

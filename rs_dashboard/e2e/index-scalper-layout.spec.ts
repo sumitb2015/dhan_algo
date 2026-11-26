@@ -587,7 +587,7 @@ test.describe('Index Scalper layout + option charts', () => {
     const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
     await expect(chip).toBeVisible({ timeout: 15_000 });
     await expect(chip.getByRole('button', { name: 'Exit CE 25350' })).toBeVisible();
-    await expect(chip.getByTestId('position-lots')).toHaveAttribute('title', 'Long 1 lot (65 units)');
+    await expect(chip.getByTestId('position-lots')).toHaveAttribute('aria-label', 'Long 1 lot (65 units)');
     const rowY = Number(await overlay.locator('[data-strike="25350"]').getAttribute('data-y'));
     const chipBox = (await chip.boundingBox())!, paneBox = (await page.getByTestId('chart-pane-0').locator('canvas').first().boundingBox())!;
     expect(Math.abs(chipBox.y + chipBox.height / 2 - (paneBox.y + rowY))).toBeLessThan(6); // on its strike line
@@ -1079,12 +1079,12 @@ test.describe('Index Scalper layout + option charts', () => {
     // "-" is off at one lot (Exit closes the last one); "+" adds a lot in the leg's own direction (another sell)
     await expect(ce.getByRole('button', { name: 'Fewer lots CE 25350' })).toBeDisabled();
     await ce.getByRole('button', { name: 'More lots CE 25350' }).click();
-    await expect(ce.getByTestId('position-lots')).toHaveAttribute('title', 'Short 2 lots (130 units)', { timeout: 15_000 });
+    await expect(ce.getByTestId('position-lots')).toHaveAttribute('aria-label', 'Short 2 lots (130 units)', { timeout: 15_000 });
     await expect(ce.getByTestId('position-lots')).toHaveText('2');
-    await expect(pe.getByTestId('position-lots')).toHaveAttribute('title', 'Short 1 lot (65 units)'); // the PE is untouched
+    await expect(pe.getByTestId('position-lots')).toHaveAttribute('aria-label', 'Short 1 lot (65 units)'); // the PE is untouched
     // "-" takes one lot off again
     await ce.getByRole('button', { name: 'Fewer lots CE 25350' }).click();
-    await expect(ce.getByTestId('position-lots')).toHaveAttribute('title', 'Short 1 lot (65 units)', { timeout: 15_000 });
+    await expect(ce.getByTestId('position-lots')).toHaveAttribute('aria-label', 'Short 1 lot (65 units)', { timeout: 15_000 });
     await expect(chips).toHaveCount(2);
     // the two chips never overlap
     const boxes = await chips.evaluateAll(els => els.map(e => { const r = e.getBoundingClientRect(); return [r.top, r.bottom]; }).sort((a, b) => a[0] - b[0]));

@@ -1693,7 +1693,7 @@ function ScalperChart(props: Props) {
             {/* TP draggable button */}
             <button
               type="button"
-              title="Drag to set/adjust Target Profit"
+              aria-label={`Drag to set target ${p.leg.type} ${p.leg.strike || ''}`}
               onMouseDown={(e) => {
                 e.stopPropagation();
                 e.preventDefault();
@@ -1707,7 +1707,7 @@ function ScalperChart(props: Props) {
             {/* SL draggable button */}
             <button
               type="button"
-              title="Drag to set/adjust Stop Loss"
+              aria-label={`Drag to set stop loss ${p.leg.type} ${p.leg.strike || ''}`}
               onMouseDown={(e) => {
                 e.stopPropagation();
                 e.preventDefault();
@@ -1732,7 +1732,7 @@ function ScalperChart(props: Props) {
                 onSetTrail={onSetTrail ? pts => onSetTrail(p.leg, pts, INSTRUMENTS[underlying].optTick) : undefined}
                 onCancelTrail={onCancelTrail ? () => onCancelTrail(p.leg.id) : undefined} />
             ) : (
-              <span title="Set TP / SL on this option's own chart: its levels are premiums" className="text-[10px] text-zinc-500">
+              <span className="text-[10px] text-zinc-500">
                 <span className={isLong ? 'text-emerald-400' : 'text-rose-400'}>{isLong ? 'B' : 'S'}</span> {p.leg.type} {p.leg.strike}
               </span>
             )}
@@ -1741,7 +1741,6 @@ function ScalperChart(props: Props) {
             <button
               type="button"
               aria-label={`Reverse ${p.leg.type}${p.leg.type === 'FUT' ? '' : ` ${p.leg.strike}`}`}
-              title="Reverse position: close it in full, then open the same lots on the other side of the same contract (REAL asks first)"
               onClick={(e) => {
                 e.stopPropagation();
                 onReversePosition?.(p.leg);
@@ -1754,16 +1753,14 @@ function ScalperChart(props: Props) {
             {/* Lots quantity; Quick Trade adds - / + around it on an option leg */}
             {onAdjustLeg && optOnIndex && (
               <button type="button" aria-label={`Fewer lots ${p.leg.type} ${p.leg.strike}`} disabled={lots <= 1 || exitingId !== null}
-                title={lots <= 1 ? 'One lot left: use Exit (x) to close the leg' : `Take ${Math.min(adjustLots, lots - 1)} lot${Math.min(adjustLots, lots - 1) === 1 ? '' : 's'} off (${isLong ? 'sell' : 'buy'} at market; one lot always stays, Exit closes the leg)`}
                 onClick={e => { e.stopPropagation(); onAdjustLeg(p.leg, -1); }}
                 className="h-[18px] w-[18px] flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold leading-none disabled:opacity-35 disabled:cursor-not-allowed">−</button>
             )}
-            <span data-testid="position-lots" title={`${isLong ? 'Long' : 'Short'} ${lots} lot${lots === 1 ? '' : 's'} (${Math.abs(totalUnits)} units)`} className="h-[18px] px-1.5 min-w-[26px] flex items-center justify-center tabular-nums rounded bg-zinc-800/80 text-zinc-200 border border-zinc-700 text-[10px] font-semibold">
+            <span data-testid="position-lots" aria-label={`${isLong ? 'Long' : 'Short'} ${lots} lot${lots === 1 ? '' : 's'} (${Math.abs(totalUnits)} units)`} className="h-[18px] px-1.5 min-w-[26px] flex items-center justify-center tabular-nums rounded bg-zinc-800/80 text-zinc-200 border border-zinc-700 text-[10px] font-semibold">
               {lots}
             </span>
             {onAdjustLeg && optOnIndex && (
               <button type="button" aria-label={`More lots ${p.leg.type} ${p.leg.strike}`} disabled={exitingId !== null}
-                title={`Add ${adjustLots} lot${adjustLots === 1 ? '' : 's'} (${isLong ? 'buy' : 'sell'} ${adjustLots} lot${adjustLots === 1 ? '' : 's'} ${p.leg.type} ${p.leg.strike} at market)`}
                 onClick={e => { e.stopPropagation(); onAdjustLeg(p.leg, 1); }}
                 className="h-[18px] w-[18px] flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold leading-none disabled:opacity-35 disabled:cursor-not-allowed">+</button>
             )}
@@ -1773,7 +1770,7 @@ function ScalperChart(props: Props) {
                 length on every tick slid the - / + buttons sideways under the mouse. 24 characters fit "-1,23,456 INR (-123.45%)"; only a larger figure grows it. */}
             <span className={cn('h-[18px] px-1 min-w-[calc(24ch+8px)] flex items-center justify-end tabular-nums whitespace-nowrap text-[10px] font-semibold', pnlCls)}>
               {curPnl === null
-                ? <span title="No live premium for this option">— INR</span>
+                ? <span>— INR</span>
                 : <>{curPnl >= 0 ? '+' : ''}{inrWhole(curPnl)} INR ({(curPct ?? 0) >= 0 ? '+' : ''}{(curPct ?? 0).toFixed(2)}%)</>}
             </span>
 
@@ -1786,7 +1783,7 @@ function ScalperChart(props: Props) {
             {/* Exit button */}
             <button
               type="button"
-              title={`Exit ${p.leg.type} ${p.leg.strike || ''}`}
+              aria-label={`Exit ${p.leg.type} ${p.leg.strike || ''}`}
               disabled={exitingId === p.leg.id}
               onClick={(e) => {
                 e.stopPropagation();

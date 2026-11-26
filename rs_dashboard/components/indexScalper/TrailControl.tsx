@@ -63,7 +63,6 @@ export default function TrailControl({ leg, units, tick, trail, onSet, onCancel 
     <div ref={boxRef} className="relative flex items-center">
       {trail ? (
         <span data-testid="trail-badge"
-          title={`Trailing stop at ${trail.sl.toFixed(2)}, ${trail.pts} points behind the best price ${trail.peak.toFixed(2)}: books about ${inr(premiumPnlAt(trail.sl, leg.avg, units, isLong))}${trail.mode === 'SIM' ? ' (SIM)' : ''}. ${NOTE} Click to change the distance, x to stop it`}
           className="h-[18px] pl-1 pr-0.5 flex items-center gap-1 rounded border border-amber-500/60 text-amber-300 text-[10px] font-semibold">
           <button type="button" aria-label={`Edit TSL ${name}`} aria-expanded={open} onClick={e => { e.stopPropagation(); toggle(); }}
             className={cn('flex items-center gap-1 rounded px-0.5 hover:bg-zinc-800', open && 'ring-1 ring-sky-400')}>
@@ -74,7 +73,6 @@ export default function TrailControl({ leg, units, tick, trail, onSet, onCancel 
         </span>
       ) : (
         <button type="button" aria-label={`Trailing stop for ${name}`} aria-expanded={open}
-          title={`Trailing stop loss: a distance in points behind the best price reached; it only tightens. ${NOTE}`}
           onClick={e => { e.stopPropagation(); toggle(); }}
           className={cn('h-[18px] px-1.5 rounded bg-zinc-800 border border-amber-500/50 text-amber-300 hover:bg-amber-600/30 text-[10px] font-bold transition-colors',
             open && 'ring-1 ring-sky-400')}>TSL</button>
@@ -88,7 +86,6 @@ export default function TrailControl({ leg, units, tick, trail, onSet, onCancel 
           </div>
           <div className="flex items-center gap-1">
             <input autoFocus inputMode="decimal" aria-label="Trail points" value={draft} placeholder="Points, e.g. 10"
-              title="Distance behind the best price, in points"
               onChange={e => setDraft(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') setOpen(false); e.stopPropagation(); }}
               className="h-7 w-full px-1.5 rounded border border-zinc-700 bg-zinc-950 text-xs font-mono text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60" />

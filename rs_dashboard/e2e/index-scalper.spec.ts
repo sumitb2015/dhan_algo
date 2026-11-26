@@ -126,7 +126,7 @@ test.describe('Index Scalper', () => {
     await expect(chip).toContainText('PE 25350');
     await expect(chip).toHaveAttribute('data-side', 'long');
     await expect(chip.getByTestId('position-lots')).toHaveText('1'); // 1 lot of 65
-    await expect(chip.getByTestId('position-lots')).toHaveAttribute('title', 'Long 1 lot (65 units)');
+    await expect(chip.getByTestId('position-lots')).toHaveAttribute('aria-label', 'Long 1 lot (65 units)');
     await expect(chip).toContainText('SIM');
 
     await page.getByRole('button', { name: 'Exit PE 25350' }).click();
@@ -431,7 +431,7 @@ test.describe('Index Scalper', () => {
     await expect(chip).toBeVisible({ timeout: 15_000 });
     await expect(chip).toHaveAttribute('data-side', 'short');
     await expect(chip).toContainText('PE 25350');
-    await expect(chip.getByTestId('position-lots')).toHaveAttribute('title', 'Short 1 lot (65 units)');
+    await expect(chip.getByTestId('position-lots')).toHaveAttribute('aria-label', 'Short 1 lot (65 units)');
     expect(state.calls).toEqual([]);
     expect(state.blocked).toEqual([]);
   });
@@ -492,7 +492,7 @@ test.describe('Index Scalper', () => {
     await expect(chip).toBeVisible({ timeout: 15_000 });
     await expect(chip).toContainText('CE 25350');
     await expect(chip).toHaveAttribute('data-side', 'short');
-    await expect(chip.getByTestId('position-lots')).toHaveAttribute('title', 'Short 2 lots (130 units)'); // 2 lots x 65
+    await expect(chip.getByTestId('position-lots')).toHaveAttribute('aria-label', 'Short 2 lots (130 units)'); // 2 lots x 65
 
     // the ATM sell section folds like the CE / PE cards; the choice survives closing and reopening the widget
     await w.getByRole('button', { name: 'Collapse ATM sell' }).click();
