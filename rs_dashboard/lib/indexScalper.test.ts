@@ -515,7 +515,7 @@ test('CRUDEOIL and CRUDEOILM never read each other\'s contracts; CRUDEOIL\'s 5-l
   assert.deepEqual(orderUnits(20, 65), { ok: true, units: 1300 }); // default cap 20
 });
 
-test('Day High / Low: PDH / PDL from the previous day, DH / DL running within today', () => {
+test('Day High / Low: PDH / PDL from the previous day, DH / DL flat across each day', () => {
   const ist = (iso: string) => Date.parse(`${iso}+05:30`) / 1000;
   const bars = [
     { t: ist('2026-11-20T09:15:00'), o: 10, h: 12, l: 9, c: 11 },
@@ -525,10 +525,21 @@ test('Day High / Low: PDH / PDL from the previous day, DH / DL running within to
     { t: ist('2026-11-23T09:25:00'), o: 16, h: 16.5, l: 14, c: 15 },
   ];
   const out = computeIndicator(bars, newIndicator('daylevels', 'd'));
-  const by = Object.fromEntries(out.series.map(s => [s.axisLabel, s.values]));
+  const lines = out.series.filter(s => !s.shadow);
+  const by = Object.fromEntries(lines.map(s => [s.axisLabel, s.values]));
+  // each level has a faint, wider shadow drawn just before (under) it, with the same day breaks and no label
+  assert.equal(out.series.length, 8);
+  assert.equal(out.series[0].shadow, true); assert.equal(out.series[1].axisLabel, 'PDH');
+  assert.equal(out.series[0].lineWidth, 5); assert.equal(out.series[0].axisLabel, '');
+  assert.match(out.series[0].color, /^rgba\(239, 68, 68, 0\.22\)$/);
+  assert.deepEqual(out.series[0].breaks, out.series[1].breaks);
+  const w3 = computeIndicator(bars, { ...newIndicator('daylevels', 'd'), width: 3 });
+  assert.deepEqual(w3.series.map(s => s.lineWidth), [7, 3, 7, 3, 7, 3, 7, 3]);
   assert.deepEqual(by.PDH, [null, null, 15, 15, 15]);
   assert.deepEqual(by.PDL, [null, null, 9, 9, 9]);
-  assert.deepEqual(by.DH, [12, 15, 16, 17, 17]);
-  assert.deepEqual(by.DL, [9, 9, 13, 12, 12]);
-  assert.equal(pointColor(out.series[2], 1), 'transparent'); // no slanted join from Friday's DH to Monday's
+  assert.deepEqual(by.DH, [15, 15, 17, 17, 17]);
+  assert.deepEqual(by.DL, [9, 9, 12, 12, 12]);
+  assert.equal(lines[2].flat, true); assert.equal(lines[0].flat, undefined);
+  assert.equal(out.series[4].flat, true); // DH's shadow repaints with it
+  assert.equal(pointColor(lines[2], 1), 'transparent'); // no slanted join from Friday's DH to Monday's
 });

@@ -189,6 +189,8 @@ function ScalperChart(props: Props) {
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const indSeriesRef = useRef<ISeriesApi<SeriesType>[]>([]);
+  /** Last value sent per flat day-level series (index into indSeriesRef): a change repaints the whole series. */
+  const flatLastRef = useRef(new Map<number, number | null>());
   const volSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const volMaRef = useRef<ISeriesApi<'Line'> | null>(null);
   const volPrevRef = useRef<{ n: number; first: number; lastT: number } | null>(null);
@@ -339,7 +341,7 @@ function ScalperChart(props: Props) {
       if (viewportRef) viewportRef.current = null;
       chart.remove();
       chartRef.current = null; candleRef.current = null; volSeriesRef.current = null; volMaRef.current = null; volPrevRef.current = null;
-      indSeriesRef.current = []; legLines.clear();
+      indSeriesRef.current = []; flatLastRef.current.clear(); legLines.clear();
       markerApis.clear(); markerSigs.clear();
       for (const [, l] of bracketLinesRef.current) { try { candles.removePriceLine(l); } catch { /* gone */ } }
       bracketLinesRef.current.clear();
@@ -498,6 +500,8 @@ function ScalperChart(props: Props) {
             if (!api) continue;
             if (recolor && (s.colors || s.breaks) && s.style === 'line') { api.setData(seriesData(s, bars) as never); continue; }
             const v = s.values[s.values.length - 1];
+            // A flat day level (DH / DL) that moved: today's whole line moves with it, so re-send just this series.
+            if (s.flat && flatLastRef.current.get(k - 1) !== v) { api.setData(seriesData(s, bars) as never); flatLastRef.current.set(k - 1, v); continue; }
             if (v === null) continue;
             const color = pointColor(s, s.values.length - 1);
             api.update((color ? { time: toTime(lastBar.t), value: v, color } : { time: toTime(lastBar.t), value: v }) as never);
@@ -514,6 +518,7 @@ function ScalperChart(props: Props) {
     if (sig !== sigRef.current) {
       for (const s of indSeriesRef.current) { try { chart.removeSeries(s); } catch { /* gone */ } }
       indSeriesRef.current = [];
+      flatLastRef.current.clear();
       // their marker plugins went with the series
       markerApisRef.current.clear();
       markerSigRef.current.clear();
@@ -532,8 +537,9 @@ function ScalperChart(props: Props) {
             api = chart.addSeries(LineSeries, {
               // Every indicator line shows its name + last value on the price scale (Supertrend too: the label takes the
               // colour of its last point, so it reads green / red with the trend).
-              color: s.color, lineWidth: thick as 1 | 2 | 3 | 4, priceLineVisible: false, lastValueVisible: true, title: s.axisLabel,
-              crosshairMarkerVisible: false,
+              // A shadow line (Day High / Low) is a faint wide copy under its level: no label of its own.
+              color: s.color, lineWidth: thick as 1 | 2 | 3 | 4, priceLineVisible: false, lastValueVisible: !s.shadow, title: s.shadow ? '' : s.axisLabel,
+              crosshairMarkerVisible: false, ...(s.shadow ? { autoscaleInfoProvider: () => null } : {}),
             }, paneIdx);
             for (const g of s.guides ?? []) api.createPriceLine({ price: g, color: chrome.baseline, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' });
           }
@@ -554,6 +560,7 @@ function ScalperChart(props: Props) {
         const api = indSeriesRef.current[k++];
         if (!api) continue;
         api.setData(seriesData(s, bars) as never);
+        if (s.flat) flatLastRef.current.set(k - 1, s.values[s.values.length - 1]);
         syncMarkers(k - 1, s, api);
       }
     }

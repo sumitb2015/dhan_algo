@@ -60,8 +60,8 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
   // Standard", Traditional; the CPR is the same pivot with its BC / TC).
   { kind: 'cpr', label: 'CPR (central pivot range)', pane: 'price', color: '#a855f7', params: [] },
   { kind: 'pivots', label: 'Pivot S / R (S1-S4, R1-R4)', pane: 'price', color: '#f59e0b', params: [{ key: 'levels', label: 'Levels (1-4)', def: 4, min: 1, max: 4 }] },
-  // PDH / PDL = the previous IST day's high / low (same day as the pivots use); DH / DL = today's high / low so far
-  // (steps out as the day makes new extremes; no look-ahead, so a past bar shows the level as it stood then).
+  // PDH / PDL = the previous IST day's high / low (same day as the pivots use); DH / DL = each day's high / low as a flat
+  // line across that day (today's: the extremes so far, the whole line moving out on a new high / low).
   { kind: 'daylevels', label: 'Day High / Low (PDH, PDL, DH, DL)', pane: 'price', color: '#0ea5e9', params: [] },
   // Two EMAs (TradingView ta.ema) with a small circle where they cross: green when the fast crosses above, red below.
   {
@@ -155,8 +155,12 @@ export interface OutSeries {
   /** breaks[i] = hide the segment from point i to i+1 (a daily level changing at the day boundary). lightweight-charts
    *  joins a line straight across whitespace, so without this every day change draws a slanted jump. */
   breaks?: boolean[];
-  /** Line width on the price pane (default 2; daily levels are drawn at 1). */
-  lineWidth?: LineWidth;
+  /** Line width on the price pane (default 2; daily levels are drawn at 1). A shadow series is wider than 4. */
+  lineWidth?: number;
+  /** A soft shadow under the line after it (wider, faint copy): no price-scale label, no title. */
+  shadow?: boolean;
+  /** A level drawn flat across the forming day (DH / DL): a new value repaints the whole series, not just the last point. */
+  flat?: boolean;
   /** Small circles drawn on this line at bar `i` (EMA crosses), at `price`, in `color`. */
   markers?: { i: number; price: number; color: string; up: boolean }[];
 }
@@ -231,17 +235,17 @@ export function pivotLevels(h: number, l: number, c: number) {
   };
 }
 
-/** Today's running high / low per bar: the highest high and lowest low of the bar's own IST day up to and including
- *  that bar (DH / DL as they stood at the time). */
-export function dayRunningHl(bars: Bar[]): { h: number; l: number }[] {
-  const out: { h: number; l: number }[] = [];
-  let day = -1, h = 0, l = 0;
+/** Each bar's own IST day high / low: the highest high and lowest low of all of that day's bars, so DH / DL draw as
+ *  flat lines across the day. Today's are the extremes so far and move out when the day makes a new high / low. */
+export function dayHl(bars: Bar[]): { h: number; l: number }[] {
+  const byDay = new Map<number, { h: number; l: number }>();
   for (const b of bars) {
     const d = istDay(b.t);
-    if (d !== day) { day = d; h = b.h; l = b.l; } else { h = Math.max(h, b.h); l = Math.min(l, b.l); }
-    out.push({ h, l });
+    const x = byDay.get(d);
+    if (!x) byDay.set(d, { h: b.h, l: b.l });
+    else { x.h = Math.max(x.h, b.h); x.l = Math.min(x.l, b.l); }
   }
-  return out;
+  return bars.map(b => ({ ...byDay.get(istDay(b.t))! }));
 }
 
 /** Day-boundary breaks for daily-level lines: true on the last bar of each IST day that has a next bar. */
@@ -275,10 +279,32 @@ export function bollinger(closes: number[], period: number, mult: number): { mid
 
 /** The indicator's series, with its user-chosen line width (if any) applied to every line (never to a histogram). */
 export function computeIndicator(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
-  const out = computeSeries(bars, ind);
+  let out = computeSeries(bars, ind);
   const w = validWidth(ind.width);
-  if (w === null) return out;
-  return { ...out, series: out.series.map(s => (s.style === 'histogram' ? s : { ...s, lineWidth: w })) };
+  if (w !== null) out = { ...out, series: out.series.map(s => (s.style === 'histogram' ? s : { ...s, lineWidth: w })) };
+  // Day High / Low: a light shadow under each level so it stands out from the candles and other lines.
+  if (ind.kind === 'daylevels') out = { ...out, series: out.series.flatMap(s => [shadowOf(s), s]) };
+  return out;
+}
+
+/** Shadow alpha and extra width (px) of a level's shadow line. */
+const SHADOW_ALPHA = 0.22;
+const SHADOW_EXTRA = 4;
+
+/** '#rrggbb' -> 'rgba(r, g, b, a)'; any other form is returned unchanged. */
+export function withAlpha(hex: string, a: number): string {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+}
+
+/** A wider, faint copy of a line, drawn before (under) it. Same values and day breaks, no label. */
+export function shadowOf(s: OutSeries): OutSeries {
+  return {
+    key: `${s.key}:shadow`, label: `${s.label} shadow`, axisLabel: '', style: 'line', shadow: true,
+    color: withAlpha(s.color, SHADOW_ALPHA), lineWidth: (s.lineWidth ?? 1) + SHADOW_EXTRA, values: s.values, breaks: s.breaks, ...(s.flat ? { flat: true } : {}),
+  };
 }
 
 function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
@@ -346,18 +372,18 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
     }
     case 'daylevels': {
       const prev = prevDayHlc(bars);
-      const cur = dayRunningHl(bars);
+      const cur = dayHl(bars);
       const breaks = dayBreaks(bars);
-      const line = (key: string, name: string, color: string, values: (number | null)[]): OutSeries => ({
-        key, label: `${label} ${name}`, axisLabel: name, color, style: 'line', lineWidth: 1, breaks, values,
+      const line = (key: string, name: string, color: string, values: (number | null)[], flat = false): OutSeries => ({
+        key, label: `${label} ${name}`, axisLabel: name, color, style: 'line', lineWidth: 1, breaks, values, ...(flat ? { flat } : {}),
       });
       return {
         pane: 'price',
         series: [
           line('pdh', 'PDH', DOWN, prev.map(x => (x ? x.h : null))),
           line('pdl', 'PDL', UP, prev.map(x => (x ? x.l : null))),
-          line('dh', 'DH', ind.color, cur.map(x => x.h)),
-          line('dl', 'DL', ind.color, cur.map(x => x.l)),
+          line('dh', 'DH', ind.color, cur.map(x => x.h), true),
+          line('dl', 'DL', ind.color, cur.map(x => x.l), true),
         ],
       };
     }
