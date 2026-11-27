@@ -986,7 +986,9 @@ export default function IndexScalperTerminal() {
       // Above the exchange freeze quantity a single order is rejected: close in freeze-sized slices, stopping at the
       // first one that is not placed (an unknown slice is never followed by another).
       const k = feedRef.current.kotak;
-      const slices = freezeSlices(order.units, k?.freezeQty ?? null, lotOf(leg.securityId));
+      // Slices are whole lots in Kotak's unit: lotUnits gives barrels per lot on MCX (contractLot's 1 would allow a
+      // part-lot slice, rejected mid-exit), the contract's own lot on an index.
+      const slices = freezeSlices(order.units, k?.freezeQty ?? null, lotUnits(underlying, lotOf(leg.securityId)));
       // Kotak's RMS adds the closing side's working orders to the exit: a full-size target still working turns the exit
       // into a fresh position, rejected for margin (2026-11-26). Cancel THIS page's own ones first and see them gone;
       // another placer's order is never cancelled from here, so an exit it would overfill is refused.
@@ -1026,7 +1028,7 @@ export default function IndexScalperTerminal() {
       if (out.ok && out.orderId) watchPlaced(out.orderId, `Exit ${label}`);
     }
     return out;
-  }, [sendReal, cancelQuiet, loadKotakGuard, watchPlaced, flash, lotOf]);
+  }, [sendReal, cancelQuiet, loadKotakGuard, watchPlaced, flash, lotOf, underlying]);
 
   /** Fresh broker rows (plus, on Kotak, the unknown-outcome guard) read right before an exit. */
   const readExitState = useCallback(async (): Promise<{ live: ScalperLeg[]; records: KotakRecord[]; book: Record<string, unknown>[] } | string> => {
