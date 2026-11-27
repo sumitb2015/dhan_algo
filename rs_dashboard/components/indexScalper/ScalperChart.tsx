@@ -543,7 +543,7 @@ function ScalperChart(props: Props) {
     if (!chart || !candles || bars.length === 0) return;
 
     // The guide-line colour is in the signature so a theme flip rebuilds the oscillator guides.
-    const sig = JSON.stringify([chrome.baseline, candleColorRule, indicators.filter(i => i.visible).map(i => [i.id, i.kind, i.params, i.color, i.width ?? null])]);
+    const sig = JSON.stringify([chrome.baseline, candleColorRule, indicators.filter(i => i.visible).map(i => [i.id, i.kind, i.params, i.color, i.width ?? null, i.lines ?? null])]);
     const prev = prevRef.current;
     // Fast path only when nothing but the forming bar moved: the bars before it must be exactly what was drawn. A candle
     // refresh that corrected an earlier tick-built bar (missed high/low) falls through to a full setData, which also

@@ -19,6 +19,38 @@ export interface IndicatorInstance {
   visible: boolean;
   /** Line width chosen in the indicator's settings (1-4 px) for all its lines; absent = each line's own default. */
   width?: number;
+  /** Per-line overrides by series key (Day H/L: dh, dl, pdh, pdl). Each field absent = the indicator-wide setting. */
+  lines?: Record<string, LineOverride>;
+}
+
+export interface LineOverride {
+  /** false hides that one line (and its shadow); absent = shown. */
+  visible?: boolean;
+  color?: string;
+  width?: number;
+}
+
+/** Day H/L's lines, in the order its settings list them. */
+export const DAY_LEVEL_LINES = [
+  { key: 'dh', name: 'DH', hint: 'Day high' },
+  { key: 'dl', name: 'DL', hint: 'Day low' },
+  { key: 'pdh', name: 'PDH', hint: "Previous day's high" },
+  { key: 'pdl', name: 'PDL', hint: "Previous day's low" },
+] as const;
+
+/** A Day H/L line's colour before any override: PDH / PDL amber, DH / DL the indicator's colour. */
+export function dayLevelBaseColor(ind: IndicatorInstance, key: string): string {
+  return key === 'pdh' || key === 'pdl' ? PREV_DAY_LEVEL : ind.color;
+}
+
+/** The colour / width / visibility a Day H/L line is drawn with (its override, else the indicator's settings). */
+export function dayLevelStyle(ind: IndicatorInstance, key: string): { visible: boolean; color: string; width: LineWidth | null } {
+  const o = ind.lines?.[key];
+  return {
+    visible: o?.visible !== false,
+    color: typeof o?.color === 'string' && /^#[0-9a-f]{6}$/i.test(o.color) ? o.color : dayLevelBaseColor(ind, key),
+    width: validWidth(o?.width) ?? validWidth(ind.width),
+  };
 }
 
 export const LINE_WIDTHS = [1, 2, 3, 4] as const;
@@ -284,8 +316,16 @@ export function computeIndicator(bars: Bar[], ind: IndicatorInstance): Indicator
   let out = computeSeries(bars, ind);
   const w = validWidth(ind.width);
   if (w !== null) out = { ...out, series: out.series.map(s => (s.style === 'histogram' ? s : { ...s, lineWidth: w })) };
-  // Day High / Low: a light shadow under each level so it stands out from the candles and other lines.
-  if (ind.kind === 'daylevels') out = { ...out, series: out.series.flatMap(s => [shadowOf(s), s]) };
+  // Day High / Low: each line's own colour / width / visibility (DH, DL, PDH, PDL set one by one), then a light shadow
+  // under each shown level so it stands out from the candles and other lines.
+  if (ind.kind === 'daylevels') {
+    const series = out.series.flatMap(s => {
+      const st = dayLevelStyle(ind, s.key);
+      if (!st.visible) return [];
+      return [{ ...s, color: st.color, ...(st.width !== null ? { lineWidth: st.width } : {}) }];
+    });
+    out = { ...out, series: series.flatMap(s => [shadowOf(s), s]) };
+  }
   return out;
 }
 

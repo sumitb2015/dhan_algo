@@ -531,7 +531,7 @@ test('Day High / Low: PDH / PDL from the previous day, DH / DL flat across each 
   assert.equal(out.series.length, 8);
   assert.equal(out.series[0].shadow, true); assert.equal(out.series[1].axisLabel, 'PDH');
   assert.equal(out.series[0].lineWidth, 5); assert.equal(out.series[0].axisLabel, '');
-  assert.match(out.series[0].color, /^rgba\(239, 68, 68, 0\.22\)$/);
+  assert.match(out.series[0].color, /^rgba\(245, 158, 11, 0\.22\)$/); // PDH amber
   assert.deepEqual(out.series[0].breaks, out.series[1].breaks);
   const w3 = computeIndicator(bars, { ...newIndicator('daylevels', 'd'), width: 3 });
   assert.deepEqual(w3.series.map(s => s.lineWidth), [7, 3, 7, 3, 7, 3, 7, 3]);
@@ -542,6 +542,28 @@ test('Day High / Low: PDH / PDL from the previous day, DH / DL flat across each 
   assert.equal(lines[2].flat, true); assert.equal(lines[0].flat, undefined);
   assert.equal(out.series[4].flat, true); // DH's shadow repaints with it
   assert.equal(pointColor(lines[2], 1), 'transparent'); // no slanted join from Friday's DH to Monday's
+});
+
+test('Day H/L: DH, DL, PDH and PDL each take their own colour, width and show / hide', () => {
+  const ist = (s: string) => Date.parse(`${s}+05:30`) / 1000;
+  const bars: Bar[] = [
+    { t: ist('2026-11-20T09:15:00'), o: 10, h: 15, l: 9, c: 14 },
+    { t: ist('2026-11-23T09:15:00'), o: 14, h: 16, l: 12, c: 15 },
+  ];
+  const base = newIndicator('daylevels', 'd');
+  const plain = computeIndicator(bars, base).series.filter(s => !s.shadow);
+  assert.deepEqual(plain.map(s => [s.axisLabel, s.color, s.lineWidth]), [
+    ['PDH', '#f59e0b', 1], ['PDL', '#f59e0b', 1], ['DH', base.color, 1], ['DL', base.color, 1],
+  ]);
+  const ind = { ...base, width: 2, lines: { dh: { color: '#22c55e', width: 4 }, pdl: { visible: false }, dl: { color: 'red' } } };
+  const out = computeIndicator(bars, ind).series;
+  const lines = out.filter(s => !s.shadow);
+  // PDL hidden (and its shadow); DH green 4 px; DL keeps its colour (a bad saved colour is ignored); the rest take width 2
+  assert.deepEqual(lines.map(s => [s.axisLabel, s.color, s.lineWidth]), [
+    ['PDH', '#f59e0b', 2], ['DH', '#22c55e', 4], ['DL', base.color, 2],
+  ]);
+  assert.equal(out.length, 6);
+  assert.equal(out[2].shadow, true); assert.equal(out[2].lineWidth, 8); assert.match(out[2].color, /^rgba\(34, 197, 94, 0\.22\)$/);
 });
 
 test('orderLevel: a stop is drawn at its trigger, a limit at its price', async () => {

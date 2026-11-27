@@ -5,7 +5,10 @@
 
 import { useEffect, useState } from 'react';
 import { Search, X } from 'lucide-react';
-import { INDICATOR_CATALOG, LINE_WIDTHS, catalogEntry, clampParam, indicatorLabel, validWidth, type IndicatorInstance, type IndicatorKind } from '@/lib/indexScalperIndicators';
+import {
+  DAY_LEVEL_LINES, INDICATOR_CATALOG, LINE_WIDTHS, catalogEntry, clampParam, dayLevelStyle, indicatorLabel, validWidth,
+  type IndicatorInstance, type IndicatorKind, type LineOverride,
+} from '@/lib/indexScalperIndicators';
 import { cn } from '@/lib/utils';
 
 const SWATCHES = ['#3b82f6', '#f59e0b', '#ec4899', '#22c55e', '#a78bfa', '#06b6d4', '#eab308', '#ef4444', '#e4e4e7'];
@@ -26,6 +29,54 @@ function ParamField({ value, onCommit, label }: { value: number; onCommit: (n: n
         onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
         className="w-20 h-7 px-2 rounded bg-zinc-800 border border-zinc-700 text-right tabular-nums text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60" />
     </label>
+  );
+}
+
+/** Day H/L: show / hide, colour and width for DH, DL, PDH and PDL one by one (saved in the indicator's `lines`). */
+function DayLevelLines({ ind, onChange }: { ind: IndicatorInstance; onChange: (id: string, patch: Partial<IndicatorInstance>) => void }) {
+  const patch = (key: string, p: LineOverride) => {
+    const cur = ind.lines?.[key] ?? {};
+    onChange(ind.id, { lines: { ...(ind.lines ?? {}), [key]: { ...cur, ...p } } });
+  };
+  return (
+    <div className="flex flex-col gap-3">
+      {DAY_LEVEL_LINES.map(({ key, name, hint }) => {
+        const st = dayLevelStyle(ind, key);
+        const ownWidth = validWidth(ind.lines?.[key]?.width);
+        return (
+          <div key={key} role="group" aria-label={`${name} line`} className={cn('flex flex-col gap-1.5 rounded border border-zinc-800 p-2', !st.visible && 'opacity-60')}>
+            <div className="flex items-center justify-between gap-2">
+              <label className="flex items-center gap-2 text-xs font-bold text-zinc-100 cursor-pointer" title={hint}>
+                <input type="checkbox" checked={st.visible} aria-label={`Show ${name}`} onChange={e => patch(key, { visible: e.target.checked })}
+                  className={cn('w-3.5 h-3.5 accent-sky-500', FOCUS)} />
+                <span className="w-8">{name}</span>
+                <span className="font-normal text-zinc-500 whitespace-nowrap">{hint}</span>
+              </label>
+              <div role="group" aria-label={`${name} line width`} className="flex rounded border border-zinc-700 overflow-hidden">
+                {([null, ...LINE_WIDTHS] as const).map(w => {
+                  const on = ownWidth === w;
+                  return (
+                    <button key={w ?? 'auto'} type="button" aria-pressed={on} aria-label={w === null ? `${name} width auto` : `${name} width ${w}`}
+                      title={w === null ? 'The default width' : `${w} px`} disabled={!st.visible}
+                      onClick={() => patch(key, { width: w ?? undefined })}
+                      className={cn('h-6 px-1.5 flex items-center justify-center text-[11px] disabled:cursor-not-allowed', FOCUS, on ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}>
+                      {w === null ? 'Auto' : <span className="block w-3.5 rounded-full bg-current" style={{ height: w }} />}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="flex gap-1 pl-5.5">
+              {SWATCHES.map(c => (
+                <button key={c} type="button" aria-label={`${name} colour ${SWATCH_NAMES[c] ?? c}`} aria-pressed={st.color === c} title={SWATCH_NAMES[c]}
+                  disabled={!st.visible} onClick={() => patch(key, { color: c })}
+                  className={cn('w-4 h-4 rounded-full border-2 disabled:cursor-not-allowed', FOCUS, st.color === c ? 'border-white' : 'border-transparent')} style={{ backgroundColor: c }} />
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -66,7 +117,8 @@ export default function IndicatorPicker({ open, indicators, editId, onAdd, onCha
                 onCommit={n => onChange(editing.id, { params: { ...editing.params, [p.key]: clampParam(editing.kind, p.key, n) } })} />
             ))}
             {catalogEntry(editing.kind).fixedStyle && <div className="text-xs text-zinc-400">Green / red bars by candle direction, along the bottom of the price pane. Futures and options only: the index has no volume.</div>}
-            {!catalogEntry(editing.kind).fixedStyle && <>
+            {editing.kind === 'daylevels' && <DayLevelLines ind={editing} onChange={onChange} />}
+            {!catalogEntry(editing.kind).fixedStyle && editing.kind !== 'daylevels' && <>
             <div className="flex items-center gap-2 text-xs text-zinc-300">Colour
               <div className="flex gap-1">
                 {SWATCHES.map(c => (
