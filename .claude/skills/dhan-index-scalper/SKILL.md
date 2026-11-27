@@ -6,10 +6,13 @@ description: Use when touching the Index Scalper terminal (/index-scalper) outsi
 # Index Scalper terminal (`/index-scalper`)
 
 ## Overview
-A TradingView-style scalping terminal for **NIFTY, CRUDEOILM and CRUDEOIL** (index/future + options), built 2026-11-24/25 in
+A TradingView-style scalping terminal for **NIFTY, SENSEX, CRUDEOILM and CRUDEOIL** (index/future + options; SENSEX added
+2026-11-27), built 2026-11-24/25 in
 ~45 commits (`8b63453d` .. `47cbbaa6`). This skill is the terminal around the chart; the chart is
 `dhan-trading-chart`. Read both before a change that crosses them (an order placed from the chart, an exit from a
 chip).
+
+Per-instrument skills (read the one matching the symbol you touch): `dhan-index-scalper-nifty`, `dhan-index-scalper-sensex`, `dhan-index-scalper-crudeoilm`, `dhan-index-scalper-crudeoil`. BANKNIFTY is NOT an instrument on this page (only NIFTY, SENSEX, CRUDEOILM, CRUDEOIL).
 
 Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf), `dhan-crudeoil-trading` (MCX units),
 `dhan-broker-positions` (broker payloads), `dhan-order-tickets` (ticket rules), `dhan-alert-sound`.
@@ -31,7 +34,7 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
 | Trade chimes (entry / exit / warn, mute `indexScalper.tradeSound`) | `lib/indexScalperChime.ts` `tradeChimeFor` diffs the position book (exit beats entry; first book after a mode / broker / instrument change is only the baseline); warn on a REAL `sendReal` not ok; REAL book changes ring in the `useTabLeader('index-scalper-sound')` tab or the tab that sent within 15 s. See `dhan-alert-sound` |
 | Trailing SL (TSL) beside TP / SL, options strike chip + futures / premium chip | `components/indexScalper/TrailControl.tsx`; rules `lib/indexScalperTrail.ts` (reuses the XY ladder's `bracketStep`, `trailMode: 'distance'`); watcher + exit `fireTrail` in `IndexScalperTerminal.tsx` |
 | Floating one-click widget | `DhanScalperWidget.tsx` (see `dhan-floating-scalper-window`) |
-| e2e | `e2e/index-scalper{,-crude,-feed,-kotak,-layout}.spec.ts` (all broker calls mocked; non-GET unmocked = 599) |
+| e2e | `e2e/index-scalper{,-crude,-feed,-kotak,-layout,-sensex}.spec.ts` (all broker calls mocked; non-GET unmocked = 599) |
 
 ## Rules
 
@@ -41,6 +44,26 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
 - The positions table and chart show **the mode's book**: SIM = paper legs, REAL = the broker's whole book for the
   underlying (polled every 3 s). After a reload the page is in SIM, so broker positions are not shown until REAL is
   re-armed.
+
+### SENSEX (BSE, added 2026-11-27)
+- `INSTRUMENTS.SENSEX`: `exchange 'BSE'`, Dhan `BSE_FNO`, Kotak `bse_fo`, index `IDX_I` id **51** (`indexSecurityId`; the
+  chain keys on id 1 / BSE_FNO, which the bridge and `options_data_fetch.py` already encode), strike step 100, option and
+  future tick Rs 0.05, `isx` tag, 20-lot cap (20 x 25 = 500 units, under `SOURCE_QTY_CAPS.isx` 1500). Quantities are UNITS
+  on Dhan, Kotak and SIM (`pnlMultiplier` 1), like NIFTY.
+- **Lot size changes by series**: 20 to the Dec 2026 expiries, 25 from the Jan 2027 series. `scalper_api.py lookup` takes
+  THE EXPIRY's own rows' `LOT_SIZE` for SENSEX (refuses when they disagree); `get_lot_size()` returns the first master
+  row's, whatever its expiry. Kotak's lookup is per expiry too. `displayLotUnits` falls back to 1 (units), never 65.
+- It behaves like NIFTY everywhere else: every branch is `isMcx(u)` vs not, never `=== 'NIFTY'`. The FUT pane (lookup's
+  `future`, the nearest BSE FUTIDX on/after the option expiry) is chart only; a SENSEX future position is not a leg on
+  Dhan or Kotak, and is out of the MTM guard's scope. Labels / "closed" messages read `INSTRUMENTS[u].exchange`; Kotak
+  rows in Dhan shape take `dhanSegmentOfSymbol` (BSE_FNO). The candles route pins the index to `IDX_I` / `INDEX` / 51.
+- Session: NSE's clock and holiday calendar. Index candles 09:15-15:30; BSE F&O to 15:40 (Dhan's 5 m SENSEX future bars
+  on 2026-11-26 ran to the 15:35 bar).
+- Cumulative OI (header button) has no SENSEX view: disabled there. The widget's strike stepper uses
+  `INSTRUMENTS[u].strikeStep` (a hardcoded 50 picked unlisted SENSEX strikes).
+- Not checked against a live session yet (built before the 2026-11-27 open, mocked e2e only): the Dhan order book's SENSEX
+  `tradingSymbol` form (assumed `SENSEX-Dec2026-85000-CE`, as in other repo fixtures), the Kotak weekly symbol form, and
+  price alerts on SENSEX.
 
 ### MCX crude: CRUDEOILM and CRUDEOIL (added 2026-11-25)
 - Every crude branch is `isMcx(u)`, never `=== 'CRUDEOILM'`; barrels per lot come from `mcxBarrels(u)` (MCX_LOT_MULTIPLIER:
