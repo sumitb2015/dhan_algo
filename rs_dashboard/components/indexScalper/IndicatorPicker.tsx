@@ -80,8 +80,12 @@ function DayLevelLines({ ind, onChange }: { ind: IndicatorInstance; onChange: (i
   );
 }
 
-export default function IndicatorPicker({ open, indicators, editId, onAdd, onChange, onRemove, onEdit, onClose }: {
+export default function IndicatorPicker({ open, indicators, editId, onAdd, onChange, onRemove, onEdit, onClose, kinds, volumeNote }: {
   open: boolean;
+  /** Only these kinds are offered (default: the whole catalogue). The /candlestick page leaves out the intraday ones. */
+  kinds?: IndicatorKind[];
+  /** Replaces the Volume settings note (the default one is about the scalper's index / futures / options). */
+  volumeNote?: string;
   indicators: IndicatorInstance[];
   editId: string | null;
   onAdd: (k: IndicatorKind) => void;
@@ -100,7 +104,7 @@ export default function IndicatorPicker({ open, indicators, editId, onAdd, onCha
   }, [open, onClose]);
   if (!open) return null;
   const editing = editId ? indicators.find(i => i.id === editId) ?? null : null;
-  const list = INDICATOR_CATALOG.filter(c => c.label.toLowerCase().includes(q.trim().toLowerCase()));
+  const list = INDICATOR_CATALOG.filter(c => (!kinds || kinds.includes(c.kind)) && c.label.toLowerCase().includes(q.trim().toLowerCase()));
 
   return (
     <div className="fixed inset-0 z-[60] flex items-start justify-center pt-24 bg-oncolor-dark/60" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -116,7 +120,7 @@ export default function IndicatorPicker({ open, indicators, editId, onAdd, onCha
               <ParamField key={p.key} label={p.label} value={editing.params[p.key] ?? p.def}
                 onCommit={n => onChange(editing.id, { params: { ...editing.params, [p.key]: clampParam(editing.kind, p.key, n) } })} />
             ))}
-            {catalogEntry(editing.kind).fixedStyle && <div className="text-xs text-zinc-400">Green / red bars by candle direction, along the bottom of the price pane. Futures and options only: the index has no volume.</div>}
+            {catalogEntry(editing.kind).fixedStyle && <div className="text-xs text-zinc-400">{volumeNote ?? 'Green / red bars by candle direction, along the bottom of the price pane. Futures and options only: the index has no volume.'}</div>}
             {editing.kind === 'daylevels' && <DayLevelLines ind={editing} onChange={onChange} />}
             {!catalogEntry(editing.kind).fixedStyle && editing.kind !== 'daylevels' && <>
             <div className="flex items-center gap-2 text-xs text-zinc-300">Colour
