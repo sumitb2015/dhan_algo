@@ -285,8 +285,20 @@ test.describe('Index Scalper layout + option charts', () => {
     for (const l of ['trend-vwap', 'trend-ema', 'trend-st']) await expect(strip.getByTestId(l)).toHaveAttribute('data-dir', '1');
     await expect(strip.getByTestId('trend-strength')).toHaveText('Strong');
     await expect(strip.getByTestId('mtf-summary')).toHaveText('4/4 bull ALIGNED');
-    // every trend timeframe was loaded for the underlying (never an option or the future)
-    for (const tf of ['3', '5', '15', '60']) expect(state.candleReqs.some(q => q.includes(`interval=${tf}&`) && !q.includes('kind='))).toBe(true);
+    // every trend timeframe was loaded for the underlying (never an option or the future), with its own fixed 10 days
+    // (not the range buttons' 15), and only AFTER the chart's own candles were asked for: the candles route runs one
+    // fetch at a time, so strip fetches queued first held a cold chart back
+    const stripReq = (q: string) => /days=10(&|$)/.test(q) && !q.includes('kind=');
+    for (const tf of ['3', '5', '15', '60']) expect(state.candleReqs.some(q => q.includes(`interval=${tf}&`) && stripReq(q))).toBe(true);
+    const firstChart = state.candleReqs.findIndex(q => /days=15(&|$)/.test(q));
+    expect(firstChart).toBeGreaterThanOrEqual(0);
+    expect(state.candleReqs.findIndex(stripReq)).toBeGreaterThan(firstChart);
+    // a range click re-fetches the chart, never the strip
+    const stripCount = state.candleReqs.filter(stripReq).length;
+    await page.getByRole('button', { name: '1M', exact: true }).click();
+    await expect.poll(() => state.candleReqs.some(q => /days=30(&|$)/.test(q))).toBe(true);
+    await page.waitForTimeout(500);
+    expect(state.candleReqs.filter(stripReq).length).toBe(stripCount);
 
     await strip.getByRole('button', { name: '15 minute trend: bullish' }).click();
     await expect(strip.getByTestId('trend-tf')).toHaveText('15m');
@@ -1474,6 +1486,7 @@ test.describe('Index Scalper layout + option charts', () => {
     const state = newState();
     await signIn(context);
     await mockApi(page, state);
+    await defaultBracketsOff(page); // the new leg must have no stop yet, so the chip shows the plain SL handle to drag
     await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
     await expect(page.getByTestId('chart-pane-0')).toBeVisible({ timeout: 60_000 });
     await page.getByRole('button', { name: 'Two charts side by side' }).click();

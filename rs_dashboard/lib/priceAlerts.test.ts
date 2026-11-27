@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   conditionMet, stepAlert, expiryReason, alertOrderQty, sessionOpen, tradeBlock, parseAlertInput, appendLog, alertCorrelationId,
-  sessionCloseMs, unarmedTradeMarkets, EVERY_COOLDOWN_MS, MAX_ALERT_LOTS, MAX_LOG, type PriceAlert, type AlertEvent, type AlertMemory,
+  sessionCloseMs, unarmedTradeAlerts, unarmedTradeMarkets, EVERY_COOLDOWN_MS, MAX_ALERT_LOTS, MAX_LOG, type PriceAlert, type AlertEvent, type AlertMemory,
 } from './priceAlerts.ts';
 
 // 2026-11-26 is a Thursday. IST = UTC + 5:30.
@@ -183,4 +183,8 @@ test('unarmed trade markets: open markets with an active trade alert that would 
   assert.deepEqual(unarmedTradeMarkets(at([notify]), ist(10, 0)), [], 'notify-only alerts never place orders');
   assert.deepEqual(unarmedTradeMarkets(at([base({ status: 'paused' }), base({ status: 'triggered' })]), ist(10, 0)), []);
   assert.deepEqual(unarmedTradeMarkets(at([nse]), ist(10, 0, '2026-12-02')), [], 'expired contract');
+  // the reminder's count: only alerts whose order arming would send now (evening: the NSE alert is not counted)
+  assert.deepEqual(unarmedTradeAlerts(at([nse, mcx, notify]), ist(21, 0)).map(a => a.id), ['mcx1']);
+  assert.deepEqual(unarmedTradeAlerts(at([nse, mcx, notify]), ist(10, 0)).map(a => a.id), ['abc123', 'mcx1']);
+  assert.deepEqual(unarmedTradeAlerts(at([nse, mcx], true), ist(10, 0)), []);
 });

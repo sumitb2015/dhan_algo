@@ -36,7 +36,8 @@ The first price the server sees for an alert is only a baseline. A crossing neve
   - **Market-open reminder:** when NSE or MCX is open (or a page loads in session) and an active, unexpired order alert
     on that market would be skipped only for want of arming, every tab shows a toast that stays until you arm or close
     it, with an **Arm** button, and the leader tab plays the warning chime (after your first click on the page). Once
-    per market per day per tab.
+    per market per day per tab. It counts only the alerts arming would send now (open market, unexpired); cancelling
+    the Arm confirm shows it again, and only its × dismisses it for the day.
 
   Every Arm asks the same confirm as the panel's switch.
 - The alert is marked as firing on disk **before** the order is sent. An order whose outcome is unknown is recorded as `unknown` and **never resent**; check the order book. Orders are tagged with correlation id prefix `pa` and capped at 10 lots (`lib/dhanSourceCaps.ts`).

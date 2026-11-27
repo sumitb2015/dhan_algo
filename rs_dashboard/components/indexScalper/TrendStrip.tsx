@@ -7,6 +7,11 @@
 // candles route's own session-anchored bars + live ticks, the same bars a chart on that timeframe draws), on the LAST
 // CLOSED bar. It owns those four hooks, so feed pushes re-render this row only, and the reads recompute once per bar
 // close (keyed on closedKey), not per tick.
+//
+// Load order: the candles route runs its Python fetches one at a time with a 3.5 s gap (pyExec `spaced`), so four
+// fetches queued ahead of the charts' own held a cold chart back by ~15-20 s. The strip therefore starts only once the
+// charts report their candles loaded (`chartsIdle`; 20 s fallback), follows a refresh only after the charts' refetch,
+// and loads a fixed TREND_DAYS (never the range buttons' days: a range click re-fetched all four).
 
 import { memo, useEffect, useMemo, useState } from 'react';
 import { cn } from '@/lib/utils';
@@ -24,6 +29,11 @@ type TrendTf = (typeof TREND_TFS)[number];
 const TF_KEY = 'indexScalper.trendTf';
 const tfLabel = (tf: TrendTf) => (tf === '60' ? '1h' : `${tf}m`);
 const tfName = (tf: TrendTf) => (tf === '60' ? '1 hour' : `${tf} minute`);
+
+/** History per timeframe: enough closed 1h bars for ADX(14) (~30 = ~5 sessions); also the chart's smallest range. */
+export const TREND_DAYS = 10;
+/** Start anyway if the charts never report loaded (a pane stuck on a contract), so the strip is never blank for good. */
+const START_FALLBACK_MS = 20_000;
 
 const UNDERLYING_SRC: ResolvedSource = { kind: 'underlying', type: null, strike: null, dhanId: null, kotakSymbol: null, tick: 0 };
 
@@ -55,13 +65,45 @@ function Light({ label, dir, title, testId }: { label: string; dir: Dir | null; 
   );
 }
 
-interface Props { underlying: Underlying; feed: IndexScalperFeed; days: number; refreshTick: number }
+interface Props {
+  underlying: Underlying; feed: IndexScalperFeed; refreshTick: number;
+  /** Every chart pane on screen has its candles (or gave up): the strip's fetches may now join the queue. */
+  chartsIdle: boolean;
+}
 
-function TrendStrip({ underlying, feed, days, refreshTick }: Props) {
-  const b3 = useChartBars(underlying, UNDERLYING_SRC, '3' as Interval, days, refreshTick, feed);
-  const b5 = useChartBars(underlying, UNDERLYING_SRC, '5' as Interval, days, refreshTick, feed);
-  const b15 = useChartBars(underlying, UNDERLYING_SRC, '15' as Interval, days, refreshTick, feed);
-  const b60 = useChartBars(underlying, UNDERLYING_SRC, '60' as Interval, days, refreshTick, feed);
+function TrendStrip({ underlying, feed, refreshTick, chartsIdle }: Props) {
+  const [started, setStarted] = useState(false);
+  useEffect(() => {
+    if (started) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (chartsIdle) { setStarted(true); return; }
+    const t = setTimeout(() => setStarted(true), START_FALLBACK_MS);
+    return () => clearTimeout(t);
+  }, [chartsIdle, started]);
+  // A refresh (tab back, feed back) re-fetches the charts first: the strip takes the new tick a render later, once the
+  // charts are idle, so its four fetches queue behind theirs.
+  const [tick, setTick] = useState(refreshTick);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (chartsIdle) setTick(refreshTick);
+  }, [chartsIdle, refreshTick]);
+  if (!started) {
+    return (
+      <div data-testid="trend-strip" data-state="waiting" className="flex items-center h-7 px-2 gap-1 border-b border-zinc-800 bg-zinc-950 text-[11px] font-mono shrink-0"
+        title="The trend strip loads its candles after the charts' own">
+        <span className="font-sans font-bold text-zinc-300">TREND</span>
+        <span className="text-zinc-500">· waiting for the charts</span>
+      </div>
+    );
+  }
+  return <TrendStripBody underlying={underlying} feed={feed} refreshTick={tick} />;
+}
+
+function TrendStripBody({ underlying, feed, refreshTick }: { underlying: Underlying; feed: IndexScalperFeed; refreshTick: number }) {
+  const b3 = useChartBars(underlying, UNDERLYING_SRC, '3' as Interval, TREND_DAYS, refreshTick, feed);
+  const b5 = useChartBars(underlying, UNDERLYING_SRC, '5' as Interval, TREND_DAYS, refreshTick, feed);
+  const b15 = useChartBars(underlying, UNDERLYING_SRC, '15' as Interval, TREND_DAYS, refreshTick, feed);
+  const b60 = useChartBars(underlying, UNDERLYING_SRC, '60' as Interval, TREND_DAYS, refreshTick, feed);
 
   // A clock for "is the last bar closed yet": a bar closes on time, not on a tick.
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));

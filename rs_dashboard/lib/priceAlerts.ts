@@ -222,22 +222,29 @@ export function tradeBlock(state: Pick<AlertsState, 'armedOn'>, a: PriceAlert, n
 
 export type AlertMarket = 'NSE' | 'MCX';
 
+/** The market an alert's order goes to. */
+export const alertMarket = (segment: AlertSegment): AlertMarket => (segment === 'MCX_COMM' ? 'MCX' : 'NSE');
+
 /**
- * The markets (NSE / MCX) that are open now and hold an ACTIVE, unexpired trade alert whose order would be skipped only
- * because REAL orders are not armed today. Empty when armed, or when no such alert exists. Drives the "not armed"
- * reminder (PriceAlertListener): forgetting to arm skipped real trades (2026-11-27, NIFTY 25,800 crossDown BUY 2L).
+ * The ACTIVE, unexpired trade alerts whose market is open now and whose order would be skipped only because REAL
+ * orders are not armed today. Empty when armed. Drives the "not armed" reminder (PriceAlertListener): forgetting to arm
+ * skipped real trades (2026-11-27, NIFTY 25,800 crossDown BUY 2L). An alert on a closed market or an expired contract
+ * is not counted: arming would not send its order now either.
  */
-export function unarmedTradeMarkets(view: Pick<AlertsView, 'alerts' | 'armedToday'>, now: number): AlertMarket[] {
+export function unarmedTradeAlerts(view: Pick<AlertsView, 'alerts' | 'armedToday'>, now: number): PriceAlert[] {
   if (view.armedToday) return [];
   const today = istDateIso(now);
-  const out = new Set<AlertMarket>();
-  for (const a of view.alerts) {
-    if (a.status !== 'active' || a.action.kind !== 'trade') continue;
+  return view.alerts.filter(a => {
+    if (a.status !== 'active' || a.action.kind !== 'trade') return false;
     const c = a.action.contract;
-    if (c.expiry && c.expiry < today) continue;
-    if (sessionOpen(c.segment, now)) out.add(c.segment === 'MCX_COMM' ? 'MCX' : 'NSE');
-  }
-  return (['NSE', 'MCX'] as const).filter(m => out.has(m));
+    return !(c.expiry && c.expiry < today) && sessionOpen(c.segment, now);
+  });
+}
+
+/** The markets (NSE / MCX, in that order) of `unarmedTradeAlerts`. */
+export function unarmedTradeMarkets(view: Pick<AlertsView, 'alerts' | 'armedToday'>, now: number): AlertMarket[] {
+  const set = new Set(unarmedTradeAlerts(view, now).map(a => alertMarket((a.action as Extract<AlertAction, { kind: 'trade' }>).contract.segment)));
+  return (['NSE', 'MCX'] as const).filter(m => set.has(m));
 }
 
 export const tradeLine = (a: AlertAction): string | undefined =>

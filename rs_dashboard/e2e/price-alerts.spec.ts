@@ -61,6 +61,15 @@ async function mockApi(page: Page, s: State) {
   });
 }
 
+/** Open the header's alerts panel. Retried: on a cold dev server under parallel runs the first click can land before the
+ *  page has hydrated (the button takes focus, nothing opens). */
+async function openPanel(page: Page) {
+  await expect(async () => {
+    await page.getByRole('button', { name: 'Price alerts' }).first().click();
+    await expect(page.getByText('Price Alerts', { exact: true })).toBeVisible({ timeout: 3000 });
+  }).toPass({ timeout: 60_000 });
+}
+
 const newState = (): State => ({ calls: [], blocked: [], alerts: [], log: [], streamLog: null, version: 1 });
 
 test.describe('Price Alerts', () => {
@@ -70,8 +79,7 @@ test.describe('Price Alerts', () => {
     await mockApi(page, s);
     await page.goto('/movers-plus', { waitUntil: 'domcontentloaded' });
 
-    await page.getByRole('button', { name: 'Price alerts' }).first().click();
-    await expect(page.getByText('Price Alerts', { exact: true })).toBeVisible();
+    await openPanel(page);
     await page.getByRole('button', { name: 'Create alert' }).click();
 
     const dlg = page.getByRole('dialog', { name: 'Create alert' });
@@ -106,7 +114,7 @@ test.describe('Price Alerts', () => {
     await signIn(context);
     await mockApi(page, s);
     await page.goto('/movers-plus', { waitUntil: 'domcontentloaded' });
-    await page.getByRole('button', { name: 'Price alerts' }).first().click();
+    await openPanel(page);
     await page.getByRole('button', { name: 'Create alert' }).click();
     const dlg = page.getByRole('dialog', { name: 'Create alert' });
 
@@ -170,6 +178,13 @@ test.describe('Price Alerts', () => {
     await expect(page.getByText('1 active trade alert will only notify')).toBeVisible();
     await page.waitForTimeout(8000);
     await expect(reminder).toBeVisible(); // not a 4 s toast: it stays
+
+    // a cancelled confirm sends nothing and the reminder comes back (only × dismisses it for the day)
+    page.once('dialog', d => void d.dismiss());
+    await page.getByRole('button', { name: 'Arm', exact: true }).click();
+    await expect(reminder).toHaveCount(1); // the closed one fades out, the re-shown one stays
+    await expect(reminder).toBeVisible();
+    expect(s.calls.filter(c => c.body?.action === 'arm')).toEqual([]);
 
     page.once('dialog', d => { expect(d.message()).toContain('Arm REAL orders for today?'); void d.accept(); });
     await page.getByRole('button', { name: 'Arm', exact: true }).click();

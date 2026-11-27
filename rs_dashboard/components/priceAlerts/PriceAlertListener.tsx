@@ -7,7 +7,7 @@ import { alertSoundReady, installAlertSoundUnlock, playAlarm, playWarnChime } fr
 import { istDateIso } from '@/lib/nseHolidays';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { armAlertOrders, priceAlertsStore, usePriceAlertsUi } from '@/lib/priceAlertsUi';
-import { unarmedTradeMarkets, type AlertEvent, type AlertsView } from '@/lib/priceAlerts';
+import { unarmedTradeAlerts, unarmedTradeMarkets, type AlertEvent, type AlertsView } from '@/lib/priceAlerts';
 import PriceAlertsPanel from './PriceAlertsPanel';
 import AlertDialog from './AlertDialog';
 
@@ -18,7 +18,8 @@ import AlertDialog from './AlertDialog';
 //     server it is listening (?leader=1) so the server does not play it on the speakers as well;
 //   • reminds when a market opens (or the page loads in session) with active trade alerts while REAL alert orders are
 //     not armed: a toast that stays until armed or closed, with an Arm button, in every tab; the warn chime in the leader.
-//     Once per market per IST day per tab. Forgetting to arm skipped real trades (2026-11-27);
+//     Once per market per IST day per tab (Arm then a cancelled confirm shows it again; closing it with × is the "not
+//     today"). Forgetting to arm skipped real trades (2026-11-27);
 //   • renders the header's panel and the create / edit dialog.
 // Events already in the log when the page loads are marked seen: an old alert never rings again on reload.
 
@@ -129,35 +130,46 @@ export default function PriceAlertListener() {
 
   // Not-armed reminder (see the header comment). Every tab toasts; only the leader chimes, so two tabs do not double-ring.
   const reminded = useRef<Set<string>>(new Set());
+  // Each showing gets its own toast id: re-showing under the id Sonner is still closing (after its action) lost it.
+  const remindSeq = useRef(0);
+  const remindId = useRef<string | null>(null);
   const view = ui.view;
   useEffect(() => {
     if (onLogin || !view) return;
-    const check = () => {
+    // `quiet`: the re-show after a cancelled Arm (the user is right there): no chime.
+    const check = (quiet = false) => {
       const now = Date.now();
       const markets = unarmedTradeMarkets(view, now);
-      if (markets.length === 0) { toast.dismiss(REMIND_TOAST_ID); return; }
+      if (markets.length === 0) { if (remindId.current) toast.dismiss(remindId.current); remindId.current = null; return; }
       const today = istDateIso(now);
       const fresh = markets.filter(m => !reminded.current.has(`${today}:${m}`));
       if (fresh.length === 0) return;
       for (const m of fresh) reminded.current.add(`${today}:${m}`);
-      const n = view.alerts.filter(a => a.status === 'active' && a.action.kind === 'trade').length;
+      // Only the alerts whose order arming would send now (open market, unexpired), not every trade alert.
+      const n = unarmedTradeAlerts(view, now).length;
+      if (remindId.current) toast.dismiss(remindId.current);
+      const id = `${REMIND_TOAST_ID}-${++remindSeq.current}`;
+      remindId.current = id;
       toast.warning(`Trade alerts NOT armed — ${markets.join(' + ')} is open`, {
-        id: REMIND_TOAST_ID,
+        id,
         description: `${n} active trade alert${n === 1 ? '' : 's'} will only notify and skip the order until you arm REAL alert orders for today.`,
         duration: Infinity,
         closeButton: true,
         action: {
           label: 'Arm',
+          // Sonner closes the toast on its action; a cancelled confirm or a failed arm must not lose the reminder for the
+          // day, so it is shown again (only × dismisses it).
           onClick: () => {
-            armAlertOrders().then(ok => { if (ok) toast.success('Alert orders armed for today'); },
-              (e: Error) => toast.error(`Not armed: ${e.message}`));
+            const again = () => { for (const m of markets) reminded.current.delete(`${today}:${m}`); check(true); };
+            armAlertOrders().then(ok => { if (ok) toast.success('Alert orders armed for today'); else again(); },
+              (e: Error) => { toast.error(`Not armed: ${e.message}`); again(); });
           },
         },
       });
-      if (leaderRef.current) playWarnChime();
+      if (leaderRef.current && !quiet) playWarnChime();
     };
     check();
-    const t = setInterval(check, REMIND_CHECK_MS);
+    const t = setInterval(() => check(), REMIND_CHECK_MS);
     return () => clearInterval(t);
   }, [onLogin, view, leaderRef]);
 
