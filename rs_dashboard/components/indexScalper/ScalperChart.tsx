@@ -13,6 +13,7 @@ import {
 } from 'lightweight-charts';
 import { ChevronDown, ChevronRight, Eye, EyeOff, Settings2, X, Plus, ArrowDown, ArrowUp, ArrowUpDown, Bell, FileText, Minus } from 'lucide-react';
 import { useChartChrome } from '@/lib/chartTheme';
+import { trendStates, type CandleColorRule, type TrendState } from '@/lib/indexScalperCandleColor';
 import { computeIndicator, indicatorLabel, tailUnchanged, volumeMa, type Bar, type IndicatorInstance, pointColor, flipsAtLast, type OutSeries } from '@/lib/indexScalperIndicators';
 import { bracketKind, fmtRupees, legAnchor, legPnl, orderLevel, type ScalperLeg } from '@/lib/indexScalperPositions';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
@@ -39,6 +40,15 @@ const VOL_DOWN = '#ef444466';
 const VOL_MA = '#3b82f6';
 const UP = '#10b981';
 const DOWN = '#ef4444';
+/** Trend candles: price between the averages (no trend to trade with). A data colour on the canvas, like UP / DOWN. */
+const NEUTRAL = '#71717a';
+const TREND_COLOR: Record<'bull' | 'bear' | 'neutral', string> = { bull: UP, bear: DOWN, neutral: NEUTRAL };
+/** Per-bar colour fields for a trend state; {} = the series' own up / down colours (rule off, or EMA warm-up). */
+const trendColor = (st: TrendState | undefined) => {
+  if (!st) return {};
+  const c = TREND_COLOR[st];
+  return { color: c, borderColor: c, wickColor: c };
+};
 /** How long a dragged / typed TP / SL level shows before the order book confirms it (then it is dropped). */
 const TENTATIVE_TTL_MS = 15_000;
 /** Drawings of the underlying chart; an option chart stores its own under `${DRAW_KEY}:<securityId>` (drawKey prop). */
@@ -77,6 +87,8 @@ interface Props {
   logScale: boolean;
   /** Background grid lines (a viewer setting, on by default). */
   showGrid?: boolean;
+  /** Trend-coloured candles (a viewer setting, lib/indexScalperCandleColor.ts); 'off' = normal open-vs-close colours. */
+  candleColorRule?: CandleColorRule;
   /** Volume histogram along the bottom of the price pane (a viewer setting, on by default). Drawn only when the bars
    *  carry volume (a future, an option): the NIFTY index has none. */
   showVolume?: boolean;
@@ -200,7 +212,7 @@ const ALERT_COLOR = '#f59e0b';
 
 function ScalperChart(props: Props) {
   const {
-    bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, showGrid = true, showVolume = true, volumeMaLen = 20, legs, entrySpots,
+    bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, showGrid = true, candleColorRule = 'off', showVolume = true, volumeMaLen = 20, legs, entrySpots,
     onExitLeg, onAdjustLeg, adjustLots = 1, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, ordersEnabled = true, onPlaceLimitOrder, onOpenTicket, onAlert, alertLines = NO_ALERT_LINES, onMoveAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, trails, onSetTrail, onCancelTrail, underlying = 'NIFTY', feedLotSize, lotSizes, orderQtyMult = 1,
@@ -523,6 +535,7 @@ function ScalperChart(props: Props) {
     () => indicators.filter(i => i.visible).map(ind => ({ ind, out: computeIndicator(bars, ind) })),
     [bars, indicators],
   );
+  const trend = useMemo(() => trendStates(bars, candleColorRule), [bars, candleColorRule]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -530,7 +543,7 @@ function ScalperChart(props: Props) {
     if (!chart || !candles || bars.length === 0) return;
 
     // The guide-line colour is in the signature so a theme flip rebuilds the oscillator guides.
-    const sig = JSON.stringify([chrome.baseline, indicators.filter(i => i.visible).map(i => [i.id, i.kind, i.params, i.color, i.width ?? null])]);
+    const sig = JSON.stringify([chrome.baseline, candleColorRule, indicators.filter(i => i.visible).map(i => [i.id, i.kind, i.params, i.color, i.width ?? null])]);
     const prev = prevRef.current;
     // Fast path only when nothing but the forming bar moved: the bars before it must be exactly what was drawn. A candle
     // refresh that corrected an earlier tick-built bar (missed high/low) falls through to a full setData, which also
@@ -561,7 +574,7 @@ function ScalperChart(props: Props) {
 
     if (tail) {
       try {
-        candles.update({ time: toTime(lastBar.t), open: lastBar.o, high: lastBar.h, low: lastBar.l, close: lastBar.c });
+        candles.update({ time: toTime(lastBar.t), open: lastBar.o, high: lastBar.h, low: lastBar.l, close: lastBar.c, ...trendColor(trend?.[bars.length - 1]) });
         let k = 0;
         for (const { out } of outputs) {
           for (const s of out.series) {
@@ -582,7 +595,7 @@ function ScalperChart(props: Props) {
       return;
     }
 
-    candles.setData(bars.map(b => ({ time: toTime(b.t), open: b.o, high: b.h, low: b.l, close: b.c })));
+    candles.setData(bars.map((b, i) => ({ time: toTime(b.t), open: b.o, high: b.h, low: b.l, close: b.c, ...trendColor(trend?.[i]) })));
 
     if (sig !== sigRef.current) {
       for (const s of indSeriesRef.current) { try { chart.removeSeries(s); } catch { /* gone */ } }
@@ -639,7 +652,7 @@ function ScalperChart(props: Props) {
       }
     }
     prevRef.current = { n: bars.length, first: bars[0].t, tail: bars.slice(-2), flip };
-  }, [bars, outputs, indicators, chrome]);
+  }, [bars, outputs, indicators, chrome, trend, candleColorRule]);
 
   // Visible range request (1D / 1W / ... buttons). Applied on every click (`seq`), and again when a different history
   // lands (its first bar moves: a longer range or another interval loaded), so 2M / 1M are framed on their own bars

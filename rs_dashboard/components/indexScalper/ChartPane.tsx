@@ -6,6 +6,7 @@
 // the terminal's placeContract (caps, live price, session, lot size). Memoised: every prop the terminal passes is
 // stable, so a feed push re-renders a pane only through `feed` (cheap) and the chart only when its own props change.
 
+import type { CandleColorRule } from '@/lib/indexScalperCandleColor';
 import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Loader2 } from 'lucide-react';
 import ScalperChart, { DRAW_KEY, type ChartViewport, type DrawTool } from './ScalperChart';
@@ -57,6 +58,7 @@ interface Props {
   clearToken: number;
   logScale: boolean;
   showGrid: boolean;
+  candleColorRule: CandleColorRule;
   showVolume: boolean;
   volumeMaLen: number;
   pctScale: boolean;
@@ -291,7 +293,7 @@ function ChartPane(p: Props) {
         <ScalperChart
           key={drawKey}
           bars={bars} indicators={p.indicators} tool={p.tool} onToolDone={p.onToolDone} clearToken={p.clearToken}
-          logScale={p.logScale} pctScale={p.pctScale} autoScale={p.autoScale} showGrid={p.showGrid} showVolume={p.showVolume} volumeMaLen={p.volumeMaLen}
+          logScale={p.logScale} pctScale={p.pctScale} autoScale={p.autoScale} showGrid={p.showGrid} candleColorRule={p.candleColorRule} showVolume={p.showVolume} volumeMaLen={p.volumeMaLen}
           legs={paneLegs} entrySpots={p.entrySpots} onExitLeg={p.onExitLeg} onAdjustLeg={quickOn || isOption ? p.onAdjustLeg : undefined} adjustLots={p.stepLots} exitingId={p.exitingId}
           onToggleIndicator={p.onToggleIndicator} onRemoveIndicator={p.onRemoveIndicator} onEditIndicator={p.onEditIndicator}
           symbolLabel={isOption ? `${label} · ${tfLabel}` : isFuture ? `${underlying} · ${tfLabel} · FUT` : (isMcx(underlying) ? `${underlying} · ${tfLabel} · FUT` : `${underlying} · ${tfLabel} · IDX`)}

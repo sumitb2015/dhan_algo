@@ -61,6 +61,7 @@ import {
   withResolvedUnknowns, type KotakRecord, type KotakSymbolInfo,
 } from '@/lib/indexScalperKotak';
 import { readPref, savePref } from '@/lib/localPref';
+import { CANDLE_COLOR_KEY, CANDLE_COLOR_RULES, parseCandleColorRule, type CandleColorRule } from '@/lib/indexScalperCandleColor';
 import { cn } from '@/lib/utils';
 import { Switch } from '@/components/ui/switch';
 import type { OiMode } from '@/lib/indexScalperOiProfile';
@@ -174,6 +175,7 @@ export default function IndexScalperTerminal() {
   // Call / Put OI bars at each strike on the underlying chart(s). Per viewer, on by default.
   const [showOi, setShowOi] = useState(true);
   const [showGrid, setShowGridState] = useState(true);
+  const [candleColorRule, setCandleColorRuleState] = useState<CandleColorRule>('off');
   // Quick Trade (strike lines with live C / P chips, Buy / Sell in one click). OFF by default: off, the page is exactly
   // what it was before the feature existed.
   const [quickOn, setQuickOnState] = useState(false);
@@ -335,6 +337,7 @@ export default function IndexScalperTerminal() {
     }
     if (readPref(OI_KEY) === '0') setShowOi(false);
     if (readPref(GRID_KEY) === '0') setShowGridState(false);
+    setCandleColorRuleState(parseCandleColorRule(readPref(CANDLE_COLOR_KEY)));
     if (readPref(OI_MODE_KEY) === 'change') setOiModeState('change');
     if (readPref(QUICK_ON_KEY) === '1') setQuickOnState(true);
     setQuickSettingsState(clampQuickSettings(loadJson<unknown>(QUICK_SETTINGS_KEY, null)));
@@ -342,6 +345,12 @@ export default function IndexScalperTerminal() {
     setLayoutReady(true);
   }, []);
   const setOi = (on: boolean) => { setShowOi(on); savePref(OI_KEY, on ? '1' : '0'); };
+  // Trend candles: cycles through CANDLE_COLOR_RULES (Off -> EMA 9 & 20 -> ...), remembered.
+  const cycleCandleColor = () => {
+    const i = CANDLE_COLOR_RULES.findIndex(r => r.id === candleColorRule);
+    const next = CANDLE_COLOR_RULES[(i + 1) % CANDLE_COLOR_RULES.length].id;
+    setCandleColorRuleState(next); savePref(CANDLE_COLOR_KEY, next);
+  };
   const toggleGrid = () => { const on = !showGrid; setShowGridState(on); savePref(GRID_KEY, on ? '1' : '0'); };
   const setOiMode = (m: OiMode) => { setOiModeState(m); savePref(OI_MODE_KEY, m); };
   const setQuickOn = (on: boolean) => { setQuickOnState(on); savePref(QUICK_ON_KEY, on ? '1' : '0'); if (!on) setQuickMenu(false); };
@@ -2309,7 +2318,7 @@ export default function IndexScalperTerminal() {
               underlying={underlying} feed={feed} days={days} refreshTick={refreshTick}
               futureContract={chartContract} futureName={chartContractName}
               indicators={indicators} tool={tool} onToolDone={onToolDone} clearToken={clearToken}
-              logScale={logScale} pctScale={pctScale} autoScale={autoScale} showGrid={showGrid} showVolume={showVolume} volumeMaLen={volumeMaLen}
+              logScale={logScale} pctScale={pctScale} autoScale={autoScale} showGrid={showGrid} candleColorRule={candleColorRule} showVolume={showVolume} volumeMaLen={volumeMaLen}
               legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} onAdjustLeg={adjustLeg} exitingId={exitingId}
               onToggleIndicator={onToggleIndicator} onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
               focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder} onModifyOrder={onModifyOrder}
@@ -2325,7 +2334,7 @@ export default function IndexScalperTerminal() {
               underlying={underlying} feed={feed} days={days} refreshTick={refreshTick}
               futureContract={chartContract} futureName={chartContractName}
               indicators={indicators} tool={tool} onToolDone={onToolDone} clearToken={clearToken}
-              logScale={logScale} pctScale={pctScale} autoScale={autoScale} showGrid={showGrid} showVolume={showVolume} volumeMaLen={volumeMaLen}
+              logScale={logScale} pctScale={pctScale} autoScale={autoScale} showGrid={showGrid} candleColorRule={candleColorRule} showVolume={showVolume} volumeMaLen={volumeMaLen}
               legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} onAdjustLeg={adjustLeg} exitingId={exitingId}
               onToggleIndicator={onToggleIndicator} onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
               focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder} onModifyOrder={onModifyOrder}
@@ -2357,6 +2366,17 @@ export default function IndexScalperTerminal() {
           <button type="button" aria-pressed={logScale} title="Logarithmic price axis" onClick={() => { setLogScale(v => !v); setPctScale(false); }} className={cn(scaleBtn, logScale && 'text-sky-400')}>log</button>
           <button type="button" aria-pressed={autoScale} title="Auto-fit the price axis to the visible bars" onClick={() => setAutoScale(v => !v)} className={cn(scaleBtn, autoScale && 'text-sky-400')}>auto</button>
           <button type="button" aria-pressed={showGrid} aria-label="Grid" title="Background grid lines on / off (remembered)" onClick={toggleGrid} className={cn(scaleBtn, showGrid && 'text-sky-400')}>grid</button>
+          {(() => {
+            const rule = CANDLE_COLOR_RULES.find(r => r.id === candleColorRule) ?? CANDLE_COLOR_RULES[0];
+            const on = candleColorRule !== 'off';
+            return (
+              <button type="button" data-testid="candle-color-rule" aria-pressed={on} aria-label={`Trend candles: ${rule.label}`}
+                title={`Trend candles: ${rule.label}. ${rule.hint}. Click to change (remembered)`}
+                onClick={cycleCandleColor} className={cn(scaleBtn, on && 'text-sky-400')}>
+                {on ? `trend: ${rule.label}` : 'trend'}
+              </button>
+            );
+          })()}
         </div>
       </div>
 
