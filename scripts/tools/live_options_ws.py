@@ -212,8 +212,9 @@ def _fetch_prev_meta(helper, chain_symbol: str, expiry: str, exchange_segment: s
                 prev_meta[strike] = {
                     'ce_oi':    int(_f(ce_data.get('previous_oi'))),
                     'pe_oi':    int(_f(pe_data.get('previous_oi'))),
-                    'ce_close': _f(ce_data.get('previous_close')),
-                    'pe_close': _f(pe_data.get('previous_close')),
+                    # Dhan spells it previous_close_price (docs/API_GOTCHAS.md); 'previous_close' is always absent.
+                    'ce_close': _f(ce_data.get('previous_close_price')),
+                    'pe_close': _f(pe_data.get('previous_close_price')),
                 }
         except Exception as e:
             print(f'[live_options_ws] WARN: prev_meta fetch failed (attempt {attempt + 1}/{attempts}): {e}', flush=True)
@@ -225,6 +226,20 @@ def _fetch_prev_meta(helper, chain_symbol: str, expiry: str, exchange_segment: s
             print(f'[live_options_ws] WARN: prev_meta fetch returned no strikes (attempt {attempt + 1}/{attempts}), retrying in {delay:.0f}s…', flush=True)
             time.sleep(delay)
     return {}
+
+
+def _seed_untraded_side(side: dict, strike_meta: dict | None, side_key: str) -> None:
+    """Fill a no-tick-yet side's previous close / previous OI from the startup chain (display only).
+
+    ltp is left as it is (0 = unknown): every terminal on the bridge file treats ltp > 0 as a live traded price.
+    """
+    meta = strike_meta or {}
+    pc = _f(meta.get(f'{side_key}_close'))
+    poi = _f(meta.get(f'{side_key}_oi'))
+    if pc > 0:
+        side['prev_close'] = round(pc, 2)
+    if poi > 0:
+        side['prev_oi'] = int(poi)
 
 
 # Buildup dead-bands. The price band is deliberately near-zero so any directional
@@ -889,6 +904,11 @@ def main():
                         'prev_oi':    int(side_prev_oi) if side_prev_oi > 0 else 0,
                         'buildup':    _classify_buildup(change_pct, oi_chg_pct),
                     }
+                else:
+                    # No tick yet (exchange closed or pre-open: BSE and MCX send nothing until a contract trades,
+                    # unlike NSE's snapshot packet on subscribe). Still publish the startup chain's previous close so
+                    # pages can show it as a dimmed "not live" price. ltp stays 0: never a traded price.
+                    _seed_untraded_side(strikes_data[sk_key][meta['type'].lower()], prev_meta_map.get(meta['strike']), meta['type'].lower())
 
             contracts_data: dict[str, dict] = {}
             for key, sid in contract_sids.items():
