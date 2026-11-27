@@ -419,6 +419,26 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('trend candles: off by default, EMA 9 & 20 from the scale bar, remembered after a reload', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    const btn = page.getByTestId('candle-color-rule');
+    await expect(btn).toHaveAttribute('aria-pressed', 'false');
+    await btn.click();
+    await expect(btn).toHaveAttribute('aria-pressed', 'true');
+    await expect(btn).toHaveText('trend: EMA 9 & 20');
+    if (process.env.ISX_SHOT) await page.getByTestId('chart-pane-0').screenshot({ path: process.env.ISX_SHOT });
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('candle-color-rule')).toHaveText('trend: EMA 9 & 20', { timeout: 60_000 });
+    // one more click cycles back to off
+    await page.getByTestId('candle-color-rule').click();
+    await expect(page.getByTestId('candle-color-rule')).toHaveAttribute('aria-pressed', 'false');
+    expect(state.blocked).toEqual([]);
+  });
+
   test('trade chimes: on by default, muted from the header, remembered after a reload', async ({ page, context }) => {
     const state = newState();
     await signIn(context);
