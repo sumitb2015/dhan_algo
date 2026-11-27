@@ -103,8 +103,11 @@ Related skills:
 - **Day breaks:** lightweight-charts joins across whitespace, so each day's last point is transparent (`breaks`,
   honoured by `pointColor`). `flipsAtLast` treats "the last bar opened a new day" as a flip, so the tail path re-sends
   just that series once per day. A new day-based indicator must set `breaks` too.
-- **Line width:** levels are drawn at width 1 (`lineWidth` on the series). They take part in autoscale, as on
-  TradingView, so R4/S4 widen the price range. Fewer `levels` keeps the candles larger.
+- **Line width:** levels are drawn at width 1 (`lineWidth` on the series).
+- **Not in autoscale** (2026-11-27): every price-pane series with `breaks` (CPR, pivots, Day H/L) gets
+  `autoscaleInfoProvider: () => null`. With them in it, R4 / S4 squashed CRUDEOILM's candles into a flat line after
+  every reload / Reset scale. The candles plus positions, TP / SL and orders frame the axis; a far level is reached by
+  dragging the axis.
 
 ### Supertrend is ONE series with a colour per point
 - **Why not two series:** with one series per colour plus whitespace, lightweight-charts joins straight across the

@@ -600,12 +600,17 @@ function ScalperChart(props: Props) {
             // Price pane: the series' width (a user setting, or its own default), else 2 (3 for a coloured Supertrend).
             // Own pane (oscillators): the user's width if set, else 1.
             const thick = s.lineWidth ?? (paneIdx === 0 ? (s.colors ? 3 : 2) : 1);
+            // Daily levels (CPR, Pivot S1-S4 / R1-R4, Day H/L: the series with day `breaks`) stay out of the price
+            // autoscale: R4 / S4 sit hundreds of points away and squashed the candles into a flat line after every
+            // reload / Reset scale. The candles (plus positions, TP / SL and orders) frame the axis; a far level is
+            // still drawn and reached by scrolling the axis.
+            const noScale = s.shadow || (paneIdx === 0 && !!s.breaks);
             api = chart.addSeries(LineSeries, {
               // Every indicator line shows its name + last value on the price scale (Supertrend too: the label takes the
               // colour of its last point, so it reads green / red with the trend).
               // A shadow line (Day High / Low) is a faint wide copy under its level: no label of its own.
               color: s.color, lineWidth: thick as 1 | 2 | 3 | 4, priceLineVisible: false, lastValueVisible: !s.shadow, title: s.shadow ? '' : s.axisLabel,
-              crosshairMarkerVisible: false, ...(s.shadow ? { autoscaleInfoProvider: () => null } : {}),
+              crosshairMarkerVisible: false, ...(noScale ? { autoscaleInfoProvider: () => null } : {}),
             }, paneIdx);
             for (const g of s.guides ?? []) api.createPriceLine({ price: g, color: chrome.baseline, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' });
           }
