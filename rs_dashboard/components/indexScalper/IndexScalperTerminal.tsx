@@ -31,6 +31,7 @@ import { scalperRoute } from '@/hooks/useBrokerSelector';
 import { type DrawTool } from './ScalperChart';
 import ChartPane, { type PaneCfg } from './ChartPane';
 import TrendStrip from './TrendStrip';
+import { clampTrendSettings, DEFAULT_TREND_SETTINGS, TREND_SETTINGS_KEY, type TrendSettings } from '@/lib/indexScalperTrend';
 import OptionChainPanel, { type PickedContract } from './OptionChainPanel';
 import OrderTicket, { type TicketRequest, type TicketOrderType } from './OrderTicket';
 import DhanScalperWidget from './DhanScalperWidget';
@@ -179,6 +180,9 @@ export default function IndexScalperTerminal() {
   const [showOi, setShowOi] = useState(true);
   // Trend strip + multi-timeframe check above the charts (TrendStrip.tsx; display only), on by default.
   const [showTrend, setShowTrend] = useState(true);
+  // Its optional lights (futures OI buildup, market structure), gear menu beside the switch; all on by default.
+  const [trendSettings, setTrendSettingsState] = useState<TrendSettings>(DEFAULT_TREND_SETTINGS);
+  const [trendMenu, setTrendMenu] = useState(false);
   const [showGrid, setShowGridState] = useState(true);
   const [candleColorRule, setCandleColorRuleState] = useState<CandleColorRule>('off');
   // Quick Trade (strike lines with live C / P chips, Buy / Sell in one click). OFF by default: off, the page is exactly
@@ -342,6 +346,7 @@ export default function IndexScalperTerminal() {
     }
     if (readPref(OI_KEY) === '0') setShowOi(false);
     if (readPref(TREND_KEY) === '0') setShowTrend(false);
+    setTrendSettingsState(clampTrendSettings(loadJson<unknown>(TREND_SETTINGS_KEY, null)));
     if (readPref(GRID_KEY) === '0') setShowGridState(false);
     setCandleColorRuleState(parseCandleColorRule(readPref(CANDLE_COLOR_KEY)));
     setOiModeState(parseOiMode(readPref(OI_MODE_KEY)));
@@ -352,6 +357,11 @@ export default function IndexScalperTerminal() {
   }, []);
   const setOi = (on: boolean) => { setShowOi(on); savePref(OI_KEY, on ? '1' : '0'); };
   const setTrend = (on: boolean) => { setShowTrend(on); savePref(TREND_KEY, on ? '1' : '0'); };
+  const patchTrendSettings = (patch: Partial<TrendSettings>) => setTrendSettingsState(prev => {
+    const next = clampTrendSettings({ ...prev, ...patch });
+    savePref(TREND_SETTINGS_KEY, JSON.stringify(next));
+    return next;
+  });
   // Trend candles: cycles through CANDLE_COLOR_RULES (Off -> EMA 9 & 20 -> ...), remembered.
   const cycleCandleColor = () => {
     const i = CANDLE_COLOR_RULES.findIndex(r => r.id === candleColorRule);
@@ -2188,12 +2198,22 @@ export default function IndexScalperTerminal() {
             <Switch size="sm" checked={showOi} onCheckedChange={setOi} aria-label="OI profile" />
             <span className={cn('w-6 text-[10px] font-bold hidden min-[2200px]:inline', showOi ? 'text-emerald-400' : 'text-zinc-500')} aria-hidden>{showOi ? 'ON' : 'OFF'}</span>
           </label>
-          <label className="flex items-center gap-1.5 h-7 px-1.5 rounded text-xs font-semibold text-zinc-300 cursor-pointer select-none hover:bg-zinc-800"
-            title="Trend strip: VWAP / EMA 9-20 / Supertrend / ADX and the bias on 3m, 5m, 15m and 1h, above the charts">
-            <Compass className="w-4 h-4" aria-hidden />
-            <span className="hidden min-[2200px]:inline">Trend</span>
-            <Switch size="sm" checked={showTrend} onCheckedChange={setTrend} aria-label="Trend strip" />
-          </label>
+          <div className="relative flex items-center">
+            <label className="flex items-center gap-1.5 h-7 px-1.5 rounded text-xs font-semibold text-zinc-300 cursor-pointer select-none hover:bg-zinc-800"
+              title="Trend strip: VWAP / EMA 9-20 / Supertrend / ADX and the bias on 3m, 5m, 15m and 1h, above the charts">
+              <Compass className="w-4 h-4" aria-hidden />
+              <span className="hidden min-[2200px]:inline">Trend</span>
+              <Switch size="sm" checked={showTrend} onCheckedChange={setTrend} aria-label="Trend strip" />
+            </label>
+            <button type="button" aria-label="Trend strip settings" aria-expanded={trendMenu} disabled={!showTrend}
+              title={showTrend ? 'Trend strip settings: futures OI buildup, market structure' : 'Turn the trend strip on first'}
+              onClick={() => setTrendMenu(v => !v)} className={cn(btn, 'px-1.5 disabled:opacity-40', trendMenu && 'bg-zinc-800 text-white')}>
+              <Settings2 className="w-4 h-4" />
+            </button>
+            {trendMenu && showTrend && (
+              <TrendSettingsMenu settings={trendSettings} onPatch={patchTrendSettings} onClose={() => setTrendMenu(false)} />
+            )}
+          </div>
           {sep}
           <div className="relative flex items-center">
             <label className="flex items-center gap-1.5 h-7 px-1.5 rounded text-xs font-semibold text-zinc-300 cursor-pointer select-none hover:bg-zinc-800"
@@ -2327,7 +2347,7 @@ export default function IndexScalperTerminal() {
         </div>
 
         <div className="flex flex-col flex-1 min-w-0 min-h-0">
-        {showTrend && layoutReady && <TrendStrip underlying={underlying} feed={feed} refreshTick={refreshTick} chartsIdle={indReady && !loadingBars} />}
+        {showTrend && layoutReady && <TrendStrip underlying={underlying} feed={feed} refreshTick={refreshTick} chartsIdle={indReady && !loadingBars} settings={trendSettings} />}
         <div className="relative flex flex-1 min-w-0 min-h-0">
           {indReady && layoutReady && (
             <>
@@ -2583,6 +2603,44 @@ function QuickSettingsMenu({ settings, onPatch, nrmlLocked, maxLots, onClose }: 
         </div>
       </div>
       <p className="text-[10px] leading-snug text-zinc-500">One click on Buy / Sell sends a market order at once (REAL only when armed). Max {maxLots} lots per order.</p>
+    </div>
+  );
+}
+
+/** The trend strip's optional lights (gear beside its switch), each on / off and remembered. Switches, so a change
+ *  applies at once and there is nothing half-typed. Display only: none of these sends or blocks an order. */
+function TrendSettingsMenu({ settings, onPatch, onClose }: {
+  settings: TrendSettings; onPatch: (p: Partial<TrendSettings>) => void; onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Element | null;
+      if (ref.current?.contains(t) || t?.closest?.('[aria-label="Trend strip settings"]')) return;
+      onClose();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey); };
+  }, [onClose]);
+  const row = 'flex items-center justify-between gap-2 text-zinc-300 cursor-pointer';
+  return (
+    <div ref={ref} role="dialog" aria-label="Trend strip settings panel"
+      className="absolute left-0 top-9 z-[60] w-72 rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl p-3 flex flex-col gap-2.5 text-xs whitespace-normal">
+      <div className="font-bold text-zinc-100">Trend strip</div>
+      <label className={row} title="Long / short buildup, short covering, long unwinding on the future's last closed candle (price x OI change)">
+        <span>Futures OI buildup</span>
+        <Switch size="sm" checked={settings.oiBuildup} onCheckedChange={v => onPatch({ oiBuildup: v })} aria-label="Futures OI buildup" />
+      </label>
+      <label className={row} title="Direction of the last break of structure (BOS / CHoCH) from swing highs and lows">
+        <span>Market structure</span>
+        <Switch size="sm" checked={settings.structure} onCheckedChange={v => onPatch({ structure: v })} aria-label="Market structure" />
+      </label>
+      <p className="text-[10px] leading-snug text-zinc-500">
+        Both are extra lights, never part of the bias. Turning OI buildup off also stops its candle request.
+        For HH / HL / LH / LL and BOS / CHoCH labels on the chart, add <span className="text-zinc-300">Market structure</span> from Indicators.
+      </p>
     </div>
   );
 }

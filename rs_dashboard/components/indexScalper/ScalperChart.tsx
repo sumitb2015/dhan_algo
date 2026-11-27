@@ -8,7 +8,7 @@ import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type
 import {
   createChart, createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, ColorType, CrosshairMode, LineStyle, PriceScaleMode,
   type IChartApi, type ISeriesApi, type IPriceLine, type UTCTimestamp, type SeriesType, type MouseEventParams, type Time,
-  type ISeriesMarkersPluginApi,
+  type ISeriesMarkersPluginApi, type SeriesMarker,
   type AutoscaleInfo,
 } from 'lightweight-charts';
 import { ChevronDown, ChevronRight, Eye, EyeOff, Settings2, X, Plus, ArrowDown, ArrowUp, ArrowUpDown, Bell, FileText, Minus } from 'lucide-react';
@@ -565,14 +565,19 @@ function ScalperChart(props: Props) {
     // with the price, as on TradingView, until the bar closes).
     const syncMarkers = (idx: number, s: OutSeries, api: ISeriesApi<SeriesType>) => {
       if (!s.markers) return;
-      const sigM = s.markers.map(m => `${bars[m.i]?.t}:${m.up ? 1 : 0}:${m.price.toFixed(2)}`).join(',');
+      const sigM = s.markers.map(m => `${bars[m.i]?.t}:${m.up ? 1 : 0}:${m.price.toFixed(2)}:${m.text ?? ''}:${m.color}`).join(',');
       if (markerSigRef.current.get(idx) === sigM) return;
       markerSigRef.current.set(idx, sigM);
       let plugin = markerApisRef.current.get(idx);
       if (!plugin) { plugin = createSeriesMarkers(api, []); markerApisRef.current.set(idx, plugin); }
-      plugin.setMarkers(s.markers.filter(m => bars[m.i]).map(m => ({
-        time: toTime(bars[m.i].t), position: 'atPriceMiddle' as const, price: m.price, shape: 'circle' as const, color: m.color, size: 1,
-      })));
+      plugin.setMarkers(s.markers.filter(m => bars[m.i]).map(m => {
+        const position = m.position ?? 'atPriceMiddle';
+        const atPrice = position === 'atPriceMiddle' || position === 'atPriceTop' || position === 'atPriceBottom';
+        return {
+          time: toTime(bars[m.i].t), position, ...(atPrice ? { price: m.price } : {}), shape: m.shape ?? 'circle', color: m.color,
+          size: m.size ?? 1, ...(m.text ? { text: m.text } : {}),
+        } as SeriesMarker<Time>;
+      }));
     };
 
     if (tail) {
@@ -628,7 +633,7 @@ function ScalperChart(props: Props) {
               // Every indicator line shows its name + last value on the price scale (Supertrend too: the label takes the
               // colour of its last point, so it reads green / red with the trend).
               // A shadow line (Day High / Low) is a faint wide copy under its level: no label of its own.
-              color: s.color, lineWidth: thick as 1 | 2 | 3 | 4, priceLineVisible: false, lastValueVisible: !s.shadow, title: s.shadow ? '' : s.axisLabel,
+              color: s.color, lineWidth: thick as 1 | 2 | 3 | 4, priceLineVisible: false, lastValueVisible: !s.shadow && !s.noLabel, title: s.shadow || s.noLabel ? '' : s.axisLabel,
               crosshairMarkerVisible: false, ...(noScale ? { autoscaleInfoProvider: () => null } : {}),
             }, paneIdx);
             for (const g of s.guides ?? []) api.createPriceLine({ price: g, color: chrome.baseline, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' });

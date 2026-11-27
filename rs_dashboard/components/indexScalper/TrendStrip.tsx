@@ -16,9 +16,10 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { readPref, savePref } from '@/lib/localPref';
-import { closedBars, closedKey, mtfSummary, mtfText, trendRead, TREND_PARAMS, type Dir, type TrendRead } from '@/lib/indexScalperTrend';
-import { inMarketSession } from '@/lib/indexScalperSession';
-import type { Underlying } from '@/lib/indexScalperInstrument';
+import { buildupName, closedBars, closedKey, mtfSummary, mtfText, oiBuildup, resampleBars, trendRead, TREND_PARAMS, type Dir, type OiBuildupRead, type TrendRead, type TrendSettings } from '@/lib/indexScalperTrend';
+import { BUILDUP_TEXT } from '@/lib/freshMoney';
+import { barAnchorSec, inMarketSession } from '@/lib/indexScalperSession';
+import { isMcx, type Underlying } from '@/lib/indexScalperInstrument';
 import type { ResolvedSource } from '@/lib/indexScalperChartSource';
 import type { Bar } from '@/lib/indexScalperIndicators';
 import { useChartBars, type Interval } from './useChartBars';
@@ -67,11 +68,13 @@ function Light({ label, dir, title, testId }: { label: string; dir: Dir | null; 
 
 interface Props {
   underlying: Underlying; feed: IndexScalperFeed; refreshTick: number;
+  /** Which optional lights show (gear menu next to the strip's switch). */
+  settings: TrendSettings;
   /** Every chart pane on screen has its candles (or gave up): the strip's fetches may now join the queue. */
   chartsIdle: boolean;
 }
 
-function TrendStrip({ underlying, feed, refreshTick, chartsIdle }: Props) {
+function TrendStrip({ underlying, feed, refreshTick, chartsIdle, settings }: Props) {
   const [started, setStarted] = useState(false);
   useEffect(() => {
     if (started) return;
@@ -96,10 +99,10 @@ function TrendStrip({ underlying, feed, refreshTick, chartsIdle }: Props) {
       </div>
     );
   }
-  return <TrendStripBody underlying={underlying} feed={feed} refreshTick={tick} />;
+  return <TrendStripBody underlying={underlying} feed={feed} refreshTick={tick} settings={settings} />;
 }
 
-function TrendStripBody({ underlying, feed, refreshTick }: { underlying: Underlying; feed: IndexScalperFeed; refreshTick: number }) {
+function TrendStripBody({ underlying, feed, refreshTick, settings }: { underlying: Underlying; feed: IndexScalperFeed; refreshTick: number; settings: TrendSettings }) {
   const b3 = useChartBars(underlying, UNDERLYING_SRC, '3' as Interval, TREND_DAYS, refreshTick, feed);
   const b5 = useChartBars(underlying, UNDERLYING_SRC, '5' as Interval, TREND_DAYS, refreshTick, feed);
   const b15 = useChartBars(underlying, UNDERLYING_SRC, '15' as Interval, TREND_DAYS, refreshTick, feed);
@@ -155,6 +158,13 @@ function TrendStripBody({ underlying, feed, refreshTick }: { underlying: Underly
         {r?.strength === 'choppy' && <span data-testid="trend-strength" className="font-sans font-bold text-amber-400">Choppy</span>}
         {r?.strength === 'strong' && <span data-testid="trend-strength" className="font-sans font-bold text-white">Strong</span>}
       </span>
+      {settings.structure && (
+        <Light testId="trend-structure" label="Structure" dir={r?.structure.dir ?? null}
+          title={r?.structure.last
+            ? `Last break: ${r.structure.last.kind} ${r.structure.last.up ? 'up' : 'down'} at ${hhmm(r.structure.last.t)}, closing ${r.structure.last.up ? 'above the swing high' : 'below the swing low'} ${fmt(r.structure.last.level)} (swing length 3; BOS = with the structure, CHoCH = it turned). Not part of the bias`
+            : 'No break of structure yet on this timeframe (a swing needs 3 bars each side)'} />
+      )}
+      {settings.oiBuildup && <OiBuildupLight underlying={underlying} feed={feed} refreshTick={refreshTick} tf={tf} nowSec={nowSec} />}
       <span data-testid="trend-bias" data-bias={r?.bias ?? ''}
         title="Bullish / Bearish when VWAP, EMA 9/20 and Supertrend all agree; Mixed when they do not"
         className={cn('ml-1 px-2 h-5 leading-5 rounded font-sans font-bold text-[10px] tracking-wide shrink-0',
@@ -187,6 +197,46 @@ function TrendStripBody({ underlying, feed, refreshTick }: { underlying: Underly
         {mtfText(sum)}
       </span>
     </div>
+  );
+}
+
+/** History for the OI buildup: 1-minute future bars with OI, enough for the 1h frame's previous bar (yesterday's last). */
+const OI_DAYS = 3;
+
+/** Futures OI buildup on the strip's selected timeframe. Its own component so its fetch (the future's 1-minute bars WITH
+ *  open interest: one request, resampled here to 3m / 5m / 15m / 1h) only runs while the light is on. The NIFTY / SENSEX
+ *  future (the lookup's contract, the one the FUT pane shows), crude's own future. Display only. */
+function OiBuildupLight({ underlying, feed, refreshTick, tf, nowSec }: {
+  underlying: Underlying; feed: IndexScalperFeed; refreshTick: number; tf: TrendTf; nowSec: number;
+}) {
+  const mcx = isMcx(underlying);
+  const futId = mcx ? null : feed.indexFuture?.dhanId ?? null;
+  const src = useMemo<ResolvedSource>(() => (mcx ? UNDERLYING_SRC : { kind: 'future', type: null, strike: null, dhanId: futId, kotakSymbol: null, tick: 0 }), [mcx, futId]);
+  const b1 = useChartBars(underlying, src, '1' as Interval, OI_DAYS, refreshTick, feed, { oi: true });
+  const now = inMarketSession(underlying, nowSec * 1000) ? nowSec : Infinity;
+  const closed1 = closedBars(b1.bars, 1, now);
+  const key = closedKey(closed1);
+  const reads = useMemo(() => {
+    const anchor = barAnchorSec(underlying);
+    const out = {} as Record<TrendTf, OiBuildupRead | null>;
+    for (const t of TREND_TFS) out[t] = oiBuildup(closedBars(resampleBars(closed1, Number(t), anchor), Number(t), now));
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, underlying]);
+  const r = reads[tf];
+  const d = r?.dir ?? null;
+  const strong = r?.kind === 'LB' || r?.kind === 'SB';
+  const all = TREND_TFS.map(t => `${tfLabel(t)}: ${reads[t]?.kind ? BUILDUP_TEXT[reads[t]!.kind!].name : '—'}`).join(' · ');
+  const title = !futId && !mcx ? 'No future contract for this underlying yet'
+    : r ? `${buildupName(r.kind)}${r.kind ? ` (${BUILDUP_TEXT[r.kind].meaning})` : ''}. Futures ${tfLabel(tf)} closed ${hhmm(r.t)}: price ${r.priceChg !== null && r.priceChg >= 0 ? '+' : ''}${fmt(r.priceChg)}, OI ${r.oiChg !== null && r.oiChg >= 0 ? '+' : ''}${fmt(r.oiChg)} (OI ${fmt(r.oi)}). ${all}. Not part of the bias`
+    : b1.loading ? 'Loading the future\'s OI' : 'No futures OI yet';
+  return (
+    <span data-testid="trend-oi" data-buildup={r?.kind ?? ''} title={title} className="flex items-center gap-1 px-1.5 shrink-0">
+      <span className="text-zinc-400">OI</span>
+      <span className={cn('font-bold', d === null ? 'text-zinc-500' : strong ? dirTone(d) : d === 1 ? 'text-emerald-300' : 'text-rose-300')}>
+        {r?.kind ?? '—'}
+      </span>
+    </span>
   );
 }
 

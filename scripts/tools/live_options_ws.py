@@ -830,6 +830,9 @@ def main():
                             'basis': fut_basis,
                             # Day's cumulative traded volume (additive field): a chart's VWAP on the future is weighted by it.
                             'volume': int(_f(fut_tick.get('volume')) or 0),
+                            # Open interest (additive field; 0 = no OI packet yet, i.e. unknown): the Index Scalper's
+                            # trend strip reads futures OI buildup from it.
+                            'oi': int(_f(fut_tick.get('OI') or fut_tick.get('oi')) or 0),
                         }
 
             # Build per-strike quotes

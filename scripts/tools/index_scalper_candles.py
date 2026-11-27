@@ -66,12 +66,16 @@ def resample(rows, minutes, anchor_s):
             bucket = {"t": key, "o": r["o"], "h": r["h"], "l": r["l"], "c": r["c"]}
             if "v" in r:
                 bucket["v"] = r["v"]
+            if "oi" in r:
+                bucket["oi"] = r["oi"]
         else:
             bucket["h"] = max(bucket["h"], r["h"])
             bucket["l"] = min(bucket["l"], r["l"])
             bucket["c"] = r["c"]
             if "v" in r:
                 bucket["v"] = bucket.get("v", 0) + r["v"]
+            if "oi" in r:
+                bucket["oi"] = r["oi"]   # open interest is a level: the bucket's is its last minute's
     if bucket:
         out.append(bucket)
     return out
@@ -85,6 +89,9 @@ def main():
     p.add_argument("--security-id", default=None)
     p.add_argument("--interval", default="5")
     p.add_argument("--days", type=int, default=10)
+    # Open interest per bar ("oi"), futures only. Dhan's intraday API returns open_interest per minute for FUTIDX and
+    # FUTCOM (checked live 2026-11-27: NIFTY and CRUDEOILM futures, every bar non-zero and changing).
+    p.add_argument("--oi", action="store_true")
     a = p.parse_args()
 
     if a.interval not in SUPPORTED:
@@ -135,7 +142,7 @@ def main():
         interval=api_interval,
         from_date=start.strftime("%Y-%m-%d"),
         to_date=end.strftime("%Y-%m-%d"),
-        oi=False,
+        oi=bool(a.oi) and segment != "IDX_I",
     )
     if df is None or df.empty:
         err = getattr(helper, "last_api_error", None)
@@ -154,6 +161,7 @@ def main():
     # Never for an index: Dhan's IDX_I "volume" is a pseudo figure (millions per bar, a constant after the close) and the
     # live index ticks carry none, so the index keeps its equal-weight session average.
     has_vol = segment != "IDX_I" and vol_col is not None and float(df[vol_col].fillna(0).abs().sum()) > 0
+    oi_col = next((col for col in df.columns if str(col).lower() in ("open_interest", "oi")), None) if a.oi else None
     rows = []
     for _, r in df.iterrows():
         o, h, l, c = fnum(r.get("open")), fnum(r.get("high")), fnum(r.get("low")), fnum(r.get("close"))
@@ -162,6 +170,10 @@ def main():
         row = {"t": to_epoch(r["time"]), "o": o, "h": h, "l": l, "c": c}
         if has_vol:
             row["v"] = int(fnum(r.get(vol_col)) or 0)
+        if oi_col is not None:
+            oi = fnum(r.get(oi_col))
+            if oi is not None and oi > 0:   # 0 / missing = unknown, never "no open interest"
+                row["oi"] = int(oi)
         rows.append(row)
     rows.sort(key=lambda x: x["t"])
     # de-duplicate identical timestamps (keep the last)

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { closedBars, closedKey, mtfSummary, mtfText, trendRead, type TrendRead } from './indexScalperTrend.ts';
+import { clampTrendSettings, closedBars, closedKey, mtfSummary, mtfText, oiBuildup, resampleBars, trendRead, type TrendRead } from './indexScalperTrend.ts';
 import type { Bar } from './indexScalperIndicators.ts';
 
 // 5-min bars from Thursday 2026-11-26 09:15 IST (03:45 UTC). `path(i)` = the close of bar i.
@@ -79,4 +79,52 @@ test('mtfSummary / mtfText: alignment and counts', () => {
   assert.equal(mtfText(mtfSummary([r('bear'), r('mixed'), r('mixed'), r('bull')])), '1 bull · 1 bear · 2 mixed');
   assert.equal(mtfText(mtfSummary([null, null])), '—');
   assert.equal(mtfSummary([r('bear'), r('bear')]).aligned, 'bear');
+});
+
+test('structure light: the direction of the last break of structure', () => {
+  // wavy trends (pullbacks make the swings); a perfectly smooth rise has no swing high, so no structure yet
+  // (bars centred on their close: mk's open = previous close makes the bar after a peak tie its high, and ties are not swings)
+  const wave = (path: (i: number) => number) => Array.from({ length: 80 }, (_, i) => {
+    const c = path(i);
+    return { t: T0 + i * 300, o: c, h: c + 6, l: c - 6, c };
+  });
+  const u = trendRead(wave(i => 25000 + i * 8 + Math.sin(i / 2) * 30))!;
+  const d = trendRead(wave(i => 26000 - i * 8 + Math.sin(i / 2) * 30))!;
+  assert.equal(trendRead(up)!.structure.dir, null);
+  assert.equal(u.structure.dir, 1);
+  assert.equal(u.structure.last?.up, true);
+  assert.equal(d.structure.dir, -1);
+  assert.equal(trendRead(up.slice(0, 5))!.structure.dir, null); // no swing known yet
+});
+
+test('resampleBars: session-anchored buckets, OHLC, volume summed, OI = the bucket\'s last', () => {
+  const NSE_OPEN = 9 * 3600 + 15 * 60;
+  const m = Array.from({ length: 7 }, (_, i) => ({ t: T0 + i * 60, o: 100 + i, h: 101 + i, l: 99 + i, c: 100.5 + i, v: 10, oi: 1000 + i * 5 }));
+  const r = resampleBars(m, 3, NSE_OPEN);
+  assert.deepEqual(r.map(b => b.t), [T0, T0 + 180, T0 + 360]);               // 09:15, 09:18, 09:21
+  assert.deepEqual(r[0], { t: T0, o: 100, h: 103, l: 99, c: 102.5, v: 30, oi: 1010 });
+  assert.equal(r[2].oi, 1030);
+  assert.equal(resampleBars(m, 1, NSE_OPEN), m);
+  // a bar with no OI keeps the bucket's earlier one (unknown is not zero)
+  const gap = resampleBars([{ ...m[0] }, { ...m[1], oi: undefined }], 3, NSE_OPEN);
+  assert.equal(gap[0].oi, 1000);
+});
+
+test('oiBuildup: price x OI change on the last bar vs the one before', () => {
+  const bar = (c: number, oi?: number) => ({ t: T0, o: c, h: c, l: c, c, ...(oi ? { oi } : {}) });
+  assert.equal(oiBuildup([bar(100, 1000), bar(101, 1100)])!.kind, 'LB');   // price up, OI up
+  assert.equal(oiBuildup([bar(100, 1000), bar(99, 1100)])!.kind, 'SB');    // price down, OI up
+  assert.equal(oiBuildup([bar(100, 1000), bar(101, 900)])!.kind, 'SC');    // price up, OI down
+  assert.equal(oiBuildup([bar(100, 1000), bar(99, 900)])!.kind, 'LU');     // price down, OI down
+  const lu = oiBuildup([bar(100, 1000), bar(99, 900)])!;
+  assert.deepEqual([lu.dir, lu.oiChg, lu.priceChg, lu.oi], [-1, -100, -1, 900]);
+  assert.equal(oiBuildup([bar(100, 1000), bar(101, 1000)])!.kind, null);   // OI unchanged: nothing to name
+  assert.equal(oiBuildup([bar(100), bar(101, 1000)])!.kind, null);         // previous OI unknown
+  assert.equal(oiBuildup([bar(100, 1000)]), null);
+});
+
+test('trend settings: anything missing or malformed is on; only an explicit false turns a light off', () => {
+  assert.deepEqual(clampTrendSettings(null), { oiBuildup: true, structure: true });
+  assert.deepEqual(clampTrendSettings({ oiBuildup: false }), { oiBuildup: false, structure: true });
+  assert.deepEqual(clampTrendSettings({ structure: 'no', oiBuildup: 0 }), { oiBuildup: true, structure: true });
 });

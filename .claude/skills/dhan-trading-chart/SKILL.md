@@ -30,7 +30,7 @@ Related skills:
 | Feature | File / function |
 |---|---|
 | Chart, candle series, theme, resize | `ScalperChart.tsx`, the `chart lifecycle` and `theme` sections |
-| Indicators (EMA, EMA Cross, SMA, VWAP, Supertrend, BB, CPR, Pivot S1-S4 / R1-R4, RSI, Stochastic RSI, MACD, ADX), catalog, params | `lib/indexScalperIndicators.ts`: `INDICATOR_CATALOG`, `computeIndicator`, `clampParam`; daily levels via `prevDayHlc`, `pivotLevels`, `dayBreaks` |
+| Indicators (EMA, EMA Cross, SMA, VWAP, Supertrend, BB, CPR, Pivot S1-S4 / R1-R4, RSI, Stochastic RSI, MACD, ADX, Market structure), catalog, params | `lib/indexScalperIndicators.ts`: `INDICATOR_CATALOG`, `computeIndicator`, `clampParam`; daily levels via `prevDayHlc`, `pivotLevels`, `dayBreaks` |
 | Saved-settings migration | `migrateIndicatorsV1`; localStorage keys `indexScalper.indicators.v1` -> `v2` |
 | Live candles from ticks; REST history as backfill | `applyTick`, `mergeHistory` (same file); the terminal's live-bars effect |
 | Fast tail update vs full redraw | `tailUnchanged`, `flipsAtLast`, `pointColor`; the chart's `data + indicators` effect |
@@ -89,6 +89,11 @@ Related skills:
   (`feed.volumeById`: chain options, the bridge's `future.volume`) turned into per-bar increases in `useChartBars`
   (`applyTick`'s `volDelta`; `mergeHistory` keeps the larger of history / ticks for the forming bar, never the sum).
   Equal weight put CRUDEOILM's VWAP at 7503.01 vs Dhan's 7513.11 (2026-11-25); weighted it matched to the paisa.
+- **Market structure:** swing highs / lows by the repo's strict pivot rule (`lib/indexScalperStructure.ts`, `len` bars
+  each side, default 3) joined by a 1 px zig-zag (null values = whitespace, which the line joins), HH / LH / HL / LL text
+  markers and BOS / CHoCH arrows (`OutSeries.markers` with `text` / `shape` / `position`). The forming (last) bar is left
+  out, so a swing or break never appears and then vanishes; a swing shows `len` bars after it printed. `noLabel`: no
+  price-scale label (the zig-zag's last point is a past swing).
 - **Proof:** a "matches TradingView" claim needs a fixture with candles and the broker chart's printed values.
   A visual check is not proof.
 

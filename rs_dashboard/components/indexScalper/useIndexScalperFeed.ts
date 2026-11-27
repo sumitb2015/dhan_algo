@@ -18,6 +18,8 @@ export interface FutureContractInfo {
   kotakSymbol: string | null;
   expiry: string | null;
   ltp: number | null;
+  /** Live open interest of this future (the bridge's `future.oi`; null = unknown). */
+  oi?: number | null;
 }
 
 const STALE_FEED_MS = 10_000;
@@ -58,7 +60,7 @@ export interface IndexScalperFeed {
   future: FutureContractInfo | null;
   /** NIFTY only: its future for the chart's FUT pane (chart only, never traded from here). `ltp` / `volume` are live
    *  when the options bridge tracks this same contract (else null: history only). */
-  indexFuture: { dhanId: string; expiry: string; ltp: number | null; volume: number | null } | null;
+  indexFuture: { dhanId: string; expiry: string; ltp: number | null; volume: number | null; oi: number | null } | null;
   /** Kotak contracts when Kotak is the page's broker (null on Dhan, and until both reads land). */
   kotak: KotakContracts | null;
   /** Why Kotak's contracts are not loaded (a read failed; it is retried every 15 s), null while fine or loading. */
@@ -290,6 +292,7 @@ export function useIndexScalperFeed(
       expiry: dhanFuture.expiry.slice(0, 10),
       ltp: same ? f!.ltp : null,
       volume: same && f!.volume && f!.volume > 0 ? f!.volume : null,
+      oi: same && f!.oi && f!.oi > 0 ? f!.oi : null,
     };
   }, [underlying, dhanFuture, quotes?.future]);
 
@@ -326,11 +329,15 @@ export function useIndexScalperFeed(
     if (!isMcx(underlying) || (!dhanFuture && !kotakFutureSymbol)) return null;
     const src = quotes ?? snapshot;
     const futLtp = (dhanFuture?.securityId ? ltpById.get(dhanFuture.securityId) : null) ?? (src && src.spot > 0 ? src.spot : null);
+    // The bridge's future is the option month's own (CRUDEOILM): its OI belongs to that contract only.
+    const bf = quotes?.future;
+    const oi = bf?.oi && bf.oi > 0 && (!bf.expiry || !dhanFuture?.expiry || bf.expiry.slice(0, 10) === dhanFuture.expiry.slice(0, 10)) ? bf.oi : null;
     return {
       dhanId: dhanFuture?.securityId ?? null,
       kotakSymbol: kotakFutureSymbol ?? null,
       expiry: dhanFuture?.expiry ?? null,
       ltp: futLtp,
+      oi,
     };
   }, [underlying, dhanFuture, kotakFutureSymbol, ltpById, quotes, snapshot]);
 

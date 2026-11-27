@@ -4,12 +4,14 @@
 
 import { emaSmaSeeded, smaArray, rsiArray, stochRsiArray, macdSeries, adxDmiArray, supertrendSeries } from './indicators.ts';
 import { barAnchorSec, inMarketSession, inOrderSession } from './indexScalperSession.ts';
+import { marketStructure } from './indexScalperStructure.ts';
 import type { Underlying } from './indexScalperInstrument.ts';
 
 /** `v` = traded volume in the bar, when the instrument has one (a future, an option); an index has none. */
-export interface Bar { t: number; o: number; h: number; l: number; c: number; v?: number }
+/** `oi`: open interest at the bar's end (futures, when asked for: the candles route's oi=1 and the live future's OI). */
+export interface Bar { t: number; o: number; h: number; l: number; c: number; v?: number; oi?: number }
 
-export type IndicatorKind = 'volume' | 'ema' | 'emacross' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'daylevels' | 'rsi' | 'stochrsi' | 'macd' | 'adx';
+export type IndicatorKind = 'volume' | 'ema' | 'emacross' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'daylevels' | 'rsi' | 'stochrsi' | 'macd' | 'adx' | 'structure';
 
 export interface IndicatorInstance {
   id: string;
@@ -114,6 +116,12 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
     params: [{ key: 'fast', label: 'Fast', def: 12, min: 2, max: 100 }, { key: 'slow', label: 'Slow', def: 26, min: 3, max: 200 }, { key: 'signal', label: 'Signal', def: 9, min: 2, max: 100 }],
   },
   { kind: 'adx', label: 'ADX / DMI', pane: 'sub', color: '#eab308', params: [{ key: 'period', label: 'Length', def: 14, min: 2, max: 100 }] },
+  // Swing highs / lows (HH, LH, HL, LL) joined by a zig-zag, and breaks of structure (BOS with the trend, CHoCH against
+  // it): lib/indexScalperStructure.ts. A swing shows `len` bars after it printed (the pivot's confirmation lag).
+  {
+    kind: 'structure', label: 'Market structure (HH / HL / LH / LL, BOS / CHoCH)', pane: 'price', color: '#94a3b8',
+    params: [{ key: 'len', label: 'Swing length (bars each side)', def: 3, min: 1, max: 20 }],
+  },
 ];
 
 /** Pine `ta.crossover` / `ta.crossunder` of `a` over `b`: bar i is a cross up when a > b now and a <= b on the bar
@@ -193,8 +201,15 @@ export interface OutSeries {
   shadow?: boolean;
   /** A level drawn flat across the forming day (DH / DL): a new value repaints the whole series, not just the last point. */
   flat?: boolean;
-  /** Small circles drawn on this line at bar `i` (EMA crosses), at `price`, in `color`. */
-  markers?: { i: number; price: number; color: string; up: boolean }[];
+  /** Small circles drawn on this line at bar `i` (EMA crosses), at `price`, in `color`. Optional `text`, `shape` and
+   *  `position` (default: a circle at `price`); market structure labels its swings and breaks with them. */
+  markers?: {
+    i: number; price: number; color: string; up: boolean;
+    text?: string; shape?: 'circle' | 'arrowUp' | 'arrowDown' | 'square';
+    position?: 'atPriceMiddle' | 'atPriceTop' | 'atPriceBottom' | 'aboveBar' | 'belowBar'; size?: number;
+  }[];
+  /** No name / last value on the price scale (the structure zig-zag's last point is a past swing, not a level now). */
+  noLabel?: boolean;
 }
 
 export interface IndicatorOutput {
@@ -481,6 +496,29 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
         ],
       };
     }
+    case 'structure': {
+      // The forming (last) bar is left out: its high / close can still move, so it never confirms a swing or a break
+      // (after the close that costs the last bar one bar of lag, never a swing that later disappears).
+      const ms = marketStructure(bars.slice(0, -1), p('len'));
+      const values: (number | null)[] = bars.map(() => null);
+      for (const sw of ms.swings) values[sw.i] = sw.price;
+      const GREY = '#94a3b8';
+      const markers: NonNullable<OutSeries['markers']> = [
+        ...ms.swings.map(sw => ({
+          i: sw.i, price: sw.price, up: sw.kind === 'H', size: 0.5, shape: 'circle' as const,
+          position: (sw.kind === 'H' ? 'aboveBar' : 'belowBar') as 'aboveBar' | 'belowBar',
+          color: sw.label === 'HH' || sw.label === 'HL' ? UP : sw.label === 'LH' || sw.label === 'LL' ? DOWN : GREY,
+          ...(sw.label ? { text: sw.label } : {}),
+        })),
+        ...ms.breaks.map(b => ({
+          i: b.i, price: b.level, up: b.up, text: b.kind, size: 1,
+          shape: (b.up ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
+          position: (b.up ? 'belowBar' : 'aboveBar') as 'aboveBar' | 'belowBar',
+          color: b.up ? UP : DOWN,
+        })),
+      ].sort((a, b) => a.i - b.i);
+      return { pane: 'price', series: [{ key: 'v', label, axisLabel: 'Structure', color: ind.color, style: 'line', values, markers, noLabel: true, lineWidth: 1 }] };
+    }
   }
 }
 
@@ -497,6 +535,8 @@ export function applyTick(
   option = false,
   /** Volume traded since the previous tick (the day's cumulative volume's increase); added to the bar it lands in. */
   volDelta = 0,
+  /** Open interest now (a level, not a flow): the bar it lands in takes it. Null / 0 = unknown, the bar keeps its own. */
+  oi: number | null = null,
 ): Bar[] {
   if (bars.length === 0 || !(price > 0)) return bars;
   if (!(option ? inOrderSession(underlying, nowSec * 1000) : inMarketSession(underlying, nowSec * 1000))) return bars;
@@ -508,13 +548,15 @@ export function applyTick(
   const bucket = Math.floor((ist - anchor) / step) * step + anchor - 19800;
   if (bucket < last.t) return bars;
   const dv = Number.isFinite(volDelta) && volDelta > 0 ? volDelta : 0;
+  const liveOi = oi !== null && Number.isFinite(oi) && oi > 0 ? oi : null;
   if (bucket === last.t) {
-    if (dv === 0 && last.c === price && price <= last.h && price >= last.l) return bars;
+    if (dv === 0 && last.c === price && price <= last.h && price >= last.l && (liveOi === null || liveOi === last.oi)) return bars;
     const next: Bar = { ...last, c: price, h: Math.max(last.h, price), l: Math.min(last.l, price) };
     if (dv > 0) next.v = (last.v ?? 0) + dv;
+    if (liveOi !== null) next.oi = liveOi;
     return [...bars.slice(0, -1), next];
   }
-  return [...bars, { t: bucket, o: price, h: price, l: price, c: price, ...(dv > 0 ? { v: dv } : {}) }];
+  return [...bars, { t: bucket, o: price, h: price, l: price, c: price, ...(dv > 0 ? { v: dv } : {}), ...(liveOi !== null ? { oi: liveOi } : {}) }];
 }
 
 const sameBar = (a: Bar | undefined, b: Bar | undefined) =>
@@ -551,7 +593,9 @@ export function mergeHistory(history: Bar[], live: Bar[], intervalMin: number, n
       // whichever is larger: they overlap, so adding them would count the same trades twice.
       if (forming) {
         const v = Math.max(last.v ?? 0, b.v ?? 0);
-        out[out.length - 1] = { t: last.t, o: last.o, h: Math.max(last.h, b.h), l: Math.min(last.l, b.l), c: b.c, ...(v > 0 ? { v } : {}) };
+        // OI is a level: the ticks' is newer than the snapshot's.
+        const oi = b.oi ?? last.oi;
+        out[out.length - 1] = { t: last.t, o: last.o, h: Math.max(last.h, b.h), l: Math.min(last.l, b.l), c: b.c, ...(v > 0 ? { v } : {}), ...(oi ? { oi } : {}) };
       }
       continue;
     }

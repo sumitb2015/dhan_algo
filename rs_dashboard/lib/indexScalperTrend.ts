@@ -10,9 +10,15 @@
 //   ADX   ADX(14) with +DI / -DI
 // Bias: Bullish / Bearish when VWAP, EMA and ST all point one way, Mixed otherwise, null while any is not computable.
 // Strength: Choppy when ADX < 20; Strong when ADX >= 25 and the DI points with the bias.
+// Two more lights, shown or hidden in the strip's settings, never part of the bias:
+//   Structure  direction of the last break of structure (lib/indexScalperStructure.ts, swing length 3)
+//   OI         futures OI buildup on the last closed bar vs the one before (price x OI change: long buildup, short
+//              buildup, short covering, long unwinding; freshMoney's buildupOf), from the future's 1-minute bars with OI
 
 import { adxDmiArray, emaSmaSeeded, supertrendSeries } from './indicators.ts';
 import { sessionVwap, type Bar } from './indexScalperIndicators.ts';
+import { marketStructure, STRUCTURE_LEN, type StructureBreak } from './indexScalperStructure.ts';
+import { buildupOf, BUILDUP_TEXT, type Buildup } from './freshMoney.ts';
 
 export type Dir = 1 | -1 | 0;
 export type Bias = 'bull' | 'bear' | 'mixed';
@@ -28,6 +34,8 @@ export interface TrendRead {
   ema: { fast: number | null; slow: number | null; dir: Dir | null };
   st: { line: number | null; dir: Dir | null };
   adx: { adx: number | null; plusDi: number | null; minusDi: number | null; dir: Dir | null };
+  /** Direction of the last break of structure and that break (with the bar time of the break). */
+  structure: { dir: Dir | null; last: (StructureBreak & { t: number }) | null };
   bias: Bias | null;
   strength: Strength;
 }
@@ -78,7 +86,10 @@ export function trendRead(bars: Bar[]): TrendRead | null {
     if (adx.adx < P.choppyBelow) strength = 'choppy';
     else if (adx.adx >= P.strongFrom && ((bias === 'bull' && adx.dir === 1) || (bias === 'bear' && adx.dir === -1))) strength = 'strong';
   }
-  return { t: b.t, close: b.c, vwap, ema, st, adx, bias, strength };
+  const ms = marketStructure(bars, STRUCTURE_LEN);
+  const lb = ms.breaks[ms.breaks.length - 1];
+  const structure = { dir: ms.dir, last: lb ? { ...lb, t: bars[lb.i].t } : null };
+  return { t: b.t, close: b.c, vwap, ema, st, adx, structure, bias, strength };
 }
 
 export interface MtfSummary { bull: number; bear: number; mixed: number; known: number; total: number; aligned: 'bull' | 'bear' | null }
@@ -113,3 +124,55 @@ export const closedKey = (bars: Bar[]): string => {
   const l = bars[bars.length - 1];
   return l ? `${bars.length}|${l.t}|${l.o}|${l.h}|${l.l}|${l.c}|${bars[0].t}` : '';
 };
+
+/** 1-minute bars folded into `tfMin` buckets anchored at `anchorSec` seconds after IST midnight (the session open, as the
+ *  candles route and applyTick bucket them). OHLC as usual, volume summed, open interest = the bucket's last known. */
+export function resampleBars(bars: Bar[], tfMin: number, anchorSec: number): Bar[] {
+  if (tfMin <= 1) return bars;
+  const step = tfMin * 60;
+  const out: Bar[] = [];
+  for (const b of bars) {
+    const key = Math.floor((b.t + 19800 - anchorSec) / step) * step + anchorSec - 19800;
+    const cur = out[out.length - 1];
+    if (cur && cur.t === key) {
+      cur.h = Math.max(cur.h, b.h); cur.l = Math.min(cur.l, b.l); cur.c = b.c;
+      if (b.v !== undefined) cur.v = (cur.v ?? 0) + b.v;
+      if (b.oi) cur.oi = b.oi;
+    } else {
+      out.push({ t: key, o: b.o, h: b.h, l: b.l, c: b.c, ...(b.v !== undefined ? { v: b.v } : {}), ...(b.oi ? { oi: b.oi } : {}) });
+    }
+  }
+  return out;
+}
+
+export interface OiBuildupRead {
+  /** Time of the closed bar read. */
+  t: number;
+  kind: Buildup | null;
+  /** Bias of the buildup: long buildup / short covering = 1 (price up), short buildup / long unwinding = -1. */
+  dir: Dir | null;
+  oi: number | null; oiChg: number | null; priceChg: number | null;
+}
+
+/** Futures OI buildup on the LAST bar of `bars` (pass closed bars) against the bar before it. Null kind when either OI
+ *  is unknown or OI did not change (no buildup to name). */
+export function oiBuildup(bars: Bar[]): OiBuildupRead | null {
+  const n = bars.length;
+  if (n < 2) return null;
+  const b = bars[n - 1], p = bars[n - 2];
+  const oiChg = b.oi && p.oi ? b.oi - p.oi : null;
+  const kind = buildupOf(oiChg, b.c, p.c);
+  const dir: Dir | null = kind === 'LB' || kind === 'SC' ? 1 : kind === 'SB' || kind === 'LU' ? -1 : null;
+  return { t: b.t, kind, dir, oi: b.oi ?? null, oiChg, priceChg: b.c - p.c };
+}
+
+export const buildupName = (k: Buildup | null): string => (k ? BUILDUP_TEXT[k].name : 'No OI change');
+
+/** The strip's own settings (gear menu next to its switch), stored as JSON; anything missing is on. */
+export interface TrendSettings { oiBuildup: boolean; structure: boolean }
+export const TREND_SETTINGS_KEY = 'indexScalper.trendSettings';
+export const DEFAULT_TREND_SETTINGS: TrendSettings = { oiBuildup: true, structure: true };
+export function clampTrendSettings(raw: unknown): TrendSettings {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Partial<Record<keyof TrendSettings, unknown>>;
+  return { oiBuildup: o.oiBuildup !== false, structure: o.structure !== false };
+}

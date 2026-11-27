@@ -33,7 +33,11 @@ export function useChartBars(
   days: number,
   refreshTick: number,
   feed: IndexScalperFeed,
+  /** `oi`: also load open interest per bar (futures only: the NIFTY / SENSEX future, crude's underlying) and fold the
+   *  live future's OI into the forming bar. Off for every chart pane; the trend strip's OI buildup asks for it. */
+  opts: { oi?: boolean } = {},
 ): ChartBars {
+  const wantOi = !!opts.oi;
   const isOption = resolved.kind === 'option';
   // The NIFTY future (FUT pane): a traded contract like an option (volume, F&O session to 15:40), priced on its own axis.
   const isFuture = resolved.kind === 'future';
@@ -41,7 +45,7 @@ export function useChartBars(
   // The contract whose bars these are. History is tagged with it AND the interval, so a strike / expiry / interval switch
   // never mixes two contracts' or two intervals' bars.
   const contractId = traded ? resolved.dhanId : (isMcx(underlying) ? feed.future?.dhanId ?? null : 'idx');
-  const tag = `${underlying}|${contractId ?? ''}|${interval}`;
+  const tag = `${underlying}|${contractId ?? ''}|${interval}${wantOi ? '|oi' : ''}`;
 
   const [history, setHistory] = useState<{ tag: string; bars: Bar[] } | null>(null);
   // Bars are stored with the tag they were built for: right after a switch the state still holds the previous
@@ -68,7 +72,7 @@ export function useChartBars(
       : isFuture ? `&kind=future&securityId=${contractId}`
       : (isMcx(underlying) && contractId ? `&securityId=${contractId}` : '');
     const forTag = tag;
-    fetch(`/api/index-scalper/candles?underlying=${underlying}&interval=${interval}&days=${days}${idParam}`)
+    fetch(`/api/index-scalper/candles?underlying=${underlying}&interval=${interval}&days=${days}${idParam}${wantOi ? '&oi=1' : ''}`)
       .then(r => r.json())
       .then((j: { success: boolean; candles?: Bar[]; error?: string }) => {
         if (dead) return;
@@ -79,7 +83,7 @@ export function useChartBars(
       .catch(e => { if (!dead) setError(String(e?.message ?? e)); })
       .finally(() => { if (!dead) setLoading(false); });
     return () => { dead = true; };
-  }, [underlying, interval, days, refreshTick, contractId, isOption, isFuture, traded, tag]);
+  }, [underlying, interval, days, refreshTick, contractId, isOption, isFuture, traded, tag, wantOi]);
 
   const liveTagRef = useRef<string | null>(null);
   useEffect(() => {
@@ -101,6 +105,8 @@ export function useChartBars(
   // The day's cumulative volume of what this pane plots (an option; the CRUDEOILM future); the NIFTY index has none.
   const volId = isOption ? contractId : (isMcx(underlying) ? feed.future?.dhanId ?? null : null);
   const liveVol = isFuture ? futLive?.volume ?? null : volId ? feed.volumeById.get(volId) ?? null : null;
+  // Live open interest of what this pane plots, when asked for: the NIFTY / SENSEX future, or crude's (its underlying).
+  const liveOi = !wantOi ? null : isFuture ? futLive?.oi ?? null : (!traded && isMcx(underlying) ? feed.future?.oi ?? null : null);
   // Last cumulative volume seen for this pane's contract: each tick adds the increase to its bar (the first tick after a
   // switch only sets the baseline; a drop, e.g. a new session, resets it).
   const volRef = useRef<{ tag: string; cum: number } | null>(null);
@@ -115,10 +121,10 @@ export function useChartBars(
       if (seen && seen.tag === tag && liveVol >= seen.cum) dv = liveVol - seen.cum;
       volRef.current = { tag, cum: liveVol };
     }
-    setBars(prev => (liveTagRef.current === tag ? applyTick(prev, livePrice, Number(interval), Date.now() / 1000, underlying, traded, dv) : prev), tag);
+    setBars(prev => (liveTagRef.current === tag ? applyTick(prev, livePrice, Number(interval), Date.now() / 1000, underlying, traded, dv, liveOi) : prev), tag);
     // feed.stale / feedAgeSec are read as guards only: a new tick is what moves a bar.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [livePrice, feed.quotes, tag, interval, underlying]);
+  }, [livePrice, feed.quotes, tag, interval, underlying, liveOi]);
 
   const noLiveTicks = traded && feed.quotes !== null && livePrice === null;
   const bars = state.tag === tag ? state.bars : EMPTY;
