@@ -6,9 +6,9 @@ import { json, signIn } from './support';
 // non-GET the mock does not handle is refused with 599.
 
 interface Call { path: string; body: Record<string, unknown> | null }
-interface State { calls: Call[]; blocked: Call[]; alerts: Record<string, unknown>[]; log: Record<string, unknown>[]; streamLog: Record<string, unknown>[] | null; version: number }
+interface State { calls: Call[]; blocked: Call[]; alerts: Record<string, unknown>[]; log: Record<string, unknown>[]; streamLog: Record<string, unknown>[] | null; version: number; armed?: boolean }
 
-const view = (s: State, log = s.log) => ({ alerts: s.alerts, armedToday: false, defaultSoundSec: 3, version: s.version, log });
+const view = (s: State, log = s.log) => ({ alerts: s.alerts, armedToday: !!s.armed, defaultSoundSec: 3, version: s.version, log });
 
 function alertFrom(id: string, body: Record<string, unknown>) {
   const a = body.alert as Record<string, unknown>;
@@ -49,6 +49,7 @@ async function mockApi(page: Page, s: State) {
       if (body?.action === 'create') s.alerts.push(alertFrom(`a${s.alerts.length + 1}`, body));
       if (body?.action === 'pause') s.alerts = s.alerts.map(a => (a.id === id ? { ...a, status: 'paused' } : a));
       if (body?.action === 'delete') s.alerts = s.alerts.filter(a => a.id !== id);
+      if (body?.action === 'arm') s.armed = true;
       s.version += 1;
       return json(route, { success: true, data: view(s) });
     }
@@ -145,6 +146,60 @@ test.describe('Price Alerts', () => {
     await expect(page.getByRole('button', { name: 'Stop sound' })).toBeVisible();
     await expect(page.getByText('old one')).toHaveCount(0);
     await page.getByRole('button', { name: 'Stop sound' }).click();
+    expect(s.blocked).toEqual([]);
+  });
+
+  test('not armed: an open market with an active trade alert shows a reminder that stays until Arm (confirmed) arms today', async ({ page, context }) => {
+    const s = newState();
+    s.alerts = [{
+      id: 't1', createdAt: 1, updatedAt: 1,
+      instrument: { kind: 'index', segment: 'IDX_I', securityId: '13', displayName: 'NIFTY', underlying: 'NIFTY', expiry: null, lot: 1 },
+      condition: 'crossDown', value: 25800, trigger: 'once', expiresAt: null, soundSec: 3, message: '',
+      action: { kind: 'trade', side: 'BUY', lots: 2, product: 'INTRADAY',
+        contract: { kind: 'option', segment: 'NSE_FNO', securityId: '47904', displayName: 'NIFTY 01 DEC 26100 CALL', underlying: 'NIFTY', expiry: '2026-12-01', lot: 65, strike: 26100, optType: 'CE' } },
+      status: 'active', firedCount: 0, lastFiredAt: null, lastFiredPrice: null,
+    }];
+    // Thursday 2026-11-26 10:00 IST: NSE open
+    await page.clock.setFixedTime(new Date('2026-11-26T04:30:00Z'));
+    await signIn(context);
+    await mockApi(page, s);
+    await page.goto('/movers-plus', { waitUntil: 'domcontentloaded' });
+
+    const reminder = page.getByText('Trade alerts NOT armed — NSE is open');
+    await expect(reminder).toBeVisible();
+    await expect(page.getByText('1 active trade alert will only notify')).toBeVisible();
+    await page.waitForTimeout(8000);
+    await expect(reminder).toBeVisible(); // not a 4 s toast: it stays
+
+    page.once('dialog', d => { expect(d.message()).toContain('Arm REAL orders for today?'); void d.accept(); });
+    await page.getByRole('button', { name: 'Arm', exact: true }).click();
+    await expect.poll(() => s.calls.filter(c => c.body?.action === 'arm').length).toBe(1);
+    await expect(reminder).toHaveCount(0);
+    expect(s.blocked).toEqual([]);
+  });
+
+  test('not armed reminder: never for notify-only alerts, never before the market opens', async ({ page, context }) => {
+    const s = newState();
+    const nifty = { kind: 'index', segment: 'IDX_I', securityId: '13', displayName: 'NIFTY', underlying: 'NIFTY', expiry: null, lot: 1 };
+    s.alerts = [{
+      id: 'n1', createdAt: 1, updatedAt: 1, instrument: nifty,
+      condition: 'crossDown', value: 25800, trigger: 'once', expiresAt: null, soundSec: 3, message: '', action: { kind: 'notify' },
+      status: 'active', firedCount: 0, lastFiredAt: null, lastFiredPrice: null,
+    }];
+    await page.clock.setFixedTime(new Date('2026-11-26T04:30:00Z'));   // 10:00 IST, NSE open
+    await signIn(context);
+    await mockApi(page, s);
+    await page.goto('/movers-plus', { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(4000);
+    await expect(page.getByText(/Trade alerts NOT armed/)).toHaveCount(0);
+
+    // a trade alert at 09:00 IST: NSE not open yet
+    s.alerts = [{ ...s.alerts[0], id: 't2', action: { kind: 'trade', side: 'BUY', lots: 1, product: 'INTRADAY',
+      contract: { kind: 'option', segment: 'NSE_FNO', securityId: '47904', displayName: 'NIFTY 01 DEC 26100 CALL', underlying: 'NIFTY', expiry: '2026-12-01', lot: 65 } } }];
+    await page.clock.setFixedTime(new Date('2026-11-26T03:30:00Z'));
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(4000);
+    await expect(page.getByText(/Trade alerts NOT armed/)).toHaveCount(0);
     expect(s.blocked).toEqual([]);
   });
 });

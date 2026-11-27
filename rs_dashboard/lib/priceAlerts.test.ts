@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   conditionMet, stepAlert, expiryReason, alertOrderQty, sessionOpen, tradeBlock, parseAlertInput, appendLog, alertCorrelationId,
-  sessionCloseMs, EVERY_COOLDOWN_MS, MAX_ALERT_LOTS, MAX_LOG, type PriceAlert, type AlertEvent, type AlertMemory,
+  sessionCloseMs, unarmedTradeMarkets, EVERY_COOLDOWN_MS, MAX_ALERT_LOTS, MAX_LOG, type PriceAlert, type AlertEvent, type AlertMemory,
 } from './priceAlerts.ts';
 
 // 2026-11-26 is a Thursday. IST = UTC + 5:30.
@@ -168,4 +168,19 @@ test('trade block: MIS refused from the intraday cutoff (NSE 15:17, MCX auto-exi
   assert.equal(tradeBlock(armed, mcx, ist(23, 0)), null);
   assert.match(String(tradeBlock(armed, mcx, ist(23, 40))), /23:40/);         // US winter: auto-exit 23:40
   assert.match(String(tradeBlock(armed, mcx, ist(23, 20), { mcx: 2315 })), /23:15/);
+});
+
+test('unarmed trade markets: open markets with an active trade alert that would be skipped only for want of arming', () => {
+  const nse = base();
+  const mcx = base({ id: 'mcx1', action: { kind: 'trade', side: 'SELL', lots: 1, product: 'INTRADAY',
+    contract: { kind: 'future', segment: 'MCX_COMM', securityId: '9', displayName: 'CRUDEOILM DEC FUT', underlying: 'CRUDEOILM', expiry: '2026-12-17', lot: 10 } } });
+  const notify = base({ id: 'n1', action: { kind: 'notify' } });
+  const at = (alerts: PriceAlert[], armedToday = false) => ({ alerts, armedToday });
+  assert.deepEqual(unarmedTradeMarkets(at([nse, mcx]), ist(10, 0)), ['NSE', 'MCX']);
+  assert.deepEqual(unarmedTradeMarkets(at([nse, mcx], true), ist(10, 0)), [], 'armed: nothing to remind');
+  assert.deepEqual(unarmedTradeMarkets(at([nse]), ist(9, 10)), [], 'NSE not open yet');
+  assert.deepEqual(unarmedTradeMarkets(at([nse, mcx]), ist(21, 0)), ['MCX'], 'evening: MCX only');
+  assert.deepEqual(unarmedTradeMarkets(at([notify]), ist(10, 0)), [], 'notify-only alerts never place orders');
+  assert.deepEqual(unarmedTradeMarkets(at([base({ status: 'paused' }), base({ status: 'triggered' })]), ist(10, 0)), []);
+  assert.deepEqual(unarmedTradeMarkets(at([nse]), ist(10, 0, '2026-12-02')), [], 'expired contract');
 });

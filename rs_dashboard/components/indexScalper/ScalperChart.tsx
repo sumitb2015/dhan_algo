@@ -128,6 +128,8 @@ interface Props {
   alertLines?: AlertLine[];
   /** Resolves true once the alert is saved at the new level (the chart shows that level until then, then the store's). */
   onMoveAlert?: (id: string, price: number) => Promise<boolean>;
+  /** Arms REAL alert orders for today (confirm first); shown on the chip of a trade alert that is not armed. */
+  onArmAlerts?: () => void;
   simBrackets?: Record<string, { tp?: number; sl?: number }>;
   onSetBracket?: (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }) => void;
   onCancelBracket?: (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => void;
@@ -206,7 +208,8 @@ function seriesData(s: OutSeries, bars: Bar[]) {
   });
 }
 
-export interface AlertLine { id: string; price: number; title: string; paused: boolean }
+/** `unarmed`: an active trade alert on a day REAL alert orders are not armed: it would only notify and skip its order. */
+export interface AlertLine { id: string; price: number; title: string; paused: boolean; unarmed?: boolean }
 const NO_ALERT_LINES: AlertLine[] = [];
 const ALERT_COLOR = '#f59e0b';
 
@@ -214,7 +217,7 @@ function ScalperChart(props: Props) {
   const {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, showGrid = true, candleColorRule = 'off', showVolume = true, volumeMaLen = 20, legs, entrySpots,
     onExitLeg, onAdjustLeg, adjustLots = 1, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
-    contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, ordersEnabled = true, onPlaceLimitOrder, onOpenTicket, onAlert, alertLines = NO_ALERT_LINES, onMoveAlert,
+    contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, ordersEnabled = true, onPlaceLimitOrder, onOpenTicket, onAlert, alertLines = NO_ALERT_LINES, onMoveAlert, onArmAlerts,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, trails, onSetTrail, onCancelTrail, underlying = 'NIFTY', feedLotSize, lotSizes, orderQtyMult = 1,
     premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, resetSeq = 0, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false, premiumOrders,
   } = props;
@@ -1082,7 +1085,7 @@ function ScalperChart(props: Props) {
       if (alertDrag?.id === a.id) continue;          // the drag owns this line's price until release
       const opts = {
         price: alertShown(a), color: a.paused ? chrome.textMuted : ALERT_COLOR, lineWidth: 1 as const,
-        lineStyle: a.paused ? LineStyle.Dotted : LineStyle.Dashed, axisLabelVisible: true, title: `🔔 ${a.title}${a.paused ? ' (paused)' : ''}`,
+        lineStyle: a.paused ? LineStyle.Dotted : LineStyle.Dashed, axisLabelVisible: true, title: `🔔 ${a.title}${a.paused ? ' (paused)' : a.unarmed ? ' · NOT ARMED' : ''}`,
       };
       const ex = lines.get(a.id);
       if (ex) ex.applyOptions(opts); else lines.set(a.id, candles.createPriceLine(opts));
@@ -1603,6 +1606,20 @@ function ScalperChart(props: Props) {
               onMoveAlert && (dragging ? 'cursor-grabbing ring-1 ring-amber-400' : 'cursor-ns-resize'))}>
             <Bell className="w-3 h-3" />
             <span className="font-semibold">{fmt(dragging ? alertDragPriceRef.current : alertShown(a))}</span>
+            {a.unarmed && (
+              <>
+                <span data-testid="alert-not-armed" className="font-sans font-bold text-red-400"
+                  title="REAL alert orders are not armed today: this alert will only notify, its order is skipped">NOT ARMED</span>
+                {onArmAlerts && (
+                  <button type="button" aria-label="Arm REAL alert orders for today"
+                    onMouseDown={e => e.stopPropagation()}
+                    onClick={e => { e.stopPropagation(); onArmAlerts(); }}
+                    className="h-[16px] px-1 rounded bg-red-600 text-oncolor font-sans text-[10px] font-bold cursor-pointer hover:bg-red-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60">
+                    Arm
+                  </button>
+                )}
+              </>
+            )}
           </div>
         );
       })}

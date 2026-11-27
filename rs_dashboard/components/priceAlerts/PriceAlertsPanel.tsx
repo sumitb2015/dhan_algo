@@ -6,7 +6,7 @@ import { AlarmClock, Pause, Pencil, Play, Plus, ShieldAlert, Trash2, X } from 'l
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { cn } from '@/lib/utils';
 import { CONDITIONS, MAX_SOUND_SEC, alertLabel, tradeLine, type AlertEvent, type PriceAlert } from '@/lib/priceAlerts';
-import { postAlertAction, priceAlertsStore, usePriceAlertsUi } from '@/lib/priceAlertsUi';
+import { ARM_CONFIRM, postAlertAction, priceAlertsStore, usePriceAlertsUi } from '@/lib/priceAlertsUi';
 
 // The header's Price Alerts window: the alert list (edit / pause / resume / delete), the fired-alert log, the daily
 // "REAL orders armed" switch and the default alarm length. Creating and editing open AlertDialog.
@@ -127,7 +127,7 @@ export default function PriceAlertsPanel({ open, onClose }: { open: boolean; onC
 
   const toggleArm = () => {
     if (view?.armedToday) { void act({ action: 'disarm' }, 'Alert orders disarmed'); return; }
-    if (!window.confirm('Arm REAL orders for today?\n\nTrade alerts will place real Dhan MARKET orders when they fire, until midnight IST.')) return;
+    if (!window.confirm(ARM_CONFIRM)) return;
     void act({ action: 'arm' }, 'Alert orders armed for today');
   };
 

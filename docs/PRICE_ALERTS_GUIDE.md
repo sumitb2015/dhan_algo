@@ -28,6 +28,17 @@ The first price the server sees for an alert is only a baseline. A crossing neve
   - the contract has not expired.
 
   When any of these fails, the alert still notifies, and the log shows *order skipped* with the reason.
+- **The arm is separate from every terminal's SIM / REAL switch.** Switching the Index Scalper (or any page) to REAL
+  does not arm alert orders, and an alert carries no SIM / REAL mode of its own: only the panel's daily arm counts, at
+  the moment the alert fires. Two warnings keep this from costing a trade:
+  - **NOT ARMED on the chart:** on the Index Scalper, an active order alert's chip shows *NOT ARMED* and an **Arm**
+    button while today is not armed (the line's label ends in "· NOT ARMED").
+  - **Market-open reminder:** when NSE or MCX is open (or a page loads in session) and an active, unexpired order alert
+    on that market would be skipped only for want of arming, every tab shows a toast that stays until you arm or close
+    it, with an **Arm** button, and the leader tab plays the warning chime (after your first click on the page). Once
+    per market per day per tab.
+
+  Every Arm asks the same confirm as the panel's switch.
 - The alert is marked as firing on disk **before** the order is sent. An order whose outcome is unknown is recorded as `unknown` and **never resent**; check the order book. Orders are tagged with correlation id prefix `pa` and capped at 10 lots (`lib/dhanSourceCaps.ts`).
 - Editing or restarting a fired order alert re-arms it, so it will place a **new** order the next time it fires.
 

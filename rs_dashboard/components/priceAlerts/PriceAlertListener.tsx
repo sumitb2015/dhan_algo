@@ -4,9 +4,10 @@ import { useEffect, useRef } from 'react';
 import { usePathname } from 'next/navigation';
 import { toast } from 'sonner';
 import { alertSoundReady, installAlertSoundUnlock, playAlarm, playWarnChime } from '@/lib/alertSound';
+import { istDateIso } from '@/lib/nseHolidays';
 import { useTabLeader } from '@/hooks/useTabLeader';
-import { priceAlertsStore, usePriceAlertsUi } from '@/lib/priceAlertsUi';
-import type { AlertEvent, AlertsView } from '@/lib/priceAlerts';
+import { armAlertOrders, priceAlertsStore, usePriceAlertsUi } from '@/lib/priceAlertsUi';
+import { unarmedTradeMarkets, type AlertEvent, type AlertsView } from '@/lib/priceAlerts';
 import PriceAlertsPanel from './PriceAlertsPanel';
 import AlertDialog from './AlertDialog';
 
@@ -15,10 +16,16 @@ import AlertDialog from './AlertDialog';
 //     polling (one stream per browser);
 //   • on a newly fired event: a toast in every tab, and the alarm (N seconds) in the ONE leader tab, which also tells the
 //     server it is listening (?leader=1) so the server does not play it on the speakers as well;
+//   • reminds when a market opens (or the page loads in session) with active trade alerts while REAL alert orders are
+//     not armed: a toast that stays until armed or closed, with an Arm button, in every tab; the warn chime in the leader.
+//     Once per market per IST day per tab. Forgetting to arm skipped real trades (2026-11-27);
 //   • renders the header's panel and the create / edit dialog.
 // Events already in the log when the page loads are marked seen: an old alert never rings again on reload.
 
 const POLL_MS = 5000;
+/** How often the reminder re-checks the clock: a market opens with no new alerts event. */
+const REMIND_CHECK_MS = 15_000;
+const REMIND_TOAST_ID = 'pa-arm-reminder';
 
 const fmt = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
@@ -119,6 +126,40 @@ export default function PriceAlertListener() {
       close(); stopPoll();
     };
   }, [onLogin, isLeader, leaderRef]);
+
+  // Not-armed reminder (see the header comment). Every tab toasts; only the leader chimes, so two tabs do not double-ring.
+  const reminded = useRef<Set<string>>(new Set());
+  const view = ui.view;
+  useEffect(() => {
+    if (onLogin || !view) return;
+    const check = () => {
+      const now = Date.now();
+      const markets = unarmedTradeMarkets(view, now);
+      if (markets.length === 0) { toast.dismiss(REMIND_TOAST_ID); return; }
+      const today = istDateIso(now);
+      const fresh = markets.filter(m => !reminded.current.has(`${today}:${m}`));
+      if (fresh.length === 0) return;
+      for (const m of fresh) reminded.current.add(`${today}:${m}`);
+      const n = view.alerts.filter(a => a.status === 'active' && a.action.kind === 'trade').length;
+      toast.warning(`Trade alerts NOT armed — ${markets.join(' + ')} is open`, {
+        id: REMIND_TOAST_ID,
+        description: `${n} active trade alert${n === 1 ? '' : 's'} will only notify and skip the order until you arm REAL alert orders for today.`,
+        duration: Infinity,
+        closeButton: true,
+        action: {
+          label: 'Arm',
+          onClick: () => {
+            armAlertOrders().then(ok => { if (ok) toast.success('Alert orders armed for today'); },
+              (e: Error) => toast.error(`Not armed: ${e.message}`));
+          },
+        },
+      });
+      if (leaderRef.current) playWarnChime();
+    };
+    check();
+    const t = setInterval(check, REMIND_CHECK_MS);
+    return () => clearInterval(t);
+  }, [onLogin, view, leaderRef]);
 
   if (onLogin) return null;
   return (

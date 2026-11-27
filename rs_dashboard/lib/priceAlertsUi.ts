@@ -69,3 +69,14 @@ export async function postAlertAction(body: Record<string, unknown>): Promise<Al
   priceAlertsStore.setView(j.data as AlertsView);
   return j.data as AlertsView;
 }
+
+export const ARM_CONFIRM = 'Arm REAL orders for today?\n\nTrade alerts will place real Dhan MARKET orders when they fire, until midnight IST.';
+
+/** Arm REAL alert orders for today after the same confirm the panel asks; the one arm path for the panel, the chart's
+ *  "not armed" chips and the market-open reminder. Resolves true once armed; a refused confirm or a server error is false
+ *  (the error is thrown to the caller's toast as `Error`). */
+export async function armAlertOrders(): Promise<boolean> {
+  if (!window.confirm(ARM_CONFIRM)) return false;
+  await postAlertAction({ action: 'arm' });
+  return true;
+}

@@ -1326,6 +1326,7 @@ test.describe('Index Scalper layout + option charts', () => {
     const chip = pane.getByTestId('alert-chip');
     await expect(chip).toBeVisible();
     await expect(chip).toContainText(String(SPOT + 20).replace(/(\d)(\d{3})$/, '$1,$2'));
+    await expect(chip.getByTestId('alert-not-armed')).toHaveCount(0); // a notify alert places no order: nothing to arm
     await dragFrom(page, chip, 60);
     await expect.poll(() => moves.length).toBe(1);
     expect(moves[0]).toMatchObject({ action: 'move', id: 'al1' });
@@ -1351,6 +1352,48 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+
+  test('Price Alerts: a trade alert on a day REAL alert orders are not armed says NOT ARMED on its chip; Arm arms today', async ({ page, context }) => {
+    const state = newState();
+    const posts: Record<string, unknown>[] = [];
+    let armed = false;
+    await signIn(context);
+    await mockApi(page, state);
+    const alert = {
+      id: 'al2', createdAt: 1, updatedAt: 1,
+      instrument: { kind: 'index', segment: 'IDX_I', securityId: '13', displayName: 'NIFTY', underlying: 'NIFTY', expiry: null, lot: 1 },
+      condition: 'crossDown', value: SPOT - 20, trigger: 'once', expiresAt: null, soundSec: 3, message: '',
+      action: { kind: 'trade', side: 'BUY', lots: 2, product: 'INTRADAY',
+        contract: { kind: 'option', segment: 'NSE_FNO', securityId: '47904', displayName: 'NIFTY 01 DEC 26100 CALL', underlying: 'NIFTY', expiry: '2099-12-01', lot: 65, strike: 26100, optType: 'CE' } },
+      status: 'active', firedCount: 0, lastFiredAt: null, lastFiredPrice: null,
+    };
+    const alertView = () => ({ success: true, data: { alerts: [alert], armedToday: armed, defaultSoundSec: 3, version: 1 + posts.length, log: [] } });
+    await page.route('**/api/price-alerts**', async (route: Route) => {
+      const req = route.request();
+      const p = new URL(req.url()).pathname;
+      if (p === '/api/price-alerts/stream') return route.fulfill({ status: 200, contentType: 'text/event-stream', body: `data: ${JSON.stringify(alertView())}\n\n` });
+      if (req.method() === 'POST') { const b = req.postDataJSON() as Record<string, unknown>; posts.push(b); if (b.action === 'arm') armed = true; }
+      return json(route, alertView());
+    });
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    const pane = page.getByTestId('chart-pane-0');
+    await expect(pane.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    const chip = pane.getByTestId('alert-chip');
+    await expect(chip.getByTestId('alert-not-armed')).toBeVisible();
+
+    // a cancelled confirm sends nothing
+    page.once('dialog', d => void d.dismiss());
+    await chip.getByRole('button', { name: 'Arm REAL alert orders for today' }).click();
+    await page.waitForTimeout(300);
+    expect(posts).toEqual([]);
+
+    page.once('dialog', d => void d.accept());
+    await chip.getByRole('button', { name: 'Arm REAL alert orders for today' }).click();
+    await expect.poll(() => posts.filter(b => b.action === 'arm').length).toBe(1);
+    expect(posts.filter(b => b.action === 'move')).toEqual([]); // pressing Arm is not a drag of the alert
+    await expect(chip.getByTestId('alert-not-armed')).toHaveCount(0);
+    expect(state.blocked).toEqual([]);
+  });
   test('2-chart layout: right pane plots the ATM CE premium, picks a PE and its own timeframe, survives a reload', async ({ page, context }) => {
     const state = newState();
     await signIn(context);

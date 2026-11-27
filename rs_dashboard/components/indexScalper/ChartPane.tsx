@@ -25,7 +25,7 @@ import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { INSTRUMENTS, isMcx, type Underlying } from '@/lib/indexScalperInstrument';
 import { toIsoDate } from '@/components/DataChip';
 import { cn } from '@/lib/utils';
-import { alertsFor, postAlertAction, priceAlertsStore, usePriceAlertsView } from '@/lib/priceAlertsUi';
+import { alertsFor, armAlertOrders, postAlertAction, priceAlertsStore, usePriceAlertsView } from '@/lib/priceAlertsUi';
 import { CONDITIONS, type InstrumentSpec } from '@/lib/priceAlerts';
 import { toast } from 'sonner';
 import type { TrailState } from '@/lib/indexScalperTrail';
@@ -175,11 +175,17 @@ function ChartPane(p: Props) {
   const alertsView = usePriceAlertsView();
   const alertLines = useMemo(() => {
     if (!alertTarget?.securityId) return [];
+    const armed = !!alertsView?.armedToday;
     return alertsFor(alertsView, alertTarget.segment, alertTarget.securityId).map(a => ({
       id: a.id, price: a.value, paused: a.status === 'paused',
+      unarmed: a.action.kind === 'trade' && a.status === 'active' && !armed,
       title: `${CONDITIONS[a.condition]}${a.action.kind === 'trade' ? ` · ${a.action.side} ${a.action.lots}L` : ''}`,
     }));
   }, [alertsView, alertTarget]);
+  const armAlerts = useCallback(() => {
+    armAlertOrders().then(ok => { if (ok) toast.success('Alert orders armed for today'); },
+      (e: Error) => toast.error(`Not armed: ${e.message}`));
+  }, []);
   const { onAlert } = p;
   const addAlert = useCallback((sym: string, price: number) => {
     if (!alertTarget) { onAlert(sym, price); return; }
@@ -308,6 +314,7 @@ function ChartPane(p: Props) {
           onAlert={addAlert}
           alertLines={alertLines}
           onMoveAlert={moveAlert}
+          onArmAlerts={armAlerts}
           simBrackets={p.simBrackets}
           onSetBracket={p.onSetBracket}
           onCancelBracket={p.onCancelBracket}

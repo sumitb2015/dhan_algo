@@ -220,6 +220,26 @@ export function tradeBlock(state: Pick<AlertsState, 'armedOn'>, a: PriceAlert, n
   return null;
 }
 
+export type AlertMarket = 'NSE' | 'MCX';
+
+/**
+ * The markets (NSE / MCX) that are open now and hold an ACTIVE, unexpired trade alert whose order would be skipped only
+ * because REAL orders are not armed today. Empty when armed, or when no such alert exists. Drives the "not armed"
+ * reminder (PriceAlertListener): forgetting to arm skipped real trades (2026-11-27, NIFTY 25,800 crossDown BUY 2L).
+ */
+export function unarmedTradeMarkets(view: Pick<AlertsView, 'alerts' | 'armedToday'>, now: number): AlertMarket[] {
+  if (view.armedToday) return [];
+  const today = istDateIso(now);
+  const out = new Set<AlertMarket>();
+  for (const a of view.alerts) {
+    if (a.status !== 'active' || a.action.kind !== 'trade') continue;
+    const c = a.action.contract;
+    if (c.expiry && c.expiry < today) continue;
+    if (sessionOpen(c.segment, now)) out.add(c.segment === 'MCX_COMM' ? 'MCX' : 'NSE');
+  }
+  return (['NSE', 'MCX'] as const).filter(m => out.has(m));
+}
+
 export const tradeLine = (a: AlertAction): string | undefined =>
   a.kind === 'trade' ? `${a.side} ${a.lots} lot${a.lots === 1 ? '' : 's'} ${a.contract.displayName} (${a.product === 'MARGIN' ? 'NRML' : 'MIS'})` : undefined;
 
