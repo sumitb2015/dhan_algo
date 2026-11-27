@@ -276,6 +276,27 @@ export default function EquityCandlestickChart({ initialSymbol }: { initialSymbo
           </span>
         )}
 
+        {data?.preHistory?.status === 'stitched' && data.preHistory.until && (
+          <span
+            data-testid="pre-history-chip"
+            title={`Candles before ${data.preHistory.until} are Yahoo Finance daily data (split-adjusted, not dividend-adjusted), rescaled onto this chart's prices${data.preHistory.note ? ` (${data.preHistory.note})` : ''}. From ${data.preHistory.until} on: the dashboard's daily CSV.`}
+            className="text-[10px] font-semibold bg-sky-500/10 border border-sky-500/30 rounded px-2 py-0.5 text-sky-300 hidden md:inline tabular-nums"
+          >
+            PRE-{data.preHistory.until.slice(0, 4)}: YAHOO from {data.preHistory.from?.slice(0, 4)}
+          </span>
+        )}
+        {(data?.preHistory?.status === 'refused' || data?.preHistory?.status === 'unavailable') && (
+          <span
+            data-testid="pre-history-chip"
+            title={data.preHistory.status === 'refused'
+              ? `Older Yahoo history exists but was not joined: its prices do not line up with this chart's (${data.preHistory.note ?? 'unsteady ratio'}).`
+              : 'No older history could be fetched from Yahoo for this stock (or the fetch failed; it is retried after 6 hours).'}
+            className="text-[10px] font-semibold bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-zinc-400 hidden md:inline"
+          >
+            {data.preHistory.status === 'refused' ? 'NO OLDER HISTORY: PRICES DIFFER' : 'NO OLDER HISTORY'}
+          </span>
+        )}
+
         {lastFetched && (
           <span className="text-[10px] text-zinc-400 hidden md:inline tabular-nums">
             {lastFetched.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST

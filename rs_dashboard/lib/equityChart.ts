@@ -129,3 +129,59 @@ export function fmtVolume(v: number): string {
   if (v >= 1e5) return `${(v / 1e5).toFixed(2)} L`;
   return Math.round(v).toLocaleString('en-IN');
 }
+
+// ─── Pre-2019 history (Yahoo, rebased) ─────────────────────────────────────────────────────────────────────────────
+// TypeScript twin of scripts/tools/price_pnf_candles.py `rebase_yahoo` (the P&F page's stitch): the same overlap,
+// ratio-steadiness and range rules, so both pages refuse or accept the same symbols.
+
+/** Rows of a cached Yahoo daily CSV (Datetime,Open,High,Low,Close,Volume), ascending, Close > 0. */
+export function parseYahooCsv(content: string): CandleRow[] {
+  const lines = content.trim().split(/\r?\n/);
+  const head = (lines.shift() ?? '').split(',');
+  const col = (n: string) => head.indexOf(n);
+  const [d, o, h, l, c, v] = ['Datetime', 'Open', 'High', 'Low', 'Close', 'Volume'].map(col);
+  if (d < 0 || c < 0) return [];
+  const out: CandleRow[] = [];
+  for (const line of lines) {
+    const f = line.split(',');
+    const close = Number(f[c]);
+    const date = (f[d] ?? '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !(close > 0)) continue;
+    const num = (i: number, fb: number) => { const x = Number(f[i]); return i >= 0 && Number.isFinite(x) && x > 0 ? x : fb; };
+    out.push({ date, open: num(o, close), high: num(h, close), low: num(l, close), close, volume: v >= 0 ? Number(f[v]) || 0 : 0 });
+  }
+  return out.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function median(xs: number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+export type RebaseResult = { rows: CandleRow[]; factor: number } | { rows: []; refused: string };
+
+/** Yahoo rows dated before the CSV's first row, scaled onto the CSV's price basis by the median CSV / Yahoo close over
+ *  the first 60 dates both have. Refused when fewer than 5 overlap, the factor is outside 0.2-5, or the ratio moves by
+ *  more than 5 % across the overlap: two price bases are never joined on a guess. Volume is left as Yahoo's. */
+export function rebaseYahoo(yahoo: CandleRow[], csv: CandleRow[]): RebaseResult {
+  if (yahoo.length === 0 || csv.length === 0) return { rows: [], refused: 'no data' };
+  const yClose = new Map(yahoo.map(r => [r.date, r.close]));
+  const ratios: number[] = [];
+  for (const r of csv) {
+    const y = yClose.get(r.date);
+    if (y === undefined) continue;
+    const q = r.close / y;
+    if (Number.isFinite(q)) ratios.push(q);
+    if (ratios.length >= 60) break;
+  }
+  if (ratios.length < 5) return { rows: [], refused: 'too little overlap' };
+  const k = median(ratios);
+  if (!(k > 0.2 && k < 5)) return { rows: [], refused: `price basis factor ${k.toFixed(2)}` };
+  if (Math.max(...ratios) / Math.min(...ratios) > 1.05) return { rows: [], refused: 'price bases disagree' };
+  const first = csv[0].date;
+  const rows = yahoo.filter(r => r.date < first).map(r => ({
+    date: r.date, open: r.open * k, high: r.high * k, low: r.low * k, close: r.close * k, volume: r.volume,
+  }));
+  return { rows, factor: k };
+}

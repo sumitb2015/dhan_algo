@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  EQUITY_INDICATOR_KINDS, barsForPeriod, defaultEquityIndicators, legendAt, parseSavedIndicators, resample, toBars, week52,
+  EQUITY_INDICATOR_KINDS, barsForPeriod, parseYahooCsv, rebaseYahoo, defaultEquityIndicators, legendAt, parseSavedIndicators, resample, toBars, week52,
   type CandleRow,
 } from './equityChart.ts';
 
@@ -67,4 +67,32 @@ test('52-week high / low covers the last 365 days only', () => {
   const s = week52([R('2025-11-01', 1, 999, 1, 1), R('2026-01-05', 1, 50, 20, 30), R('2026-11-27', 1, 40, 10, 30)]);
   assert.deepEqual(s, { high: 50, low: 10, highDate: '2026-01-05', lowDate: '2026-11-27' });
   assert.equal(week52([]), null);
+});
+
+const days = (n: number, from = '2019-01-01') => Array.from({ length: n }, (_, i) => {
+  const d = new Date(`${from}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + i); return d.toISOString().slice(0, 10);
+});
+
+test('parseYahooCsv: reads the cache format, skips bad rows, sorts', () => {
+  const rows = parseYahooCsv('Datetime,Open,High,Low,Close,Volume\n2008-01-02,2,3,1,2.5,10\n2008-01-01,1,2,0.5,1.5,5\nbad,1,1,1,1,1\n2008-01-03,1,1,1,0,1\n');
+  assert.deepEqual(rows.map(r => r.date), ['2008-01-01', '2008-01-02']);
+  assert.equal(rows[1].close, 2.5);
+});
+
+test('rebaseYahoo: keeps only rows before the CSV and scales OHLC by the median overlap ratio', () => {
+  const pre = days(3, '2018-12-29').map(d => R(d, 10, 12, 9, 11, 7));
+  const overlap = days(10).map(d => R(d, 10, 10, 10, 10));
+  const csv = days(10).map(d => R(d, 20, 20, 20, 20)); // CSV basis = 2x Yahoo (e.g. Yahoo adjusted for a later 1:2 split)
+  const r = rebaseYahoo([...pre, ...overlap], csv);
+  assert.ok('factor' in r && r.factor === 2);
+  assert.deepEqual(r.rows.map(x => [x.date, x.open, x.close, x.volume]), [['2018-12-29', 20, 22, 7], ['2018-12-30', 20, 22, 7], ['2018-12-31', 20, 22, 7]]);
+});
+
+test('rebaseYahoo refuses unsteady, out-of-range or thin overlaps', () => {
+  const csv = days(10).map(d => R(d, 20, 20, 20, 20));
+  const jumpy = days(10).map((d, i) => R(d, 10, 10, 10, i < 5 ? 10 : 11)); // ratio 2.0 then 1.82: >5 % apart
+  assert.ok('refused' in rebaseYahoo(jumpy, csv));
+  assert.ok('refused' in rebaseYahoo(days(10).map(d => R(d, 1, 1, 1, 1)), csv)); // factor 20: a different basis
+  assert.ok('refused' in rebaseYahoo(days(4).map(d => R(d, 10, 10, 10, 10)), csv)); // 4 overlapping days
+  assert.ok('refused' in rebaseYahoo([], csv));
 });

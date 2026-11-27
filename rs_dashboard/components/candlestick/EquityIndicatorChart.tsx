@@ -83,7 +83,9 @@ function EquityIndicatorChart({ bars, indicators, initialBars, viewToken, logSca
       grid: { vertLines: { color: chrome.gridline }, horzLines: { color: chrome.gridline } },
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: chrome.baseline },
-      timeScale: { borderColor: chrome.baseline, timeVisible: false, rightOffset: 6 },
+      // minBarSpacing below the 0.5 px default: ALL on daily bars from 2008 is ~4,700 candles, which at 0.5 px needs
+      // ~2,350 px, so fitContent() stopped around 2020 and the older years could only be reached by scrolling.
+      timeScale: { borderColor: chrome.baseline, timeVisible: false, rightOffset: 6, minBarSpacing: 0.05 },
       autoSize: true,
     });
     const candles = chart.addSeries(CandlestickSeries, {
