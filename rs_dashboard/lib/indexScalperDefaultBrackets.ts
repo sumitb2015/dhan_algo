@@ -12,7 +12,9 @@ export const DEFAULT_BRACKETS_KEY = 'indexScalper.defaultBrackets.v1';
 export const DEFAULT_BRACKETS: DefaultBracketSettings = { on: true, tpPct: 30, slPct: 20 };
 /** Choices offered in the settings (a select, never a free-typed box: dhan-commit-on-blur). */
 export const TP_PCT_OPTIONS = [5, 10, 15, 20, 25, 30, 40, 50, 75, 100] as const;
-export const SL_PCT_OPTIONS = [5, 10, 15, 20, 25, 30, 40, 50] as const;
+// Up to 100 % (owner's request 2026-11-27). A sell's 100 % stop is 2x entry; a buy's would be a premium of 0, which
+// parseBracketInput refuses, so that buy gets no stop and the skip is reported.
+export const SL_PCT_OPTIONS = [5, 10, 15, 20, 25, 30, 40, 50, 60, 75, 90, 100] as const;
 /** A pending default waits this long for its leg to show in the book (a market fill shows within a few polls). */
 export const PENDING_TTL_MS = 30_000;
 

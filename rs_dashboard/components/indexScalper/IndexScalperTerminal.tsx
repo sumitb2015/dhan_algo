@@ -2616,6 +2616,7 @@ function DefaultBracketsMenu({ settings, onPatch, onClose }: {
         A new option position opened here at market gets these levels from its entry premium once it shows in the book:
         a buy&apos;s target above entry and stop below, a sell&apos;s the other way. REAL places a Limit target and an SL-M stop;
         SIM sets paper levels. Not for futures, added lots or limit entries; a position that already has a target / stop keeps it.
+        A 100% stop is 2x entry on a sell; on a buy it would be 0, so a buy gets no stop.
       </p>
     </div>
   );

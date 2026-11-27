@@ -88,3 +88,13 @@ test('opensPosition: from flat or through zero only; adding or reducing is not a
   assert.equal(opensPosition(130, false, 195), true);  // flips to short
   assert.equal(opensPosition(-65, true, 130), true);
 });
+
+test('stop loss can be set up to 100 %: a sell\'s stop at 2x entry, a buy gets none (a premium of 0)', () => {
+  assert.equal(clampDefaultBrackets({ slPct: 100 }).slPct, 100);
+  assert.equal(clampDefaultBrackets({ slPct: 75 }).slPct, 75);
+  const short = defaultBracketPlan(pend(false, { slPct: 100 }), { netQty: -65, avg: 100, ltp: 100 }, none, 0.05, 2000);
+  assert.deepEqual(short, { kind: 'place', tp: 70, sl: 200, skipped: [] });
+  const long = defaultBracketPlan(pend(true, { slPct: 100 }), { netQty: 65, avg: 100, ltp: 100 }, none, 0.05, 2000);
+  assert.equal(long.kind, 'place');
+  if (long.kind === 'place') { assert.equal(long.tp, 130); assert.equal(long.sl, null); assert.equal(long.skipped.length, 1); }
+});
