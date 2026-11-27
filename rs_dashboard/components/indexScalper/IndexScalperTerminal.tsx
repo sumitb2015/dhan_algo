@@ -48,7 +48,7 @@ import dynamic from 'next/dynamic';
 const CumulativeOIModal = dynamic(() => import('@/components/CumulativeOIModal'), { ssr: false });
 import { useIndexScalperFeed } from './useIndexScalperFeed';
 import {
-  migrateIndicatorsV1, newIndicator, withVolume, type IndicatorInstance, type IndicatorKind,
+  migrateIndicatorsV1, newIndicator, withStructure, withVolume, type IndicatorInstance, type IndicatorKind,
 } from '@/lib/indexScalperIndicators';
 import { istDateIso, isRegularSession } from '@/lib/nseHolidays';
 import {
@@ -83,6 +83,9 @@ const GRID_KEY = 'indexScalper.grid';
 // The old scale-bar volume switch (read once, to add the Volume indicator hidden for a viewer who had turned it off).
 const VOL_KEY = 'indexScalper.volume';
 const VOL_ADDED_KEY = 'indexScalper.volumeIndicatorAdded';
+/** The chart's Market structure labels, added once (2026-11-27) to a list saved before, when the strip's Market structure
+ *  switch is on: the switch shows / hides them. Once only, so removing the indicator from the Indicators menu sticks. */
+const STRUCTURE_ADDED_KEY = 'indexScalper.structureIndicatorAdded';
 const DAY_HL_ADDED_KEY = 'indexScalper.dayLevelsIndicatorAdded';
 /** Dhan tag for this page's CLOSING orders: no per-order cap (none is listed for it), still an 'isx…' order. */
 const CLOSE_SOURCE = 'isxx';
@@ -327,6 +330,16 @@ export default function IndexScalperTerminal() {
     // Day High / Low (PDH, PDL, DH, DL) added 2026-11-26: switched on once for a saved list, so removing it sticks.
     if (Array.isArray(saved) && readPref(DAY_HL_ADDED_KEY) !== '1' && !saved.some(i => i.kind === 'daylevels')) saved = [...saved, newIndicator('daylevels', nextId())];
     savePref(DAY_HL_ADDED_KEY, '1');
+    const trendSet = clampTrendSettings(loadJson<unknown>(TREND_SETTINGS_KEY, null));
+    if (readPref(STRUCTURE_ADDED_KEY) !== '1') {
+      if (trendSet.structure) {
+        saved = withStructure(Array.isArray(saved) ? saved : defaultIndicators(), true, nextId());
+        // Saved with the flag, in one step: this effect can run twice (React dev Strict Mode), and a second run that
+        // found the flag but the old list would drop the indicator again.
+        savePref(IND_KEY, JSON.stringify(saved));
+      }
+      savePref(STRUCTURE_ADDED_KEY, '1');
+    }
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setIndicators(Array.isArray(saved) ? saved : defaultIndicators());
     setIndReady(true);
@@ -346,7 +359,7 @@ export default function IndexScalperTerminal() {
     }
     if (readPref(OI_KEY) === '0') setShowOi(false);
     if (readPref(TREND_KEY) === '0') setShowTrend(false);
-    setTrendSettingsState(clampTrendSettings(loadJson<unknown>(TREND_SETTINGS_KEY, null)));
+    setTrendSettingsState(trendSet);
     if (readPref(GRID_KEY) === '0') setShowGridState(false);
     setCandleColorRuleState(parseCandleColorRule(readPref(CANDLE_COLOR_KEY)));
     setOiModeState(parseOiMode(readPref(OI_MODE_KEY)));
@@ -357,11 +370,18 @@ export default function IndexScalperTerminal() {
   }, []);
   const setOi = (on: boolean) => { setShowOi(on); savePref(OI_KEY, on ? '1' : '0'); };
   const setTrend = (on: boolean) => { setShowTrend(on); savePref(TREND_KEY, on ? '1' : '0'); };
-  const patchTrendSettings = (patch: Partial<TrendSettings>) => setTrendSettingsState(prev => {
-    const next = clampTrendSettings({ ...prev, ...patch });
-    savePref(TREND_SETTINGS_KEY, JSON.stringify(next));
-    return next;
-  });
+  const patchTrendSettings = (patch: Partial<TrendSettings>) => {
+    setTrendSettingsState(prev => {
+      const next = clampTrendSettings({ ...prev, ...patch });
+      savePref(TREND_SETTINGS_KEY, JSON.stringify(next));
+      return next;
+    });
+    // One switch for the strip's Structure light AND the chart's HH / HL / LH / LL, BOS / CHoCH labels.
+    if (patch.structure !== undefined) {
+      const on = patch.structure;
+      setIndicators(p => withStructure(p, on, nextId()));
+    }
+  };
   // Trend candles: cycles through CANDLE_COLOR_RULES (Off -> EMA 9 & 20 -> ...), remembered.
   const cycleCandleColor = () => {
     const i = CANDLE_COLOR_RULES.findIndex(r => r.id === candleColorRule);
@@ -2633,13 +2653,13 @@ function TrendSettingsMenu({ settings, onPatch, onClose }: {
         <span>Futures OI buildup</span>
         <Switch size="sm" checked={settings.oiBuildup} onCheckedChange={v => onPatch({ oiBuildup: v })} aria-label="Futures OI buildup" />
       </label>
-      <label className={row} title="Direction of the last break of structure (BOS / CHoCH) from swing highs and lows">
+      <label className={row} title="The strip's Structure light (direction of the last BOS / CHoCH) and the chart's HH / HL / LH / LL labels with BOS / CHoCH arrows">
         <span>Market structure</span>
         <Switch size="sm" checked={settings.structure} onCheckedChange={v => onPatch({ structure: v })} aria-label="Market structure" />
       </label>
       <p className="text-[10px] leading-snug text-zinc-500">
         Both are extra lights, never part of the bias. Turning OI buildup off also stops its candle request.
-        For HH / HL / LH / LL and BOS / CHoCH labels on the chart, add <span className="text-zinc-300">Market structure</span> from Indicators.
+        Market structure also shows / hides the HH / HL / LH / LL and BOS / CHoCH labels on the chart (swing length: Indicators → Market structure).
       </p>
     </div>
   );

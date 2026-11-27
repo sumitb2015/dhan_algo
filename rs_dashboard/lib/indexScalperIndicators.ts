@@ -151,6 +151,16 @@ export function withVolume(list: IndicatorInstance[], id: string, visible = true
   return [...list, { ...newIndicator('volume', id), visible }];
 }
 
+/** The chart's Market structure labels, driven by the trend strip's "Market structure" switch (one switch for the strip
+ *  light AND the chart labels). On: un-hide the structure indicator(s), or add one when there is none. Off: hide them,
+ *  keeping their swing length. Returns the same list when nothing changes. */
+export function withStructure(list: IndicatorInstance[], on: boolean, id: string): IndicatorInstance[] {
+  const has = list.some(i => i.kind === 'structure');
+  if (on && !has) return [...list, newIndicator('structure', id)];
+  if (!list.some(i => i.kind === 'structure' && i.visible !== on)) return list;
+  return list.map(i => (i.kind === 'structure' ? { ...i, visible: on } : i));
+}
+
 export function catalogEntry(kind: IndicatorKind): CatalogEntry {
   return INDICATOR_CATALOG.find(c => c.kind === kind)!;
 }
@@ -503,21 +513,31 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
       const values: (number | null)[] = bars.map(() => null);
       for (const sw of ms.swings) values[sw.i] = sw.price;
       const GREY = '#94a3b8';
-      const markers: NonNullable<OutSeries['markers']> = [
-        ...ms.swings.map(sw => ({
-          i: sw.i, price: sw.price, up: sw.kind === 'H', size: 0.5, shape: 'circle' as const,
-          position: (sw.kind === 'H' ? 'aboveBar' : 'belowBar') as 'aboveBar' | 'belowBar',
-          color: sw.label === 'HH' || sw.label === 'HL' ? UP : sw.label === 'LH' || sw.label === 'LL' ? DOWN : GREY,
-          ...(sw.label ? { text: sw.label } : {}),
-        })),
-        ...ms.breaks.map(b => ({
-          i: b.i, price: b.level, up: b.up, text: b.kind, size: 1,
-          shape: (b.up ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
-          position: (b.up ? 'belowBar' : 'aboveBar') as 'aboveBar' | 'belowBar',
-          color: b.up ? UP : DOWN,
-        })),
-      ].sort((a, b) => a.i - b.i);
-      return { pane: 'price', series: [{ key: 'v', label, axisLabel: 'Structure', color: ind.color, style: 'line', values, markers, noLabel: true, lineWidth: 1 }] };
+      // Swing labels ride on the zig-zag (a point at every swing). Break arrows ride on their OWN series with a value
+      // only at each break bar (its low for an up break, its high for a down one), drawn transparent: a marker on a
+      // time where its series has no value (whitespace) is drawn at the nearest point instead, which put a 14:40 CHoCH
+      // on the 14:38 swing high (seen live 2026-11-27).
+      const swingMarkers: NonNullable<OutSeries['markers']> = ms.swings.map(sw => ({
+        i: sw.i, price: sw.price, up: sw.kind === 'H', size: 0.5, shape: 'circle' as const,
+        position: (sw.kind === 'H' ? 'aboveBar' : 'belowBar') as 'aboveBar' | 'belowBar',
+        color: sw.label === 'HH' || sw.label === 'HL' ? UP : sw.label === 'LH' || sw.label === 'LL' ? DOWN : GREY,
+        ...(sw.label ? { text: sw.label } : {}),
+      }));
+      const brk: (number | null)[] = bars.map(() => null);
+      for (const b of ms.breaks) brk[b.i] = b.up ? bars[b.i].l : bars[b.i].h;
+      const breakMarkers: NonNullable<OutSeries['markers']> = ms.breaks.map(b => ({
+        i: b.i, price: b.up ? bars[b.i].l : bars[b.i].h, up: b.up, text: b.kind, size: 1,
+        shape: (b.up ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
+        position: (b.up ? 'belowBar' : 'aboveBar') as 'aboveBar' | 'belowBar',
+        color: b.up ? UP : DOWN,
+      }));
+      return {
+        pane: 'price',
+        series: [
+          { key: 'v', label, axisLabel: 'Structure', color: ind.color, style: 'line', values, markers: swingMarkers, noLabel: true, lineWidth: 1 },
+          { key: 'brk', label: `${label} breaks`, axisLabel: 'BOS / CHoCH', color: 'transparent', style: 'line', values: brk, markers: breakMarkers, noLabel: true, lineWidth: 1 },
+        ],
+      };
     }
   }
 }

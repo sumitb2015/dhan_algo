@@ -59,14 +59,35 @@ test('chart indicator: zig-zag through the swings, labelled swing markers, BOS /
   const bars = rows.map(([h, l, c], i) => ({ t: 1_800_000_000 + i * 300, o: c, h, l, c }));
   const ind = { ...newIndicator('structure', 's1'), params: { len: 2 } };
   const out = computeIndicator(bars, ind);
-  const s = out.series[0];
+  const [s, brk] = out.series;
   assert.equal(out.pane, 'price');
   assert.equal(s.noLabel, true);
   assert.equal(s.values.length, bars.length);
   assert.deepEqual(s.values.flatMap((v, i) => (v === null ? [] : [`${i}:${v}`])), ['2:110', '7:114', '8:104', '10:113']);
-  assert.deepEqual(s.markers!.filter(m => m.text === 'BOS' || m.text === 'CHoCH').map(m => `${m.text}@${m.i}`), ['BOS@6', 'CHoCH@12']);
-  assert.deepEqual(s.markers!.filter(m => m.shape === 'circle').map(m => `${m.i}:${m.text ?? '-'}`), ['2:-', '7:HH', '8:-', '10:LH']);
+  assert.deepEqual(s.markers!.map(m => `${m.i}:${m.text ?? '-'}`), ['2:-', '7:HH', '8:-', '10:LH']);
+  // every marker sits on a bar where ITS series has a value: a marker on whitespace is drawn at the nearest point
+  // instead (a 14:40 CHoCH showed on the 14:38 swing high, live 2026-11-27)
+  for (const ser of out.series) for (const m of ser.markers ?? []) assert.notEqual(ser.values[m.i], null, `${ser.key} marker at ${m.i}`);
+  assert.equal(brk.color, 'transparent');
+  assert.equal(brk.noLabel, true);
+  assert.deepEqual(brk.markers!.map(m => `${m.text}${m.up ? '↑' : '↓'}@${m.i}`), ['BOS↑@6', 'CHoCH↓@12']);
+  assert.equal(brk.values[6], 105);  // up break: under the break bar's low
+  assert.equal(brk.values[12], 106); // down break: over the break bar's high
   // the forming (last) bar never confirms: a close below 104 on it alone would not be a break
-  const formingOnly = computeIndicator(bars.slice(0, 13), ind).series[0].markers!.map(m => m.text);
+  const formingOnly = computeIndicator(bars.slice(0, 13), ind).series.flatMap(x => x.markers ?? []).map(m => m.text);
   assert.equal(formingOnly.includes('CHoCH'), false);
+});
+
+test('withStructure: the strip switch shows / hides the chart labels, adding the indicator once when there is none', async () => {
+  const { newIndicator, withStructure } = await import('./indexScalperIndicators.ts');
+  const base = [newIndicator('ema', 'a')];
+  const on = withStructure(base, true, 's');
+  assert.deepEqual(on.map(i => `${i.kind}:${i.visible}`), ['ema:true', 'structure:true']);
+  const custom = on.map(i => (i.kind === 'structure' ? { ...i, params: { len: 5 } } : i));
+  const off = withStructure(custom, false, 'x');
+  assert.deepEqual(off.map(i => `${i.kind}:${i.visible}`), ['ema:true', 'structure:false']);
+  assert.equal(off.find(i => i.kind === 'structure')!.params.len, 5);           // hidden, never removed: swing length kept
+  assert.equal(withStructure(off, true, 'y').length, 2);                         // un-hidden, not added again
+  assert.equal(withStructure(on, true, 'z'), on);                                // nothing to change: same list
+  assert.equal(withStructure(base, false, 'z'), base);                           // off with none: nothing added
 });

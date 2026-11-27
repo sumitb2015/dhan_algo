@@ -317,6 +317,10 @@ test.describe('Index Scalper layout + option charts', () => {
     await expect(strip2.getByTestId('trend-oi')).toHaveAttribute('data-buildup', 'LB', { timeout: 30_000 });
     expect(state.candleReqs.some(q => q.includes('kind=future') && q.includes('oi=1') && q.includes('interval=1&'))).toBe(true);
     await expect(strip2.getByTestId('trend-structure')).toBeVisible();
+    // the same switch drives the chart's HH / HL / LH / LL labels: the Market structure indicator is there by default
+    const structureInd = () => page.evaluate(() => (JSON.parse(localStorage.getItem('indexScalper.indicators.v2') ?? '[]') as { kind: string; visible: boolean }[])
+      .filter(i => i.kind === 'structure').map(i => i.visible));
+    await expect.poll(structureInd).toEqual([true]);
     // each can be turned off in the strip's settings, and stays off after a reload
     await page.getByRole('button', { name: 'Trend strip settings' }).click();
     const menu = page.getByRole('dialog', { name: 'Trend strip settings panel' });
@@ -324,6 +328,12 @@ test.describe('Index Scalper layout + option charts', () => {
     await menu.getByRole('switch', { name: 'Market structure' }).click();
     await expect(strip2.getByTestId('trend-oi')).toHaveCount(0);
     await expect(strip2.getByTestId('trend-structure')).toHaveCount(0);
+    await expect.poll(structureInd).toEqual([false]); // hidden on the chart too (kept, so its swing length survives)
+    await menu.getByRole('switch', { name: 'Market structure' }).click();
+    await expect.poll(structureInd).toEqual([true]);  // back on: the same indicator, not a second one
+    await expect(strip2.getByTestId('trend-structure')).toBeVisible();
+    await menu.getByRole('switch', { name: 'Market structure' }).click();
+    await expect.poll(structureInd).toEqual([false]);
     await page.keyboard.press('Escape');
     await expect(menu).toHaveCount(0);
     const oiReqs = state.candleReqs.filter(q => q.includes('oi=1')).length;
