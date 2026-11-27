@@ -49,7 +49,7 @@ import {
 } from '@/lib/indexScalperIndicators';
 import { istDateIso, isRegularSession } from '@/lib/nseHolidays';
 import {
-  INSTRUMENTS, dhanOrderQty, isMcx, kotakOrderQty, pnlMultiplier, lotUnits, qtyLots, nrmlOnly, openingProduct, type Underlying,
+  INSTRUMENTS, dhanOrderQty, dhanSegmentOfSymbol, isMcx, isUnderlying, kotakOrderQty, pnlMultiplier, lotUnits, qtyLots, nrmlOnly, openingProduct, type Underlying,
 } from '@/lib/indexScalperInstrument';
 import {
   applyFill, brokerCloseOrder, legsFromDhanPositions, legsKey, legsOpenedElsewhere, orderUnits, pageFilledQty, type ScalperLeg,
@@ -137,13 +137,13 @@ interface Toast { ok: boolean; text: string }
 const UNDERLYING_KEY = 'indexScalper.underlying';
 
 export default function IndexScalperTerminal() {
-  // Underlying instrument (NIFTY index, CRUDEOILM mini crude or CRUDEOIL full-size crude). Switching is locked while REAL
+  // Underlying instrument (NIFTY index, SENSEX index, CRUDEOILM mini crude or CRUDEOIL full-size crude). Switching is locked while REAL
   // is armed.
   const [underlying, setUnderlying] = useState<Underlying>('NIFTY');
   const [cumOiOpen, setCumOiOpen] = useState(false);
   useEffect(() => {
     const u = readPref(UNDERLYING_KEY);
-    if (u === 'NIFTY' || u === 'CRUDEOILM' || u === 'CRUDEOIL') setUnderlying(u);
+    if (isUnderlying(u)) setUnderlying(u);
   }, []);
   const selectUnderlying = (u: Underlying) => {
     if (real) return;
@@ -624,9 +624,8 @@ export default function IndexScalperTerminal() {
       const rows = realRows.map(r => {
         const sym = String(r.tradingSymbol ?? '');
         const info = kotakSymbols?.[sym];
-        const isMcx = sym.startsWith('CRUDEOIL');
         return {
-          ...r, securityId: sym, productType: dashProduct(r.productType), exchangeSegment: isMcx ? 'MCX_COMM' : 'NSE_FNO', unrealizedProfit: undefined,
+          ...r, securityId: sym, productType: dashProduct(r.productType), exchangeSegment: dhanSegmentOfSymbol(sym), unrealizedProfit: undefined,
           ...(info && info.side !== 'FUT' ? { drvExpiryDate: info.expiry, drvOptionType: info.side === 'CE' ? 'CALL' : 'PUT', drvStrikePrice: info.strike } : info ? { drvExpiryDate: info.expiry } : {}),
         };
       });
@@ -650,7 +649,7 @@ export default function IndexScalperTerminal() {
           drvStrikePrice: l.strike,
           drvOptionType: isFut ? 'FUT' : (l.type === 'CE' ? 'CALL' : 'PUT'),
         }),
-        exchange: isMcx(underlying) ? 'MCX' : 'NSE',
+        exchange: INSTRUMENTS[underlying].exchange,
         product: 'Intraday (SIM)', productCode: '', netQty: l.netQty, buyQty: null, sellQty: null, buyAvg: null, sellAvg: null,
         avg: l.netQty !== 0 ? l.avg : null, ltp, realized, unrealized, pnl: unrealized === null ? realized : realized + unrealized,
       };
@@ -776,7 +775,7 @@ export default function IndexScalperTerminal() {
     if (!real) {
       if (!(live && live > 0) || f.feedAgeSec === null) return { ok: false, text: 'No live price for the paper order' };
       if (f.stale) return { ok: false, text: 'Live prices are stale: not taking a paper order on an old price' };
-      if (!f.marketOpen) return { ok: false, text: `${isMcx(underlying) ? 'MCX' : 'NSE'} is closed: paper orders work only during the session` };
+      if (!f.marketOpen) return { ok: false, text: `${INSTRUMENTS[underlying].exchange} is closed: paper orders work only during the session` };
       const fillNow = req.orderType === 'MARKET'
         || (req.orderType === 'LIMIT' && (req.side === 'BUY' ? (req.price ?? 0) >= live : (req.price ?? 0) <= live));
       if (!fillNow) {
@@ -805,7 +804,7 @@ export default function IndexScalperTerminal() {
     }
 
     // A market order needs a live feed: stale ticks, or none at all (the chain may be a REST snapshot then), refuse it.
-    if (req.orderType === 'MARKET' && !f.marketOpen) return { ok: false, text: `${isMcx(underlying) ? 'MCX' : 'NSE'} is closed: refusing a market order` };
+    if (req.orderType === 'MARKET' && !f.marketOpen) return { ok: false, text: `${INSTRUMENTS[underlying].exchange} is closed: refusing a market order` };
     if (req.orderType === 'MARKET' && (f.stale || f.feedAgeSec === null)) return { ok: false, text: f.stale ? 'Live prices are stale: refusing a market order' : 'No live prices (tick feed not running): refusing a market order' };
     if (!brokerLoadedRef.current) return { ok: false, text: 'Broker not loaded yet' };
     if (brokerRef.current === 'kotak') {
@@ -863,7 +862,7 @@ export default function IndexScalperTerminal() {
     if (leg.ltp === null || feedRef.current.feedAgeSec === null) return { ok: false, text: 'No live price to close the paper position' };
     // Same rule as a paper entry: never book P&L on a price the feed stopped updating.
     if (feedRef.current.stale) return { ok: false, text: 'Live prices are stale: not closing a paper position on an old price' };
-    if (!feedRef.current.marketOpen) return { ok: false, text: `${isMcx(underlying) ? 'MCX' : 'NSE'} is closed: paper positions close only during the session` };
+    if (!feedRef.current.marketOpen) return { ok: false, text: `${INSTRUMENTS[underlying].exchange} is closed: paper positions close only during the session` };
     const sl = sim.legs[leg.id];
     if (!sl || sl.netQty === 0) return { ok: true, text: 'Already flat' };
     simFill({ strike: sl.strike, type: sl.type, securityId: sl.securityId, ltp: leg.ltp, expiry: '' }, sl.netQty > 0 ? 'SELL' : 'BUY', Math.abs(sl.netQty), leg.ltp, sl.symbol);
@@ -2091,15 +2090,19 @@ export default function IndexScalperTerminal() {
         <div className="contents whitespace-nowrap [&>*]:shrink-0">
           <div className="flex items-center gap-1">
           <div role="group" aria-label="Underlying" className="flex rounded border border-zinc-700 overflow-hidden" title={real ? 'Switch to SIM to change underlying: a REAL session trades one account' : undefined}>
-            <button
-              type="button"
-              aria-pressed={underlying === 'NIFTY'}
-              disabled={real}
-              onClick={() => selectUnderlying('NIFTY')}
-              className={cn('h-7 px-1.5 text-xs font-bold transition-colors disabled:opacity-50', underlying === 'NIFTY' ? 'bg-sky-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}
-            >
-              NIFTY
-            </button>
+            {(['NIFTY', 'SENSEX'] as const).map(u => (
+              <button
+                key={u}
+                type="button"
+                aria-pressed={underlying === u}
+                disabled={real}
+                title={u === 'SENSEX' ? 'BSE SENSEX: index, future (chart) and options; lot size per expiry' : 'NIFTY 50: index, future (chart) and options'}
+                onClick={() => selectUnderlying(u)}
+                className={cn('h-7 px-1.5 text-xs font-bold transition-colors disabled:opacity-50', underlying === u ? 'bg-sky-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}
+              >
+                {u}
+              </button>
+            ))}
             {(['CRUDEOILM', 'CRUDEOIL'] as const).map(u => (
               <button
                 key={u}
@@ -2199,7 +2202,9 @@ export default function IndexScalperTerminal() {
             onClick={() => setWatchStk(v => !v)} className={cn(btn, 'flex items-center gap-1', watchStk && 'bg-zinc-800 text-white')}>
             <Building2 className="w-4 h-4" aria-hidden /><span className="hidden min-[2200px]:inline">Top 10</span>
           </button>
-          <button type="button" aria-pressed={cumOiOpen} aria-label="Cumulative OI" title="Cumulative OI: call and put open interest across strikes"
+          <button type="button" aria-pressed={cumOiOpen} aria-label="Cumulative OI"
+            disabled={underlying === 'SENSEX'}
+            title={underlying === 'SENSEX' ? 'Cumulative OI has no SENSEX view yet (NIFTY and MCX crude only); the chart\'s OI profile works for SENSEX' : 'Cumulative OI: call and put open interest across strikes'}
             onClick={() => setCumOiOpen(v => !v)} className={cn(btn, 'flex items-center gap-1', cumOiOpen && 'bg-zinc-800 text-white')}>
             <AreaChart className="w-4 h-4" aria-hidden /><span className="hidden min-[2200px]:inline">Cum OI</span>
           </button>
@@ -2235,14 +2240,14 @@ export default function IndexScalperTerminal() {
         </div>
       </div>
 
-      {cumOiOpen && <CumulativeOIModal crude={underlying !== 'NIFTY'} zClass="z-[80]" chartsOnly onClose={() => setCumOiOpen(false)} />}
+      {cumOiOpen && underlying !== 'SENSEX' && <CumulativeOIModal crude={isMcx(underlying)} zClass="z-[80]" chartsOnly onClose={() => setCumOiOpen(false)} />}
 
       {(candleErr || posErr || feed.stale || notLive || !feed.marketOpen || feed.kotakError) && (
         <div role="alert" className="px-3 py-1 text-[11px] text-amber-300 bg-amber-500/10 border-b border-amber-500/30">
           {candleErr && <span className="mr-3">Candles: {candleErr}</span>}
           {posErr && <span className="mr-3">Positions: {posErr}</span>}
           {feed.kotakError && <span data-testid="kotak-error" className="mr-3">{feed.kotakError}: Kotak orders and exits wait for it.</span>}
-          {!feed.marketOpen && <span data-testid="market-closed" className="mr-3">{isMcx(underlying) ? 'MCX is closed (session 09:00-23:30/23:55 IST)' : 'NSE F&O is closed (session 09:15-15:40 IST)'}: paper fills and market orders are off.</span>}
+          {!feed.marketOpen && <span data-testid="market-closed" className="mr-3">{isMcx(underlying) ? 'MCX is closed (session 09:00-23:30/23:55 IST)' : `${INSTRUMENTS[underlying].exchange} F&O is closed (session 09:15-15:40 IST)`}: paper fills and market orders are off.</span>}
           {notLive && <span className="mr-3">No live ticks (market closed or the tick bridge is not running): the option chain is Dhan&apos;s last snapshot, and market orders are refused.</span>}
           {feed.stale && <span>Live ticks are stale ({Math.round(feed.feedAgeSec ?? 0)}s): market closed or bridge down. Market orders are refused.</span>}
         </div>

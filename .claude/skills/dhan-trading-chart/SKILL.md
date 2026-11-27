@@ -44,7 +44,7 @@ Related skills:
 | Autoscale including overlays | `autoscaleInfoProvider` on the candle series, plus `scaleLevelsRef` |
 | Price-scale "+" button and context menu; hotkeys | the `price scale hover` and `context menu events & keyboard shortcuts` sections |
 | 1 / 2 chart layout, per-pane instrument + timeframe | `ChartPane.tsx` (pane header, filters, contract binding); layout + panes in `indexScalper.layout.v1` |
-| NIFTY FUT pane (chart only: volume, VWAP) | `ChartSource { kind: 'future' }` -> `resolveSource(..., futureDhanId)` (the lookup's `data.future`); live price / volume from the bridge's `future` only when its expiry matches (`feed.indexFuture`); candles `kind=future` (NSE_FNO / FUTIDX); `ordersEnabled={false}` hides the "+" menu; no legs, orders, brackets, Quick Trade or OI profile on it |
+| NIFTY / SENSEX FUT pane (chart only: volume, VWAP) | `ChartSource { kind: 'future' }` -> `resolveSource(..., futureDhanId)` (the lookup's `data.future`); live price / volume from the bridge's `future` only when its expiry matches (`feed.indexFuture`); candles `kind=future` (NSE_FNO / FUTIDX); `ordersEnabled={false}` hides the "+" menu; no legs, orders, brackets, Quick Trade or OI profile on it |
 | What a pane plots; which legs / orders / TP-SL belong on it | `lib/indexScalperChartSource.ts`: `resolveSource` (strike pinned once resolved, ATM fallback), `legOnChart`, `bracketsOnChart`, `orderOnChart` (by `OrderRowView.securityId`, `isOption`) |
 | Quick Trade (live C / P chips on every strike in view, Buy / Sell in one click) | `QuickStrikeOverlay.tsx` over underlying panes; pure rules `lib/indexScalperQuickTrade.ts` (`visibleStrikeRows`, `clampQuickSettings`); header switch, off by default |
 | Call / Put OI profile (Total or Chg) | `lib/indexScalperOiProfile.ts` (`oiProfileKey`, label placement, `fmtOI`); one overlay canvas in `ScalperChart.tsx`; header OI switch + Total / Chg |
@@ -348,6 +348,10 @@ so the page itself re-renders on every frame that has a push. Everything below k
     0 ms blocking.
 
 ## Adding a new instrument or overlay: checklist
+SENSEX (2026-11-27) is the worked example of an index on another exchange: `exchange`, `dhanSegment`, `kotakExchange`,
+`indexSecurityId` on the spec, the `Underlying` union + `UNDERLYINGS`, the candles route's segment per exchange, the
+lookup's per-expiry lot, `e2e/index-scalper-sensex.spec.ts`. Grep for `=== 'NIFTY'` and literal `'NSE_FNO'` / `50`
+(strike step) when adding the next one.
 1. Add its spec to `INSTRUMENTS` (segment, tick, strike step, candle segment / instrument).
 2. Set `lotUnits` and `pnlMultiplier` for every broker, and add a `qtyLots` unit test per broker.
 3. Add its session to `inMarketSession`, with a test that covers the evening or holiday edge.

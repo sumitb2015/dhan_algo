@@ -320,10 +320,12 @@ test.describe('Index Scalper Kotak order route refuses bad orders before reachin
 
   for (const [name, patch, message] of [
     ['no idempotency key', { idempotencyKey: undefined }, /idempotencyKey/],
-    ['a non-NIFTY contract', { tradingSymbol: 'BANKNIFTY26120550000CE' }, /NIFTY, CRUDEOILM or CRUDEOIL contract/],
+    ['a non-NIFTY contract', { tradingSymbol: 'BANKNIFTY26120550000CE' }, /NIFTY, SENSEX, CRUDEOILM or CRUDEOIL contract/],
     ['an unknown product', { product: 'CO' }, /Unsupported product/],
     ['no open/close intent', { intent: 'maybe' }, /intent/],
     ['a contract not in the Kotak cache', {}, /not in the Kotak instrument cache/],
+    // SENSEX is an accepted underlying now; an unlisted SENSEX symbol is still refused before Kotak is called.
+    ['a SENSEX contract not in the Kotak cache', { tradingSymbol: 'SENSEX00000000000CE', quantity: 20 }, /not in the Kotak instrument cache/],
   ] as [string, Record<string, unknown>, RegExp][]) {
     test(`refuses ${name}`, async ({ request }) => {
       const data: Record<string, unknown> = { ...BASE, idempotencyKey: `isxk${Math.random().toString(36).slice(2, 12)}`, ...patch };

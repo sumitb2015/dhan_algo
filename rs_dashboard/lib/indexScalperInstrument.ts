@@ -3,7 +3,12 @@
 
 import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
 
-export type Underlying = 'NIFTY' | 'CRUDEOILM' | 'CRUDEOIL';
+export type Underlying = 'NIFTY' | 'SENSEX' | 'CRUDEOILM' | 'CRUDEOIL';
+
+/** Every underlying the page offers, in header order. */
+export const UNDERLYINGS: readonly Underlying[] = ['NIFTY', 'SENSEX', 'CRUDEOILM', 'CRUDEOIL'];
+
+export const isUnderlying = (u: unknown): u is Underlying => typeof u === 'string' && (UNDERLYINGS as readonly string[]).includes(u);
 
 /** MCX crude (mini CRUDEOILM, 10 barrels a lot; full-size CRUDEOIL, 100): futures + options, quantities in lots on Dhan
  *  and barrels on Kotak. Everything that was "CRUDEOILM" on this page is "isMcx" now. */
@@ -17,8 +22,13 @@ export function mcxBarrels(u: Underlying): number {
 export interface InstrumentSpec {
   underlying: Underlying;
   displayName: string;
-  dhanSegment: 'NSE_FNO' | 'MCX_COMM';
-  kotakExchange: 'nse_fo' | 'mcx_fo';
+  /** Exchange the contracts trade on (labels, "X is closed" messages, the Kotak row's exchange). */
+  exchange: 'NSE' | 'BSE' | 'MCX';
+  dhanSegment: 'NSE_FNO' | 'BSE_FNO' | 'MCX_COMM';
+  kotakExchange: 'nse_fo' | 'bse_fo' | 'mcx_fo';
+  /** Dhan security id of the index itself (IDX_I: spot / candles), null for MCX (its underlying pane is the future).
+   *  SENSEX is 51 here; its option chain keys on id 1 under BSE_FNO (docs/API_GOTCHAS.md "SENSEX splits three ways"). */
+  indexSecurityId: string | null;
   strikeStep: number;
   futTick: number;
   /** Option premium tick (NSE index options ₹0.05, MCX crude options ₹0.10). */
@@ -37,9 +47,29 @@ export const INSTRUMENTS: Record<Underlying, InstrumentSpec> = {
   NIFTY: {
     underlying: 'NIFTY',
     displayName: 'NIFTY 50',
+    exchange: 'NSE',
     dhanSegment: 'NSE_FNO',
     kotakExchange: 'nse_fo',
+    indexSecurityId: '13',
     strikeStep: 50,
+    futTick: 0.05,
+    optTick: 0.05,
+    candleSegment: 'IDX_I',
+    candleInstrument: 'INDEX',
+    defaultLots: 1,
+    maxLots: 20,
+    orderSource: 'isx',
+  },
+  // BSE SENSEX: index (IDX_I 51) + BSE_FNO future and options. Strike step 100, ticks Rs 0.05 (master TICK_SIZE 5 paise).
+  // Lot size is NOT fixed: it is read per expiry from the lookup (20 to Dec 2026, 25 from the Jan 2027 series).
+  SENSEX: {
+    underlying: 'SENSEX',
+    displayName: 'SENSEX (BSE)',
+    exchange: 'BSE',
+    dhanSegment: 'BSE_FNO',
+    kotakExchange: 'bse_fo',
+    indexSecurityId: '51',
+    strikeStep: 100,
     futTick: 0.05,
     optTick: 0.05,
     candleSegment: 'IDX_I',
@@ -51,8 +81,10 @@ export const INSTRUMENTS: Record<Underlying, InstrumentSpec> = {
   CRUDEOILM: {
     underlying: 'CRUDEOILM',
     displayName: 'CRUDEOILM (MCX)',
+    exchange: 'MCX',
     dhanSegment: 'MCX_COMM',
     kotakExchange: 'mcx_fo',
+    indexSecurityId: null,
     strikeStep: 50,
     futTick: 1.0,
     optTick: 0.1,
@@ -66,8 +98,10 @@ export const INSTRUMENTS: Record<Underlying, InstrumentSpec> = {
   CRUDEOIL: {
     underlying: 'CRUDEOIL',
     displayName: 'CRUDEOIL (MCX)',
+    exchange: 'MCX',
     dhanSegment: 'MCX_COMM',
     kotakExchange: 'mcx_fo',
+    indexSecurityId: null,
     strikeStep: 50,
     futTick: 1.0,
     optTick: 0.1,
@@ -80,7 +114,7 @@ export const INSTRUMENTS: Record<Underlying, InstrumentSpec> = {
 };
 
 /** Dhan order quantity:
- *  - NIFTY: lots * dhanLot (e.g. 1 lot * 65 = 65 units)
+ *  - NIFTY / SENSEX: lots * dhanLot (e.g. 1 lot * 65 = 65 units; SENSEX 20 or 25 per the expiry)
  *  - CRUDEOILM / CRUDEOIL: lots (Dhan order quantity for MCX is LOTS, master list LOT_SIZE is 1)
  */
 export function dhanOrderQty(underlying: Underlying, lots: number, lotSize: number): number {
@@ -118,7 +152,10 @@ export function pnlMultiplier(underlying: Underlying, broker: string): number {
  */
 export function displayLotUnits(underlying: Underlying, lotSize?: number | null): number {
   if (isMcx(underlying)) return mcxBarrels(underlying);
-  return lotSize && lotSize > 0 ? lotSize : 65;
+  if (lotSize && lotSize > 0) return lotSize;
+  // Display-only fallback while the lookup has not answered: NIFTY's long-standing 65; SENSEX's lot changes by expiry
+  // (20 / 25), so it counts units (1) rather than show a guessed lot count.
+  return underlying === 'NIFTY' ? 65 : 1;
 }
 
 /** Contract units per lot for ORDER SIZING: CRUDEOILM 10 barrels; NIFTY the lot size the lookup returned for the expiry
@@ -157,4 +194,14 @@ export function nrmlOnly(underlyingOrSymbol: string): boolean {
  *  second position rather than reduce the first), so it never goes through this. */
 export function openingProduct(underlying: string, requested: 'INTRADAY' | 'MARGIN'): 'INTRADAY' | 'MARGIN' {
   return nrmlOnly(underlying) ? 'MARGIN' : requested;
+}
+
+/** Dhan exchange segment of a contract from its trading symbol (Dhan "SENSEX-Dec2026-85000-CE" or Kotak
+ *  "SENSEX26DEC85000CE"): MCX crude MCX_COMM, SENSEX BSE_FNO, everything else NSE_FNO. Used to label Kotak rows / orders
+ *  in Dhan's shape; never to route an order (orders take INSTRUMENTS[u].dhanSegment or the contract's own segment). */
+export function dhanSegmentOfSymbol(symbol: string): 'NSE_FNO' | 'BSE_FNO' | 'MCX_COMM' {
+  const s = symbol.trim().toUpperCase();
+  if (/^CRUDEOIL/.test(s)) return 'MCX_COMM';
+  if (/^SENSEX(?=[\s\d-]|$)/.test(s)) return 'BSE_FNO';
+  return 'NSE_FNO';
 }

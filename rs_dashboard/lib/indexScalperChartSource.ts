@@ -98,7 +98,7 @@ export function orderOnChart(o: OrderLike, r: ResolvedSource): boolean {
 
 /** Short pane label, e.g. "NIFTY 25550 CE". */
 export function sourceLabel(underlying: Underlying, r: ResolvedSource): string {
-  if (r.kind === 'underlying') return isMcx(underlying) ? `${underlying} FUT` : 'NIFTY IDX';
+  if (r.kind === 'underlying') return isMcx(underlying) ? `${underlying} FUT` : `${underlying} IDX`;
   if (r.kind === 'future') return `${underlying} FUT`;
   return `${underlying} ${r.strike ?? '—'} ${r.type}`;
 }

@@ -27,7 +27,6 @@ import { readPref, savePref } from '@/lib/localPref';
 const ATM_OPEN_KEY = 'indexScalper.widgetAtmOpen.v1';
 const FUT_OPEN_KEY = 'indexScalper.widgetFutOpen.v1';
 
-const STEP = 50; // NIFTY strike step
 
 /** Manage Scrips sits beside the widget on whichever side has room, never on top of it (the widget opens at the right edge). */
 function manageLeft(widgetX: number): number {
@@ -71,7 +70,7 @@ function Stepper({ lots, lotSize, onChange, label, maxLots }: { lots: number; lo
   );
 }
 
-function StrikeStepper({ strike, atm, onStep, tone, label }: { strike: number | null; atm: number | null; onStep: (d: number) => void; tone: string; label: string }) {
+function StrikeStepper({ strike, atm, step, onStep, tone, label }: { strike: number | null; atm: number | null; step: number; onStep: (d: number) => void; tone: string; label: string }) {
   return (
     <div className="flex flex-col items-center w-[110px] shrink-0">
       <div className="flex items-center justify-between w-full h-9 rounded-lg bg-zinc-800 border border-zinc-700 px-1">
@@ -81,7 +80,7 @@ function StrikeStepper({ strike, atm, onStep, tone, label }: { strike: number | 
         <button type="button" aria-label={`Higher ${label} strike`} disabled={strike === null} onClick={() => onStep(1)}
           className={cn('w-7 h-7 flex items-center justify-center rounded hover:bg-zinc-700 text-zinc-300 hover:text-zinc-100 font-bold text-base disabled:opacity-30', FOCUS)}>+</button>
       </div>
-      <span className="text-[10px] text-zinc-400 mt-0.5 tabular-nums">{strike !== null && atm !== null ? getStrikeOffsetLabel(strike, atm, STEP) : '—'}</span>
+      <span className="text-[10px] text-zinc-400 mt-0.5 tabular-nums">{strike !== null && atm !== null ? getStrikeOffsetLabel(strike, atm, step) : '—'}</span>
     </div>
   );
 }
@@ -150,6 +149,8 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
   const lotSize = kotakReal ? feed.kotak?.lotSize ?? null : feed.lotSize;
   const spot = feed.spot ?? feed.chain?.spot ?? null;
   const expiry = feed.expiry;
+  // The instrument's own strike step (NIFTY / crude 50, SENSEX 100): a 50 grid on SENSEX picked strikes it does not list.
+  const STEP = INSTRUMENTS[feed.underlying].strikeStep;
   const strikes = computeAtmStrikes(spot, STEP, peOffset, ceOffset);
   const base = computeAtmStrikes(spot, STEP);
   const atmBase = spot !== null && spot > 0 ? Math.round(spot / STEP) * STEP : null;
@@ -385,11 +386,11 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
             </label>
             <div className="flex items-center justify-between gap-2">
               <span className="text-[10px] font-bold text-sky-400 bg-sky-500/10 border border-sky-500/30 px-2 py-1 rounded shrink-0">CE</span>
-              <StrikeStepper strike={ceStrike} atm={atmBase} onStep={d => setCeOffset(o => o + d)} tone="text-sky-400" label="CE" />
+              <StrikeStepper strike={ceStrike} atm={atmBase} step={STEP} onStep={d => setCeOffset(o => o + d)} tone="text-sky-400" label="CE" />
             </div>
             <div className="flex items-center justify-between gap-2">
               <span className="text-[10px] font-bold text-rose-400 bg-rose-500/10 border border-rose-500/30 px-2 py-1 rounded shrink-0">PE</span>
-              <StrikeStepper strike={peStrike} atm={atmBase} onStep={d => setPeOffset(o => o + d)} tone="text-zinc-100" label="PE" />
+              <StrikeStepper strike={peStrike} atm={atmBase} step={STEP} onStep={d => setPeOffset(o => o + d)} tone="text-zinc-100" label="PE" />
             </div>
             <div className="mt-1 pt-2 border-t border-zinc-800 flex items-center justify-between text-xs">
               <span className="text-zinc-400 font-medium">Product</span>

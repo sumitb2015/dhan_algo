@@ -9,7 +9,7 @@
 // let another underlying's P&L trip an exit of this one (and then switch the guard off with that loss still open).
 
 import { parseScalperContract } from './indexScalperPositions.ts';
-import type { Underlying } from './indexScalperInstrument.ts';
+import { isMcx, type Underlying } from './indexScalperInstrument.ts';
 
 export interface MtmGuardSettings {
   on: boolean;
@@ -66,8 +66,9 @@ export function guardScopeIds(rows: Record<string, unknown>[], underlying: Under
   for (const r of rows) {
     const sym = String(r.tradingSymbol ?? r.trading_symbol ?? '');
     if (broker === 'kotak') {
-      // The NIFTY future is not a leg here (legsFromKotakPositions skips it, so Exit All never closes it): out of scope too.
-      if (underlying === 'NIFTY' && sym.endsWith('FUT')) continue;
+      // An index future (NIFTY, SENSEX) is not a leg here (legsFromKotakPositions skips it, so Exit All never closes it):
+      // out of scope too.
+      if (!isMcx(underlying) && sym.endsWith('FUT')) continue;
       if (sym.startsWith(underlying) && /\d/.test(sym.charAt(underlying.length))) ids.add(sym);
     } else if (parseScalperContract(sym, underlying)) {
       const id = String(r.securityId ?? r.security_id ?? '');

@@ -83,13 +83,13 @@ export default function OrderTicket({
   const [priceDraft, setPriceDraft] = useState(initialPrice ? String(initialPrice) : '');
   const [trigDraft, setTrigDraft] = useState('');
   const [err, setErr] = useState<string | null>(null);
-  // This contract's tick from the master list; Rs 0.05 (NSE index options) or 1.0 (MCX crude future) until it answers or when it is unknown.
+  // This contract's tick from the master list; Rs 0.05 (NSE / BSE index options) or 1.0 (MCX crude future) until it answers or when it is unknown.
   const defaultTick = contract.type === 'FUT' && isMcx(underlying) ? 1.0 : OPTION_TICK;
   const [tick, setTick] = useState(defaultTick);
   useEffect(() => {
     if (!contract.securityId) return;
     let dead = false;
-    const seg = isMcx(underlying) ? 'MCX_COMM' : 'NSE_FNO';
+    const seg = INSTRUMENTS[underlying].dhanSegment;
     fetch(`/api/index-scalper/tick?securityId=${encodeURIComponent(contract.securityId)}&segment=${seg}`)
       .then(r => r.json())
       .then((j: { success: boolean; tick?: number | null }) => { if (!dead && j.success && typeof j.tick === 'number' && j.tick > 0) setTick(j.tick); })

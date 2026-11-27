@@ -16,7 +16,7 @@ import type { PickedContract } from './OptionChainPanel';
 import type { IndexScalperFeed } from './useIndexScalperFeed';
 import { nearestStrike, resolveSource } from '@/lib/indexScalperChartSource';
 import { strikesAroundAtm, visibleStrikeRows, type QuickSettings, type StrikeRow } from '@/lib/indexScalperQuickTrade';
-import { isMcx, type Underlying } from '@/lib/indexScalperInstrument';
+import { INSTRUMENTS, isMcx, type Underlying } from '@/lib/indexScalperInstrument';
 import { cn } from '@/lib/utils';
 
 type Side = 'BUY' | 'SELL';
@@ -120,7 +120,7 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
 
   // Why a chip cannot trade right now (null = it can). Live price only: never a snapshot or a previous close.
   const blocked = (ltp: number | null): string | null => {
-    if (!feed.marketOpen) return `${isMcx(underlying) ? 'MCX' : 'NSE'} is closed`;
+    if (!feed.marketOpen) return `${INSTRUMENTS[underlying].exchange} is closed`;
     if (feed.feedAgeSec === null || feed.stale) return 'No live ticks: the feed is stale or not running';
     if (ltp === null || !(ltp > 0)) return 'No live price for this strike: no trade yet today, or outside the strikes the live feed covers';
     return null;

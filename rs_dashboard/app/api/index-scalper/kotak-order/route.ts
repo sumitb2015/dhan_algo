@@ -11,7 +11,7 @@ import { istDateIso } from '@/lib/nseHolidays';
 import { nrmlOnly } from '@/lib/indexScalperInstrument';
 import { appendRecord, kotakProduct, todaysRecords, type KotakDayFile, type KotakRecord } from '@/lib/indexScalperKotak';
 
-// REAL-MONEY route: /index-scalper's Kotak orders (NIFTY options only). Places through lib/kotakPlaceOrder.ts (placed /
+// REAL-MONEY route: /index-scalper's Kotak orders (NIFTY / SENSEX options, MCX crude futures and options). Places through lib/kotakPlaceOrder.ts (placed /
 // rejected / unknown, order-book reconcile on an unclean reply) and RECORDS every placed or unknown order in the page's
 // day file, so the page can tell its own Kotak fills from a strategy's or another terminal's on the same contract
 // (Kotak has no order tag the repo can read back). GET returns today's records.
@@ -46,8 +46,8 @@ interface Body {
 async function placeOnce(b: Body): Promise<{ status: number; body: Record<string, unknown> }> {
   const symbol = String(b.tradingSymbol ?? '');
   const underlying = kotakUnderlyingOf(symbol);
-  if (!symbol || (underlying !== 'NIFTY' && underlying !== 'CRUDEOILM' && underlying !== 'CRUDEOIL')) {
-    return { status: 400, body: { success: false, error: 'tradingSymbol must be a NIFTY, CRUDEOILM or CRUDEOIL contract' } };
+  if (!symbol || (underlying !== 'NIFTY' && underlying !== 'SENSEX' && underlying !== 'CRUDEOILM' && underlying !== 'CRUDEOIL')) {
+    return { status: 400, body: { success: false, error: 'tradingSymbol must be a NIFTY, SENSEX, CRUDEOILM or CRUDEOIL contract' } };
   }
   const product = kotakProduct(b.product);
   if (!product) return { status: 400, body: { success: false, error: `Unsupported product: ${String(b.product)} (expected INTRADAY or MARGIN)` } };
@@ -67,7 +67,8 @@ async function placeOnce(b: Body): Promise<{ status: number; body: Record<string
   if (contract.freezeQty && qty > contract.freezeQty) {
     return { status: 400, body: { success: false, error: `Quantity ${qty} exceeds the exchange freeze quantity ${contract.freezeQty} for ${symbol}: send it in parts` } };
   }
-  const exchange = contract.segment || (underlying === 'NIFTY' ? 'nse_fo' : 'mcx_fo');
+  // The contract's own segment from Kotak's master (SENSEX: bse_fo); the fallback only when the cache row has none.
+  const exchange = contract.segment || (underlying === 'SENSEX' ? 'bse_fo' : underlying === 'NIFTY' ? 'nse_fo' : 'mcx_fo');
   const built = buildKotakOrderPayload({
     tradingsymbol: symbol, quantity: Number(b.quantity), side, orderType: String(b.orderType ?? 'MARKET'),
     price: Number(b.price) || 0, triggerPrice: Number(b.triggerPrice) || 0, exchange, product,

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { inNseSession, inNseFnoSession, inMcxSession, inMarketSession, inOrderSession } from './indexScalperSession.ts';
+import { inNseSession, inNseFnoSession, inMcxSession, inMarketSession, inOrderSession, barAnchorSec } from './indexScalperSession.ts';
 
 const ist = (iso: string) => Date.parse(`${iso}+05:30`);
 
@@ -38,4 +38,17 @@ test('NSE F&O (orders, option premiums) trade to 15:40 IST; the index (cash) sti
   assert.equal(inOrderSession('NIFTY', ist('2026-11-25T15:35:00')), true);
   assert.equal(inMarketSession('NIFTY', ist('2026-11-25T15:35:00')), false); // no index candle after 15:30
   assert.equal(inOrderSession('CRUDEOILM', ist('2026-11-25T16:30:00')), true);
+});
+
+test('SENSEX: index candles 09:15-15:30, BSE F&O orders to 15:40, NSE/BSE holidays and evenings closed, 09:15 bar anchor', () => {
+  assert.equal(inMarketSession('SENSEX', ist('2026-11-25T09:14:59')), false);
+  assert.equal(inMarketSession('SENSEX', ist('2026-11-25T09:15:00')), true);
+  assert.equal(inMarketSession('SENSEX', ist('2026-11-25T15:29:59')), true);
+  assert.equal(inMarketSession('SENSEX', ist('2026-11-25T15:30:00')), false);
+  assert.equal(inOrderSession('SENSEX', ist('2026-11-25T15:35:00')), true);
+  assert.equal(inOrderSession('SENSEX', ist('2026-11-25T15:40:00')), false);
+  assert.equal(inOrderSession('SENSEX', ist('2026-11-25T16:30:00')), false); // never MCX's evening
+  assert.equal(inOrderSession('SENSEX', ist('2026-11-24T11:00:00')), false); // holiday
+  assert.equal(inOrderSession('SENSEX', ist('2026-11-28T11:00:00')), false); // Saturday
+  assert.equal(barAnchorSec('SENSEX'), 9 * 3600 + 15 * 60);
 });

@@ -3,6 +3,9 @@
 //   live candles stop there (`inMarketSession`).
 // - NIFTY options / futures: NSE F&O trades until 15:40 since SEBI's close auction session (cash is unaffected; same
 //   15:40 as lib/optionsPricing.ts's expiry clock), so ORDERS and option premium candles run to 15:40 (`inOrderSession`).
+// - SENSEX (BSE): the same clock as NIFTY. Index (cash) 09:15-15:30, BSE F&O to 15:40 like NSE's (Dhan's 5-minute bars
+//   of the SENSEX Dec future on 2026-11-26 run to the 15:35 bar while the index stops at 15:25). BSE trading holidays
+//   follow the NSE calendar in nseHolidays.json.
 // - CRUDEOILM / CRUDEOIL: MCX session (weekdays, 09:00 <= IST time < 23:30 in summer DST or 23:55 in winter)
 // /index-scalper uses it so a feed that keeps sending packets after the close (or a stale spot on a holiday) can never
 // make the page look live: outside the session no paper order fills and no REAL market order is sent.

@@ -8,7 +8,7 @@
 import { classifyKotakStatus } from './kotakShape.ts';
 import { normTime } from './indexScalperAccount.ts';
 import type { ScalperLeg } from './indexScalperPositions.ts';
-import type { Underlying } from './indexScalperInstrument.ts';
+import { dhanSegmentOfSymbol, isMcx, type Underlying } from './indexScalperInstrument.ts';
 
 /** One record of the page's day file. `unknown` = Kotak did not confirm and the order may be live. */
 export type KotakRecord =
@@ -146,8 +146,8 @@ export function legsFromKotakPositions(
     const sym = String(r.tradingSymbol ?? '');
     const info = symbols[sym];
     if (!info || !isTarget(sym)) continue;
-    // For NIFTY we currently scalper options only unless futures are on screen; for CRUDEOILM we support options and FUT
-    if (underlying === 'NIFTY' && info.side === 'FUT') continue;
+    // Index underlyings (NIFTY, SENSEX): options only, their future is a chart-only pane here; MCX crude: options and FUT.
+    if (!isMcx(underlying) && info.side === 'FUT') continue;
     const netQty = Number(r.netQty);
     if (!Number.isFinite(netQty) || netQty === 0) continue;
     const product = dashProduct(r.productType);
@@ -175,7 +175,6 @@ export function kotakOrdersAsDhan(book: Record<string, unknown>[], symbols: Reco
     const qty = Number(o.quantity) || 0;
     const filled = o.filledQty === undefined || o.filledQty === null ? null : Number(o.filledQty) || 0;
     const status = classifyKotakStatus(String(o.orderStatus ?? ''), filled ?? 0, qty);
-    const isMcx = sym.startsWith('CRUDEOIL');
     return {
       orderId: String(o.orderId ?? ''),
       // Kotak's contract handle is its trading symbol (a Kotak leg's securityId is the same string).
@@ -183,7 +182,7 @@ export function kotakOrdersAsDhan(book: Record<string, unknown>[], symbols: Reco
       correlationId: ours.has(String(o.orderId ?? '')) ? 'isx-kotak' : '',
       orderStatus: status,
       transactionType: o.transactionType,
-      exchangeSegment: isMcx ? 'MCX_COMM' : 'NSE_FNO',
+      exchangeSegment: dhanSegmentOfSymbol(sym),
       productType: dashProduct(o.productType),
       orderType: o.orderType,
       tradingSymbol: sym,

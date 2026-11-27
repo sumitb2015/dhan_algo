@@ -21,7 +21,7 @@ import { legsKey, type ScalperLeg } from '@/lib/indexScalperPositions';
 import { buildOiProfile, oiProfileKey, type OiMode } from '@/lib/indexScalperOiProfile';
 import type { IndicatorInstance } from '@/lib/indexScalperIndicators';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
-import { isMcx, type Underlying } from '@/lib/indexScalperInstrument';
+import { INSTRUMENTS, isMcx, type Underlying } from '@/lib/indexScalperInstrument';
 import { toIsoDate } from '@/components/DataChip';
 import { cn } from '@/lib/utils';
 import { alertsFor, postAlertAction, priceAlertsStore, usePriceAlertsView } from '@/lib/priceAlertsUi';
@@ -156,17 +156,17 @@ function ChartPane(p: Props) {
     const mcx = isMcx(underlying);
     if (isOption) {
       if (resolved.strike === null || resolved.type === null || !feed.expiry) return null;
-      return { spec: { kind: 'option', underlying, expiry: feed.expiry, strike: resolved.strike, optType: resolved.type }, segment: mcx ? 'MCX_COMM' : 'NSE_FNO', securityId: resolved.dhanId };
+      return { spec: { kind: 'option', underlying, expiry: feed.expiry, strike: resolved.strike, optType: resolved.type }, segment: INSTRUMENTS[underlying].dhanSegment, securityId: resolved.dhanId };
     }
     if (isFuture) {
       const f = feed.indexFuture;
-      return f ? { spec: { kind: 'future', underlying, expiry: f.expiry }, segment: 'NSE_FNO', securityId: f.dhanId } : null;
+      return f ? { spec: { kind: 'future', underlying, expiry: f.expiry }, segment: INSTRUMENTS[underlying].dhanSegment, securityId: f.dhanId } : null;
     }
     if (mcx) {
       const f = feed.future;
       return f?.expiry ? { spec: { kind: 'future', underlying, expiry: f.expiry }, segment: 'MCX_COMM', securityId: f.dhanId } : null;
     }
-    return { spec: { kind: 'index', symbol: underlying }, segment: 'IDX_I', securityId: underlying === 'NIFTY' ? '13' : null };
+    return { spec: { kind: 'index', symbol: underlying }, segment: 'IDX_I', securityId: INSTRUMENTS[underlying].indexSecurityId };
   }, [underlying, isOption, isFuture, resolved.strike, resolved.type, resolved.dhanId, feed.expiry, feed.indexFuture, feed.future]);
   const alertsView = usePriceAlertsView();
   const alertLines = useMemo(() => {
@@ -239,7 +239,7 @@ function ChartPane(p: Props) {
           </button>
           {!isMcx(underlying) && (
             <button type="button" aria-pressed={isFuture} onClick={() => setSource({ kind: 'future' })}
-              title="NIFTY future: real volume and a volume-weighted VWAP (chart only: orders are not placed from this pane)"
+              title={`${underlying} future: real volume and a volume-weighted VWAP (chart only: orders are not placed from this pane)`}
               className={cn(seg, isFuture ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}>FUT</button>
           )}
           <button type="button" aria-pressed={isOption && resolved.type === 'CE'} onClick={() => pickType('CE')}
@@ -292,7 +292,7 @@ function ChartPane(p: Props) {
           logScale={p.logScale} pctScale={p.pctScale} autoScale={p.autoScale} showGrid={p.showGrid} showVolume={p.showVolume} volumeMaLen={p.volumeMaLen}
           legs={paneLegs} entrySpots={p.entrySpots} onExitLeg={p.onExitLeg} onAdjustLeg={quickOn || isOption ? p.onAdjustLeg : undefined} adjustLots={p.stepLots} exitingId={p.exitingId}
           onToggleIndicator={p.onToggleIndicator} onRemoveIndicator={p.onRemoveIndicator} onEditIndicator={p.onEditIndicator}
-          symbolLabel={isOption ? `${label} · ${tfLabel}` : isFuture ? `NIFTY · ${tfLabel} · FUT` : (isMcx(underlying) ? `${underlying} · ${tfLabel} · FUT` : `NIFTY · ${tfLabel} · IDX`)}
+          symbolLabel={isOption ? `${label} · ${tfLabel}` : isFuture ? `${underlying} · ${tfLabel} · FUT` : (isMcx(underlying) ? `${underlying} · ${tfLabel} · FUT` : `${underlying} · ${tfLabel} · IDX`)}
           focus={p.focus} resetSeq={p.resetSeq}
           contractName={isOption || isFuture ? label : p.futureName}
           ordersEnabled={!isFuture}

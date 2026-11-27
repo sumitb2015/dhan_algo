@@ -114,3 +114,52 @@ test('CRUDEOIL (full-size, 100 bbl a lot): Dhan quantity in lots, Kotak in barre
   assert.equal(INSTRUMENTS.CRUDEOILM.maxLots, 20);
   assert.equal(INSTRUMENTS.NIFTY.maxLots, 20);
 });
+
+// ── SENSEX (BSE, added 2026-11-27) ──────────────────────────────────────────
+import { isMcx, isUnderlying, lotUnits, qtyLots, qtyUnits, UNDERLYINGS } from './indexScalperInstrument.ts';
+
+test('SENSEX spec: BSE_FNO / bse_fo, index id 51, strike step 100, Rs 0.05 ticks, isx tag, 20-lot cap', () => {
+  const s = INSTRUMENTS.SENSEX;
+  assert.equal(s.exchange, 'BSE');
+  assert.equal(s.dhanSegment, 'BSE_FNO');
+  assert.equal(s.kotakExchange, 'bse_fo');
+  assert.equal(s.indexSecurityId, '51');
+  assert.equal(s.strikeStep, 100);
+  assert.equal(s.optTick, 0.05);
+  assert.equal(s.futTick, 0.05);
+  assert.equal(s.candleSegment, 'IDX_I');
+  assert.equal(s.orderSource, 'isx');
+  assert.equal(s.maxLots, 20);
+  assert.equal(isMcx('SENSEX'), false);
+  assert.equal(nrmlOnly('SENSEX'), false);
+  assert.equal(openingProduct('SENSEX', 'INTRADAY'), 'INTRADAY');
+  assert.deepEqual([...UNDERLYINGS], ['NIFTY', 'SENSEX', 'CRUDEOILM', 'CRUDEOIL']);
+  assert.equal(isUnderlying('SENSEX'), true);
+  assert.equal(isUnderlying('BANKEX'), false);
+});
+
+test('SENSEX quantities: units on Dhan, Kotak and SIM; lot size from the expiry, never guessed', () => {
+  // Lot size comes from the lookup per expiry: 20 (Dec 2026 series), 25 (Jan 2027 series).
+  assert.equal(dhanOrderQty('SENSEX', 2, 20), 40);
+  assert.equal(dhanOrderQty('SENSEX', 2, 25), 50);
+  assert.equal(dhanOrderQty('SENSEX', 2, 0), 0); // unknown lot: refused by the caller
+  assert.equal(kotakOrderQty('SENSEX', 3, 20), 60);
+  assert.equal(pnlMultiplier('SENSEX', 'dhan'), 1);
+  assert.equal(pnlMultiplier('SENSEX', 'kotak'), 1);
+  assert.equal(pnlMultiplier('SENSEX', 'sim'), 1);
+  assert.equal(lotUnits('SENSEX', 20), 20);
+  assert.equal(lotUnits('SENSEX', null), null);
+  // Dhan row (units, mult 1), Kotak row (units, mult 1), SIM leg (units)
+  assert.equal(qtyLots('SENSEX', -40, pnlMultiplier('SENSEX', 'dhan'), 20), 2);
+  assert.equal(qtyLots('SENSEX', 60, pnlMultiplier('SENSEX', 'kotak'), 20), 3);
+  assert.equal(qtyLots('SENSEX', 20, 1, 20), 1);
+  // A part lot or an unknown lot size is null, never rounded into a bigger order
+  assert.equal(qtyLots('SENSEX', 30, 1, 20), null);
+  assert.equal(qtyLots('SENSEX', 40, 1, null), null);
+  // 25-lot series: 50 units = 2 lots, not 2.5 of the old size
+  assert.equal(qtyLots('SENSEX', 50, 1, 25), 2);
+  assert.equal(qtyUnits(-40, 1), 40);
+  // Display fallback while the lot is unknown counts units, never NIFTY's 65
+  assert.equal(displayLotUnits('SENSEX', 20), 20);
+  assert.equal(displayLotUnits('SENSEX'), 1);
+});

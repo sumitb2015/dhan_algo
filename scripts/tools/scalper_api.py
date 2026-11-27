@@ -113,6 +113,18 @@ def main():
         # MCX contracts report LOT_SIZE=1 because Dhan order quantity is expressed in lots.
         if is_crude:
             lot_size = 1
+        elif under == 'SENSEX':
+            # SENSEX's lot changes with the series (20 to Dec 2026, 25 from Jan 2027), and get_lot_size() returns the
+            # first master row's, whatever its expiry. Take THIS expiry's own contracts' LOT_SIZE, and refuse when they
+            # disagree or are missing rather than pick one.
+            lots = pd.to_numeric(df[mask]['LOT_SIZE'], errors='coerce').dropna().unique()
+            lot_size = int(lots[0]) if len(lots) == 1 and lots[0] > 1 else None
+            if not lot_size:
+                print(json.dumps({
+                    'success': False,
+                    'error': f'Could not resolve one lot size for {args.underlying} {args.expiry} (got {list(lots)!r})',
+                }))
+                sys.exit(0)
         else:
             lot_size = helper.get_lot_size(under)
             if not lot_size or lot_size <= 1:
@@ -146,9 +158,10 @@ def main():
             f = _find_nearest_future(helper, under, exchange=exchange, instrument='FUTCOM', on_or_after=args.expiry)
             if f:
                 data['future'] = {'securityId': str(int(float(f['SECURITY_ID']))), 'expiry': str(f['SM_EXPIRY_DATE'])[:10]}
-        elif under == 'NIFTY':
+        elif under in ('NIFTY', 'SENSEX'):
+            # The index's future for the chart's FUT pane (chart only): NIFTY on NSE, SENSEX on BSE (BSE_FNO).
             from premarket_data import _find_nearest_future
-            f = _find_nearest_future(helper, under, exchange='NSE', instrument='FUTIDX', on_or_after=args.expiry)
+            f = _find_nearest_future(helper, under, exchange=exchange, instrument='FUTIDX', on_or_after=args.expiry)
             if f:
                 data['future'] = {'securityId': str(int(float(f['SECURITY_ID']))), 'expiry': str(f['SM_EXPIRY_DATE'])[:10]}
         if 'SM_FREEZE_QTY' in rows.columns:

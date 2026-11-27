@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import { PROJECT_ROOT, runPythonJson, dedupe, spaced } from '@/lib/pyExec';
 
-// Read-only market data: NIFTY index / NIFTY future / CRUDEOILM or CRUDEOIL future candles, or one option's premium candles (kind=option), for /index-scalper. Never places orders.
+// Read-only market data: NIFTY / SENSEX index, NIFTY / SENSEX future, CRUDEOILM or CRUDEOIL future candles, or one option's premium candles (kind=option), for /index-scalper. Never places orders.
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'index_scalper_candles.py');
 
 interface Result {
@@ -17,9 +17,13 @@ const TTL_MS = 20_000;
 export async function GET(req: NextRequest) {
   const sp = new URL(req.url).searchParams;
   const underlying = (sp.get('underlying') ?? 'NIFTY').toUpperCase();
-  if (underlying !== 'NIFTY' && underlying !== 'CRUDEOILM' && underlying !== 'CRUDEOIL') {
-    return NextResponse.json({ success: false, error: 'underlying must be NIFTY, CRUDEOILM or CRUDEOIL' }, { status: 400 });
+  if (underlying !== 'NIFTY' && underlying !== 'SENSEX' && underlying !== 'CRUDEOILM' && underlying !== 'CRUDEOIL') {
+    return NextResponse.json({ success: false, error: 'underlying must be NIFTY, SENSEX, CRUDEOILM or CRUDEOIL' }, { status: 400 });
   }
+  // SENSEX trades on BSE: its future / options are BSE_FNO, the index is IDX_I id 51 (BSE_IDX answers DH-905; the bare
+  // symbol can resolve to the wrong row, so the id is passed explicitly). docs/API_GOTCHAS.md "SENSEX splits three ways".
+  const bse = underlying === 'SENSEX';
+  const fno = bse ? 'BSE_FNO' : 'NSE_FNO';
   const interval = sp.get('interval') ?? '5';
   if (!['1', '3', '5', '15', '30', '60'].includes(interval)) {
     return NextResponse.json({ success: false, error: 'interval must be 1, 3, 5, 15, 30 or 60' }, { status: 400 });
@@ -32,9 +36,9 @@ export async function GET(req: NextRequest) {
   if (kind !== 'underlying' && kind !== 'option' && kind !== 'future') {
     return NextResponse.json({ success: false, error: 'kind must be underlying, future or option' }, { status: 400 });
   }
-  // kind=future: the NIFTY future (by its Dhan id), for the chart's FUT pane. Crude's future is its underlying pane.
-  if (kind === 'future' && (underlying !== 'NIFTY' || !secId)) {
-    return NextResponse.json({ success: false, error: 'kind=future is NIFTY only and needs a numeric securityId' }, { status: 400 });
+  // kind=future: the NIFTY / SENSEX future (by its Dhan id), for the chart's FUT pane. Crude's future is its underlying pane.
+  if (kind === 'future' && ((underlying !== 'NIFTY' && underlying !== 'SENSEX') || !secId)) {
+    return NextResponse.json({ success: false, error: 'kind=future is NIFTY / SENSEX only and needs a numeric securityId' }, { status: 400 });
   }
   if (kind === 'option' && !secId) {
     return NextResponse.json({ success: false, error: 'kind=option needs a numeric securityId' }, { status: 400 });
@@ -51,13 +55,16 @@ export async function GET(req: NextRequest) {
     const mcx = underlying === 'CRUDEOILM' || underlying === 'CRUDEOIL';
     const args = ['--symbol', underlying, '--interval', interval, '--days', String(days)];
     if (kind === 'option') {
-      args.push('--segment', mcx ? 'MCX_COMM' : 'NSE_FNO', '--instrument', mcx ? 'OPTFUT' : 'OPTIDX');
+      args.push('--segment', mcx ? 'MCX_COMM' : fno, '--instrument', mcx ? 'OPTFUT' : 'OPTIDX');
     } else if (kind === 'future') {
-      args.push('--segment', 'NSE_FNO', '--instrument', 'FUTIDX');
+      args.push('--segment', fno, '--instrument', 'FUTIDX');
     } else if (mcx) {
       args.push('--segment', 'MCX_COMM', '--instrument', 'FUTCOM');
     }
-    if (secId) {
+    if (kind === 'underlying' && bse) {
+      // The SENSEX index itself: IDX_I / INDEX / 51, never a browser-supplied id.
+      args.push('--segment', 'IDX_I', '--instrument', 'INDEX', '--security-id', '51');
+    } else if (secId) {
       args.push('--security-id', secId);
     }
     const data = await dedupe(key, () =>
