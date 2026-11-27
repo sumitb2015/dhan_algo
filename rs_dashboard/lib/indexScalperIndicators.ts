@@ -172,6 +172,8 @@ export interface IndicatorOutput {
 
 const UP = '#22c55e';
 const DOWN = '#ef4444';
+/** PDH / PDL: amber, so previous-day levels are not read as the green / red buy-sell colours. */
+const PREV_DAY_LEVEL = '#f59e0b';
 
 /** IST calendar day of a bar's real UTC epoch (sessions reset VWAP at the IST day change). */
 export function istDay(t: number): number {
@@ -380,8 +382,8 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
       return {
         pane: 'price',
         series: [
-          line('pdh', 'PDH', DOWN, prev.map(x => (x ? x.h : null))),
-          line('pdl', 'PDL', UP, prev.map(x => (x ? x.l : null))),
+          line('pdh', 'PDH', PREV_DAY_LEVEL, prev.map(x => (x ? x.h : null))),
+          line('pdl', 'PDL', PREV_DAY_LEVEL, prev.map(x => (x ? x.l : null))),
           line('dh', 'DH', ind.color, cur.map(x => x.h), true),
           line('dl', 'DL', ind.color, cur.map(x => x.l), true),
         ],
