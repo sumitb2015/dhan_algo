@@ -294,6 +294,7 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
   held (dim) / added today (bright) / cut today (dashed outline tail past today's OI), via Fresh Money's `stackParts`,
   scaled on max(today, previous close); unknown change = all held. `delta` = ONE bar per strike centred on its level,
   |Call − Put|, red when calls are heavier, green when puts are (filled, never an outline: negative is not shed OI).
+  Only strikes with OI on BOTH sides (`oiDelta`): the bridge seeds each side at oi 0 until its tick arrives.
 - **Labels by priority** (`b752a099`): largest Call / Put first, then by OI; a label that would touch another is
   dropped, so zoomed out they do not pile up.
 

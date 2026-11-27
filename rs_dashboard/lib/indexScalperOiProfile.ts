@@ -35,7 +35,7 @@ export interface OiProfile {
   maxPeChgStrike: number | null;
   /** Any strike with a known change: false when the source has no previous-day OI at all. */
   hasChange: boolean;
-  /** Strike with the largest |Call OI − Put OI| (null when every strike is balanced). */
+  /** Strike with the largest |Call OI − Put OI| among strikes with OI on both sides (null when none, or all balanced). */
   maxDeltaStrike: number | null;
 }
 
@@ -57,6 +57,14 @@ export function oiChange(sd: SideLike | null | undefined): number | null {
   return null;
 }
 
+/** Call OI − Put OI at one strike (+ = calls heavier); null unless BOTH sides have OI. The bridge creates every strike
+ *  with both sides at oi 0 and fills a side only when its own tick arrives, so a 0 there is "not received yet", not "no
+ *  open interest": taken as a value, a half-loaded strike drew the whole other side as its Δ, became the highlighted
+ *  largest bar and shrank every real bar (like Fresh Money's oiDelta, an unknown side gives no Δ). */
+export function oiDelta(r: Pick<OiRow, 'ce' | 'pe'>): number | null {
+  return r.ce > 0 && r.pe > 0 ? r.ce - r.pe : null;
+}
+
 /** Rows from a chain's `strikes` map (live bridge or snapshot), sorted by strike; strikes with no OI on either side are
  *  dropped. Null without a chain. */
 export function buildOiProfile(strikes: Record<string, StrikeLike> | null | undefined): OiProfile | null {
@@ -76,7 +84,8 @@ export function buildOiProfile(strikes: Record<string, StrikeLike> | null | unde
   let maxCeChg = 0, maxPeChg = 0, maxCeChgStrike: number | null = null, maxPeChgStrike: number | null = null;
   let hasChange = false, maxDelta = 0, maxDeltaStrike: number | null = null;
   for (const r of rows) {
-    if (Math.abs(r.ce - r.pe) > maxDelta) { maxDelta = Math.abs(r.ce - r.pe); maxDeltaStrike = r.strike; }
+    const d = oiDelta(r);
+    if (d !== null && Math.abs(d) > maxDelta) { maxDelta = Math.abs(d); maxDeltaStrike = r.strike; }
     if (r.ce > maxCe) { maxCe = r.ce; maxCeStrike = r.strike; }
     if (r.pe > maxPe) { maxPe = r.pe; maxPeStrike = r.strike; }
     if (r.ceChg !== null || r.peChg !== null) hasChange = true;
@@ -133,11 +142,11 @@ export function oiBars(
   const out: OiBar[] = [];
   if (mode === 'delta') {
     // One bar centred on the strike's level, as tall as a Call and a Put bar together.
-    const scale = Math.max(0, ...placed.map(({ r }) => Math.abs(r.ce - r.pe)));
+    const scale = Math.max(0, ...placed.map(({ r }) => Math.abs(oiDelta(r) ?? 0)));
     if (!(scale > 0)) return [];
     for (const { r, y } of placed) {
-      const d = r.ce - r.pe;
-      if (d === 0) continue;
+      const d = oiDelta(r);
+      if (d === null || d === 0) continue;
       const w = Math.max(1, (Math.abs(d) / scale) * maxW);
       out.push({ strike: r.strike, side: d > 0 ? 'CE' : 'PE', x: right - w, y: y - h, w, h: 2 * h, oi: d, max: r.strike === p.maxDeltaStrike, neg: false });
     }

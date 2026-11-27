@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildOiProfile, fmtOI, fmtOIChange, oiBarLabel, oiBars, oiChange, oiProfileKey, parseOiMode, placeOiLabels, oiBarsBelowChips, type OiBar } from './indexScalperOiProfile.ts';
+import { buildOiProfile, fmtOI, fmtOIChange, oiBarLabel, oiBars, oiChange, oiDelta, oiProfileKey, parseOiMode, placeOiLabels, oiBarsBelowChips, type OiBar } from './indexScalperOiProfile.ts';
 
 const chain = {
   '25300': { strike: 25300, ce: { oi: 1_000_000 }, pe: { oi: 4_000_000 } },
@@ -203,4 +203,21 @@ test('parseOiMode: saved modes round-trip, anything else is total', () => {
   for (const m of ['total', 'change', 'both', 'delta'] as const) assert.equal(parseOiMode(m), m);
   assert.equal(parseOiMode(null), 'total');
   assert.equal(parseOiMode('flow'), 'total');
+});
+
+test('Δ OI: a strike with one side not received yet (oi 0) gets no bar and sets neither the scale nor the max', () => {
+  const p = buildOiProfile({
+    '25300': { strike: 25300, ce: { oi: 4_000_000 }, pe: { oi: 6_000_000 } }, // −20L
+    '25350': { strike: 25350, ce: { oi: 9_000_000 }, pe: { oi: 0 } },         // PE tick not in yet
+    '25400': { strike: 25400, ce: { oi: 7_000_000 }, pe: { oi: 5_000_000 } }, // +20L
+  })!;
+  assert.equal(oiDelta({ ce: 9_000_000, pe: 0 }), null);
+  assert.equal(oiDelta({ ce: 0, pe: 5 }), null);
+  assert.equal(oiDelta({ ce: 7, pe: 5 }), 2);
+  assert.equal(p.maxDeltaStrike, 25300);           // first of the two 20L gaps (strict '>'), never the half-loaded 25350
+  const bars = oiBars(p, (price: number) => 100 + (25400 - price), 500, 400, 200, 'delta');
+  assert.equal(bars.some(b => b.strike === 25350), false);
+  assert.deepEqual(bars.map(b => b.w), [200, 200]); // the real gaps keep the full scale
+  // total mode still draws the side that is known
+  assert.equal(oiBars(p, (price: number) => 100 + (25400 - price), 500, 400, 200).some(b => b.strike === 25350 && b.side === 'CE'), true);
 });
