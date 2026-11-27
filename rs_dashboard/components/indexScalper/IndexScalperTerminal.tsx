@@ -66,7 +66,7 @@ import { cn } from '@/lib/utils';
 import { Switch } from '@/components/ui/switch';
 import type { OiMode } from '@/lib/indexScalperOiProfile';
 import { editLotsError, isEditable, movedLevels, orderEditError } from '@/lib/indexScalperOrderEdit';
-import { DEFAULT_BRACKETS, DEFAULT_BRACKETS_KEY, SL_PCT_OPTIONS, TP_PCT_OPTIONS, clampDefaultBrackets, defaultBracketPlan, opensPosition, pendingLeg, type DefaultBracketSettings, type PendingDefault } from '@/lib/indexScalperDefaultBrackets';
+import { DEFAULT_BRACKETS, DEFAULT_BRACKETS_KEY, SL_PCT_OPTIONS, TP_PCT_OPTIONS, bracketLabel, clampDefaultBrackets, parseBracketPoints, type BracketUnit, defaultBracketPlan, opensPosition, pendingLeg, type DefaultBracketSettings, type PendingDefault } from '@/lib/indexScalperDefaultBrackets';
 import { optionStopLimit, placedOrderState, premiumBracketsFor } from '@/lib/indexScalperPremiumBrackets';
 import { QUICK_ON_KEY, QUICK_SETTINGS_KEY, DEFAULT_QUICK, MAX_QUICK_RANGE, clampQuickSettings, lotsToRemove, type QuickSettings } from '@/lib/indexScalperQuickTrade';
 
@@ -786,7 +786,8 @@ export default function IndexScalperTerminal() {
     const long = req.side === 'BUY';
     if (!opensPosition(o.before, long, o.orderQty)) return; // adding to or reducing a position: its levels stay as they are
     pendingDefaultsRef.current.set(key, {
-      p: { legKey: key, long, at: Date.now(), tpPct: s.tpPct, slPct: s.slPct, entry: o.entry, product: o.product,
+      p: { legKey: key, long, at: Date.now(), tpPct: s.tpPct, slPct: s.slPct,
+        tpUnit: s.tpUnit, slUnit: s.slUnit, tpPts: s.tpPts, slPts: s.slPts, entry: o.entry, product: o.product,
         expectQty: o.before + (long ? o.orderQty : -o.orderQty) },
       real: o.isReal,
     });
@@ -2202,13 +2203,13 @@ export default function IndexScalperTerminal() {
           <div className="relative flex items-center">
             <button type="button" aria-label="Default target and stop settings" aria-expanded={defMenu}
               title={defBrackets.on
-                ? `Every new option position opened here at market gets a target ${defBrackets.tpPct}% and a stop ${defBrackets.slPct}% from its entry premium`
+                ? `Every new option position opened here at market gets a target ${bracketLabel(defBrackets, 'TP')} and a stop ${bracketLabel(defBrackets, 'SL')} from its entry premium`
                 : 'Default target / stop is off: new positions get no automatic levels'}
               onClick={() => setDefMenu(v => !v)}
               className={cn(btn, 'flex items-center px-1.5 gap-1 text-xs font-semibold', defMenu && 'bg-zinc-800 text-white')}>
               <Target className={cn('w-4 h-4', defBrackets.on ? 'text-emerald-400' : 'text-zinc-500')} aria-hidden />
               <span data-testid="default-brackets-chip" className={defBrackets.on ? 'text-zinc-200' : 'text-zinc-500'}>
-                {defBrackets.on ? `TP ${defBrackets.tpPct}% · SL ${defBrackets.slPct}%` : 'TP/SL off'}
+                {defBrackets.on ? `TP ${bracketLabel(defBrackets, 'TP')} · SL ${bracketLabel(defBrackets, 'SL')}` : 'TP/SL off'}
               </span>
             </button>
             {defMenu && <DefaultBracketsMenu settings={defBrackets} onPatch={patchDefBrackets} onClose={() => setDefMenu(false)} />}
@@ -2602,24 +2603,68 @@ function DefaultBracketsMenu({ settings, onPatch, onClose }: {
         <span>Default target / stop</span>
         <Switch size="sm" checked={settings.on} onCheckedChange={on => onPatch({ on })} aria-label="Default target and stop" />
       </label>
-      <label className="flex items-center justify-between gap-2 text-zinc-300">
-        <span>Target (% of entry)</span>
-        <select aria-label="Default target percent" value={settings.tpPct} disabled={!settings.on} onChange={e => onPatch({ tpPct: Number(e.target.value) })} className={sel}>
-          {TP_PCT_OPTIONS.map(n => <option key={n} value={n}>{n}%</option>)}
-        </select>
-      </label>
-      <label className="flex items-center justify-between gap-2 text-zinc-300">
-        <span>Stop loss (% of entry)</span>
-        <select aria-label="Default stop percent" value={settings.slPct} disabled={!settings.on} onChange={e => onPatch({ slPct: Number(e.target.value) })} className={sel}>
-          {SL_PCT_OPTIONS.map(n => <option key={n} value={n}>{n}%</option>)}
-        </select>
-      </label>
+      <DefaultLevelRow kind="TP" settings={settings} onPatch={onPatch} />
+      <DefaultLevelRow kind="SL" settings={settings} onPatch={onPatch} />
       <p className="text-[10px] leading-snug text-zinc-500">
         A new option position opened here at market gets these levels from its entry premium once it shows in the book:
         a buy&apos;s target above entry and stop below, a sell&apos;s the other way. REAL places a Limit target and an SL-M stop;
         SIM sets paper levels. Not for futures, added lots or limit entries; a position that already has a target / stop keeps it.
-        A 100% stop is 2x entry on a sell; on a buy it would be 0, so a buy gets no stop.
+        A 100% stop is 2x entry on a sell; on a buy it would be 0, so a buy gets no stop. Points are premium points
+        from entry (like the TSL), snapped to the tick away from entry.
       </p>
+    </div>
+  );
+}
+
+/** One side of the default levels: a % / pts unit switch, then a % select or a points box. The points box commits on
+ *  blur / Enter only (dhan-commit-on-blur); a refused value puts the box back. */
+function DefaultLevelRow({ kind, settings, onPatch }: {
+  kind: 'TP' | 'SL'; settings: DefaultBracketSettings; onPatch: (p: Partial<DefaultBracketSettings>) => void;
+}) {
+  const isTp = kind === 'TP';
+  const u = isTp ? settings.tpUnit : settings.slUnit;
+  const saved = isTp ? settings.tpPts : settings.slPts;
+  const [draft, setDraft] = useState(String(saved));
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => { setDraft(String(saved)); setErr(null); }, [saved]);
+  const commit = () => {
+    if (draft.trim() === String(saved)) { setErr(null); return; }
+    const r = parseBracketPoints(draft);
+    if (r.error !== null) { setErr(r.error); setDraft(String(saved)); return; }
+    setErr(null);
+    onPatch(isTp ? { tpPts: r.pts } : { slPts: r.pts });
+  };
+  const name = isTp ? 'target' : 'stop';
+  const ctl = 'h-7 w-16 px-1 rounded border border-zinc-700 bg-zinc-900 text-xs font-mono text-zinc-100 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60';
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between gap-2 text-zinc-300">
+        <span>{isTp ? 'Target' : 'Stop loss'} ({u === 'pts' ? 'points' : '% of entry'})</span>
+        <div className="flex items-center gap-1.5">
+          <div role="group" aria-label={`Default ${name} unit`} className={cn('flex rounded border border-zinc-700 overflow-hidden', !settings.on && 'opacity-40')}>
+            {([['pct', '%'], ['pts', 'Pts']] as const).map(([v, label]) => (
+              <button key={v} type="button" aria-pressed={u === v} disabled={!settings.on}
+                aria-label={`Default ${name} in ${v === 'pct' ? 'percent' : 'points'}`}
+                onClick={() => onPatch(isTp ? { tpUnit: v as BracketUnit } : { slUnit: v as BracketUnit })}
+                className={cn('h-7 px-1.5 text-[11px] font-bold disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
+                  u === v ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}>{label}</button>
+            ))}
+          </div>
+          {u === 'pct' ? (
+            <select aria-label={`Default ${name} percent`} value={isTp ? settings.tpPct : settings.slPct} disabled={!settings.on}
+              onChange={e => onPatch(isTp ? { tpPct: Number(e.target.value) } : { slPct: Number(e.target.value) })} className={ctl}>
+              {(isTp ? TP_PCT_OPTIONS : SL_PCT_OPTIONS).map(n => <option key={n} value={n}>{n}%</option>)}
+            </select>
+          ) : (
+            <input aria-label={`Default ${name} points`} inputMode="decimal" value={draft} disabled={!settings.on}
+              aria-invalid={err !== null}
+              onChange={e => setDraft(e.target.value)} onBlur={commit}
+              onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') { setDraft(String(saved)); setErr(null); } e.stopPropagation(); }}
+              className={cn(ctl, 'text-right')} />
+          )}
+        </div>
+      </div>
+      {err && <p role="alert" className="text-[10px] text-red-400">{err}</p>}
     </div>
   );
 }

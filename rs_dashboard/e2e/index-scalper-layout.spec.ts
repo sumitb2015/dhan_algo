@@ -1503,6 +1503,41 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('default TP / SL in points: target in Pts, stop kept in %, a SIM buy gets entry + points and the chip says so', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'Default target and stop settings' }).click();
+    const panel = page.getByRole('dialog', { name: 'Default target and stop panel' });
+    await panel.getByRole('button', { name: 'Default target in points' }).click();
+    const pts = panel.getByLabel('Default target points');
+    await expect(pts).toHaveValue('20');
+    // A bad value is refused and the box goes back; nothing changes.
+    await pts.fill('abc');
+    await pts.press('Enter');
+    await expect(panel.getByRole('alert')).toBeVisible();
+    await expect(pts).toHaveValue('20');
+    await pts.fill('25.5');
+    await pts.press('Enter');
+    await expect(page.getByTestId('default-brackets-chip')).toHaveText('TP 25.5 pts · SL 20%');
+    await page.keyboard.press('Escape');
+    await page.getByRole('switch', { name: 'Quick Trade' }).click();
+    const pane = page.getByTestId('chart-pane-0');
+    const overlay = pane.getByTestId('quick-overlay');
+    await overlay.getByRole('button', { name: 'Quick 25350 CE' }).click();
+    await overlay.getByRole('button', { name: 'Quick buy 25350 CE 1 lot' }).click();
+    const chip = pane.getByTestId('position-chip');
+    // entry 210.50: target 210.50 + 25.5 = 236.00, stop 210.50 x 0.8 = 168.40
+    await expect(chip.getByTestId('premium-tp')).toContainText('TP 236.00', { timeout: 15_000 });
+    await expect(chip.getByTestId('premium-sl')).toContainText('SL 168.40');
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('default-brackets-chip')).toHaveText('TP 25.5 pts · SL 20%', { timeout: 60_000 });
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
   test('default TP / SL in REAL: once the market buy shows in the book, a Limit target and an SL-M stop are sent once', async ({ page, context }) => {
     const state = newState();
     await signIn(context);

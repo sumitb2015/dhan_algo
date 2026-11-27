@@ -32,7 +32,7 @@ export function premiumBracketsFor(leg: ScalperLeg, orders: OrderLike[], sim?: {
 const DECIMAL = /^(\d+(\.\d*)?|\.\d+)$/;
 
 /** Snap to the tick in one direction (`up` = ceil, else floor), tolerant of float noise (0.1 * 3 = 0.30000000000000004). */
-function snapAway(price: number, tick: number, up: boolean): number {
+export function snapAway(price: number, tick: number, up: boolean): number {
   const steps = price / tick;
   const n = up ? Math.ceil(steps - 1e-9) : Math.floor(steps + 1e-9);
   return Number((n * tick).toFixed(2));

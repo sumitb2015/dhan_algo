@@ -1,17 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clampDefaultBrackets, defaultBracketPlan, opensPosition, pendingLeg, DEFAULT_BRACKETS, PENDING_TTL_MS, type PendingDefault } from './indexScalperDefaultBrackets.ts';
+import { bracketLabel, clampDefaultBrackets, defaultBracketPlan, parseBracketPoints, pointsLevel, opensPosition, pendingLeg, DEFAULT_BRACKETS, PENDING_TTL_MS, type PendingDefault } from './indexScalperDefaultBrackets.ts';
 
 const none = { tp: false, sl: false };
 const pend = (long: boolean, over: Partial<PendingDefault> = {}): PendingDefault => ({ legKey: '302', long, at: 1000, tpPct: 30, slPct: 20, entry: 0, product: '', expectQty: long ? 65 : -65, ...over });
 
 test('defaults: on, target 30 %, stop 20 %; bad saved values fall back', () => {
-  assert.deepEqual(DEFAULT_BRACKETS, { on: true, tpPct: 30, slPct: 20 });
+  const units = { tpUnit: 'pct', slUnit: 'pct', tpPts: 20, slPts: 10 } as const;
+  assert.deepEqual(DEFAULT_BRACKETS, { on: true, tpPct: 30, slPct: 20, ...units });
   assert.deepEqual(clampDefaultBrackets(null), DEFAULT_BRACKETS);
-  assert.deepEqual(clampDefaultBrackets({ on: false, tpPct: 50, slPct: 10 }), { on: false, tpPct: 50, slPct: 10 });
+  assert.deepEqual(clampDefaultBrackets({ on: false, tpPct: 50, slPct: 10 }), { on: false, tpPct: 50, slPct: 10, ...units });
   // not an offered choice / wrong type -> default
   assert.deepEqual(clampDefaultBrackets({ on: 'yes', tpPct: 33, slPct: 0 }), DEFAULT_BRACKETS);
-  assert.deepEqual(clampDefaultBrackets({ tpPct: '40', slPct: '25' }), { on: true, tpPct: 40, slPct: 25 });
+  assert.deepEqual(clampDefaultBrackets({ tpPct: '40', slPct: '25' }), { on: true, tpPct: 40, slPct: 25, ...units });
 });
 
 test('a long: target +30 % and stop -20 % of the entry premium, on the tick, rounded away from entry', () => {
@@ -97,4 +98,38 @@ test('stop loss can be set up to 100 %: a sell\'s stop at 2x entry, a buy gets n
   const long = defaultBracketPlan(pend(true, { slPct: 100 }), { netQty: 65, avg: 100, ltp: 100 }, none, 0.05, 2000);
   assert.equal(long.kind, 'place');
   if (long.kind === 'place') { assert.equal(long.tp, 130); assert.equal(long.sl, null); assert.equal(long.skipped.length, 1); }
+});
+
+test('points: saved units / distances are kept, bad ones fall back; labels read the chosen unit', () => {
+  const s = clampDefaultBrackets({ tpUnit: 'pts', slUnit: 'pct', tpPts: 12.5, slPts: '8' });
+  assert.equal(s.tpUnit, 'pts'); assert.equal(s.slUnit, 'pct'); assert.equal(s.tpPts, 12.5); assert.equal(s.slPts, 8);
+  const bad = clampDefaultBrackets({ tpUnit: 'rupees', tpPts: -3, slPts: 99999 });
+  assert.equal(bad.tpUnit, 'pct'); assert.equal(bad.tpPts, 20); assert.equal(bad.slPts, 10);
+  assert.equal(bracketLabel(s, 'TP'), '12.5 pts');
+  assert.equal(bracketLabel(s, 'SL'), '20%');
+});
+
+test('parseBracketPoints: plain decimals above 0 only', () => {
+  assert.deepEqual(parseBracketPoints(' 15 '), { pts: 15, error: null });
+  assert.deepEqual(parseBracketPoints('7.5'), { pts: 7.5, error: null });
+  for (const t of ['', '0', '-5', '1e3', 'abc', '10%', '6000']) assert.equal(parseBracketPoints(t).pts, null, t);
+});
+
+test('a long in points: target entry + pts, stop entry - pts, snapped away from entry', () => {
+  const plan = defaultBracketPlan(pend(true, { tpUnit: 'pts', slUnit: 'pts', tpPts: 15, slPts: 10.02 }), { netQty: 65, avg: 100.05, ltp: 101 }, none, 0.05, 2000);
+  // 100.05 + 15 = 115.05; 100.05 - 10.02 = 90.03 -> down to 90.00
+  assert.deepEqual(plan, { kind: 'place', tp: 115.05, sl: 90, skipped: [] });
+});
+
+test('a short in points; mixed units per side', () => {
+  const short = defaultBracketPlan(pend(false, { entry: 200, tpUnit: 'pts', tpPts: 30, slUnit: 'pct' }), { netQty: -65, avg: 200, ltp: 200 }, none, 0.05, 2000);
+  assert.deepEqual(short, { kind: 'place', tp: 170, sl: 240, skipped: [] });
+});
+
+test('a points stop at or past a premium of 0 is skipped with its reason', () => {
+  assert.equal(pointsLevel('SL', true, 10, 10, 0.05).price, null);
+  assert.equal(pointsLevel('SL', false, 10, 10, 0.05).price, 20); // a sell's stop is above entry
+  const plan = defaultBracketPlan(pend(true, { slUnit: 'pts', slPts: 50 }), { netQty: 65, avg: 40, ltp: 40 }, none, 0.05, 2000);
+  assert.equal(plan.kind, 'place');
+  if (plan.kind === 'place') { assert.equal(plan.sl, null); assert.equal(plan.skipped.length, 1); assert.equal(plan.tp, 52); }
 });
