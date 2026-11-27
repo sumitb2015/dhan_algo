@@ -113,3 +113,25 @@ test('SENSEX anchors and TP / SL kind follow the index rules', () => {
   assert.equal(bracketKind('STOP_LOSS', 330, 300, false), 'SL');
   assert.equal(bracketKind('LIMIT', 250, 300, false), 'TP');
 });
+
+test('Dhan rows: a SENSEX option whose trading symbol form is unknown is taken from its own contract fields', async () => {
+  const { dhanRowContract } = await import('./indexScalperPositions.ts');
+  const rows = [
+    // a symbol form the parser does not know (Dhan's trade-book style): from drvOptionType / drvStrikePrice
+    { tradingSymbol: 'SENSEX 03 DEC 85000 CALL', securityId: '1165299', exchangeSegment: 'BSE_FNO', productType: 'INTRADAY', netQty: -40, sellAvg: 320, drvOptionType: 'CALL', drvStrikePrice: 85000 },
+    { tradingSymbol: 'SENSEX03DEC84900PE', securityId: '1165202', exchangeSegment: 'BSE_FNO', productType: 'MARGIN', netQty: 20, buyAvg: 280, drvOptionType: 'PUT', drvStrikePrice: 84900 },
+    // never: a future, another segment, another root, no strike
+    { tradingSymbol: 'SENSEX DEC FUT', securityId: '1145756', exchangeSegment: 'BSE_FNO', productType: 'MARGIN', netQty: 20, buyAvg: 84900, drvOptionType: 'XX', drvStrikePrice: -0.01 },
+    { tradingSymbol: 'SENSEX 03 DEC 85100 CALL', securityId: '1', exchangeSegment: 'NSE_FNO', netQty: 20, buyAvg: 1, drvOptionType: 'CALL', drvStrikePrice: 85100 },
+    { tradingSymbol: 'SENSEXX 03 DEC 85100 CALL', securityId: '2', exchangeSegment: 'BSE_FNO', netQty: 20, buyAvg: 1, drvOptionType: 'CALL', drvStrikePrice: 85100 },
+    { tradingSymbol: 'SENSEX 03 DEC CALL', securityId: '3', exchangeSegment: 'BSE_FNO', netQty: 20, buyAvg: 1, drvOptionType: 'CALL' },
+  ];
+  const legs = legsFromDhanPositions(rows, new Map(), 'SENSEX');
+  assert.deepEqual(legs.map(l => [l.securityId, l.type, l.strike, l.netQty]), [['1165299', 'CE', 85000, -40], ['1165202', 'PE', 84900, 20]]);
+  assert.deepEqual([...guardScopeIds(rows, 'SENSEX', 'dhan')], ['1165299', '1165202']);
+  // the known form still parses from the symbol; NIFTY never takes a SENSEX row
+  assert.deepEqual(dhanRowContract({ tradingSymbol: 'SENSEX-Dec2026-85000-CE', exchangeSegment: 'BSE_FNO' }, 'SENSEX'), { strike: 85000, type: 'CE' });
+  assert.equal(dhanRowContract(rows[0], 'NIFTY'), null);
+  // MCX never falls back
+  assert.equal(dhanRowContract({ tradingSymbol: 'CRUDEOILM 17 DEC 6000 CALL', exchangeSegment: 'MCX_COMM', drvOptionType: 'CALL', drvStrikePrice: 6000 }, 'CRUDEOILM'), null);
+});

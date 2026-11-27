@@ -29,7 +29,17 @@ Always pass numeric ids, never the bare symbol "SENSEX" (resolves to 51, whose c
 | Display fallback | Unknown lot -> `displayLotUnits` = 1 (counts units rather than a guessed lot count) |
 
 ## Traps
-- A ticket bound to one expiry must keep that expiry's lot size when the expiry on screen changes (20 vs 25 straddles the Dec/Jan boundary).
+- **Every lots <-> units conversion uses the contract's OWN lot** (`lib/indexScalperLots.ts`: `lotOf(id)` in the
+  terminal, `lotSizes` on the chart): the screen expiry's strikes get its lot, Kotak contracts the symbol lookup's
+  `lotSize`, any other Dhan contract (a held / working leg in another expiry) the master list via
+  `GET /api/index-scalper/lots?segment=BSE_FNO&ids=`. Unknown = refused. Before (review 2026-11-27) the screen's lot was
+  used everywhere: a Dec order edited to "4 lots" under a Jan screen sent 100 units (5 Dec lots), "+4" opened 5. Exit /
+  Exit All were never affected (they close the broker's own quantity).
+- A ticket bound to one expiry keeps that expiry's lot size when the expiry on screen changes (20 vs 25 straddles the Dec/Jan boundary).
+- Dhan's position `tradingSymbol` form for BSE options is unobserved: `dhanRowContract` takes an option from the row's
+  own `exchangeSegment` (BSE_FNO) + exact root + `drvOptionType` CALL / PUT + `drvStrikePrice` when the symbol does not
+  parse, so a SENSEX leg never drops out of Exit All / the MTM guard. Confirm the real form on the first live position.
+- Price alerts resolve NSE / MCX contracts only (`lib/pnfContracts.ts`): a SENSEX alert is refused.
 - Segment labels for Kotak rows come from `dhanSegmentOfSymbol` (`^SENSEX` -> BSE_FNO); never used to route an order.
 - Kotak order route derives exchange from the contract's own `segment`, falling back to `bse_fo`.
 - BSE option liquidity is thinner: market orders on a strike outside the bridge's 35-strike window refuse.

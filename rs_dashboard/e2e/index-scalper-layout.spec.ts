@@ -82,6 +82,8 @@ async function mockApi(page: Page, state: State) {
     if (p === '/api/scalper/orders' && method === 'DELETE') { state.calls.push({ path: p, body }); return json(route, { success: true }); }
     if (p === '/api/scalper/orders' && method === 'PATCH') { state.calls.push({ path: `${p}#PATCH`, body }); return json(route, { success: true }); }
     if (p === '/api/index-scalper/tick') return json(route, { success: true, tick: 0.05 });
+    // each contract's own lot (master list): every NIFTY expiry is 65
+    if (p === '/api/index-scalper/lots') return json(route, { success: true, lots: Object.fromEntries((u.searchParams.get('ids') ?? '').split(',').filter(Boolean).map(id => [id, 65])) });
     if (p === '/api/index-scalper/holdings') return json(route, { success: true, data: [] });
     if (p === '/api/scalper/fast-order') { state.calls.push({ path: p, body }); return json(route, { success: true, order_id: '7001' }); }
     if (method === 'POST' && (p === '/api/live-indices' || p === '/api/live-equity')) { state.bridgeStarts.push(p); return json(route, { success: true }); }

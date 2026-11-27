@@ -126,6 +126,9 @@ interface Props {
   onCancelTrail?: (legId: string) => void;
   underlying?: Underlying;
   feedLotSize?: number | null;
+  /** Each contract's own lot (Dhan id / Kotak symbol -> units per lot): a leg or order in another expiry than the one on
+   *  screen keeps its own (SENSEX 20 vs 25). Missing ids fall back to `feedLotSize` (display only). */
+  lotSizes?: Map<string, number>;
   /** Contract units per order-book quantity unit: Dhan MCX orders count lots (10), everything else units (1). */
   orderQtyMult?: number;
   /** This chart plots an option's premium: legs are drawn at their average premium and TP / SL are premium levels.
@@ -200,7 +203,7 @@ function ScalperChart(props: Props) {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, showGrid = true, showVolume = true, volumeMaLen = 20, legs, entrySpots,
     onExitLeg, onAdjustLeg, adjustLots = 1, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, ordersEnabled = true, onPlaceLimitOrder, onOpenTicket, onAlert, alertLines = NO_ALERT_LINES, onMoveAlert,
-    simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, trails, onSetTrail, onCancelTrail, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
+    simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, trails, onSetTrail, onCancelTrail, underlying = 'NIFTY', feedLotSize, lotSizes, orderQtyMult = 1,
     premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, resetSeq = 0, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false, premiumOrders,
   } = props;
   const drawKeyRef = useRef(drawKeyProp);
@@ -1583,7 +1586,7 @@ function ScalperChart(props: Props) {
         const isBuy = ord.side === 'BUY';
         const canEdit = !!onModifyOrder && isEditable(ord);
         // Order qty is in the broker's own unit (Dhan MCX: lots; Kotak / NSE: units): orderQtyMult converts it.
-        const lotSize = displayLotUnits(underlying, feedLotSize);
+        const lotSize = displayLotUnits(underlying, lotSizes?.get(ord.securityId ?? '') ?? feedLotSize);
         const ordLots = ord.qty ? Math.max(1, Math.round(qtyUnits(ord.qty, orderQtyMult) / lotSize)) : null;
         const lineY = chipTops[`oline_${ord.id}`];
         const active = activeOrd === ord.id;
@@ -1652,7 +1655,7 @@ function ScalperChart(props: Props) {
         if (!b) return null;
         const isLong = p.leg.netQty > 0;
         // netQty is in the broker's own unit (Dhan MCX: lots; Kotak / SIM / NSE: units): leg.mult converts it.
-        const lotSize = displayLotUnits(underlying, feedLotSize);
+        const lotSize = displayLotUnits(underlying, lotSizes?.get(p.leg.securityId) ?? feedLotSize);
         const totalUnits = qtyUnits(p.leg.netQty, p.leg.mult ?? 1);
         const lots = Math.max(1, Math.round(totalUnits / lotSize));
 
@@ -1805,7 +1808,7 @@ function ScalperChart(props: Props) {
         if (top === undefined) return null;
         const isLong = p.leg.netQty > 0;
         // netQty is in the broker's own unit (Dhan MCX: lots; Kotak / SIM / NSE: units): leg.mult converts it.
-        const lotSize = displayLotUnits(underlying, feedLotSize);
+        const lotSize = displayLotUnits(underlying, lotSizes?.get(p.leg.securityId) ?? feedLotSize);
         const totalUnits = qtyUnits(p.leg.netQty, p.leg.mult ?? 1);
         const lots = Math.max(1, Math.round(totalUnits / lotSize));
 

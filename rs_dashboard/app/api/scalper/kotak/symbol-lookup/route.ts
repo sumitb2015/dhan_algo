@@ -15,6 +15,7 @@ interface CachedInstrument {
   strike: number;
   expiry: string;
   instrument_type: 'CE' | 'PE' | 'FUT';
+  lot_size?: number;
 }
 
 async function ensureCache(underlying: string): Promise<CachedInstrument[]> {
@@ -48,9 +49,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   try {
     const all = await ensureCache(underlying);
-    const symbols: Record<string, { expiry: string; strike: number; side: 'CE' | 'PE' | 'FUT' }> = {};
+    const symbols: Record<string, { expiry: string; strike: number; side: 'CE' | 'PE' | 'FUT'; lotSize?: number }> = {};
     for (const r of all) {
-      symbols[r.tradingsymbol] = { expiry: r.expiry, strike: r.strike, side: r.instrument_type };
+      // lotSize: the contract's own (Kotak units per lot). SENSEX's changes with the series (20 -> 25 from Jan 2027), so
+      // a position in another expiry than the one on screen is sized with it, never the screen's.
+      symbols[r.tradingsymbol] = { expiry: r.expiry, strike: r.strike, side: r.instrument_type, ...(Number(r.lot_size) > 0 ? { lotSize: Number(r.lot_size) } : {}) };
     }
     return NextResponse.json({ success: true, data: symbols });
   } catch (err) {

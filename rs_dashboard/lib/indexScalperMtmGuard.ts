@@ -8,7 +8,7 @@
 // guard therefore sums only that underlying's rows (`guardScopeIds`, the legs' own symbol rules): an account-wide total
 // let another underlying's P&L trip an exit of this one (and then switch the guard off with that loss still open).
 
-import { parseScalperContract } from './indexScalperPositions.ts';
+import { dhanRowContract } from './indexScalperPositions.ts';
 import { isMcx, type Underlying } from './indexScalperInstrument.ts';
 
 export interface MtmGuardSettings {
@@ -57,7 +57,7 @@ export function mtmGuardTrip(g: MtmGuardSettings, pnl: number | null, unpriced: 
 
 /**
  * The broker rows (open AND closed today) that belong to the underlying on screen, by the id the panel rows carry: Dhan's
- * security id, Kotak's trading symbol. Dhan: the legs' own parser (`parseScalperContract`). Kotak: the exact root then a
+ * security id, Kotak's trading symbol. Dhan: the legs' own rule (`dhanRowContract`: the symbol, else the row's contract fields). Kotak: the exact root then a
  * digit (CRUDEOIL never takes CRUDEOILM's rows). A Kotak row of this root on another expiry is in scope: its realized
  * P&L counts, and while it is open with no price the guard pauses rather than trip on a partial total.
  */
@@ -70,7 +70,7 @@ export function guardScopeIds(rows: Record<string, unknown>[], underlying: Under
       // out of scope too.
       if (!isMcx(underlying) && sym.endsWith('FUT')) continue;
       if (sym.startsWith(underlying) && /\d/.test(sym.charAt(underlying.length))) ids.add(sym);
-    } else if (parseScalperContract(sym, underlying)) {
+    } else if (dhanRowContract(r, underlying)) {
       const id = String(r.securityId ?? r.security_id ?? '');
       if (id) ids.add(id);
     }

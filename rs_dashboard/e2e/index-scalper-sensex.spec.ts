@@ -31,7 +31,15 @@ type MockState = {
   calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[];
   candleCalls: string[]; lookups: string[]; liveStarts: Record<string, unknown>[];
   kotakPositions?: Record<string, unknown>[];
+  /** The screen shows the Jan 2027 weekly (lot 25) instead of Dec 3 (lot 20). */
+  jan?: boolean;
+  lotCalls?: string[];
 };
+// Jan 2027 weekly contracts (lot 25); the Dec ids above are lot 20.
+const JAN_IDS: Record<string, [string, string]> = { '84900': ['1172201', '1172202'], '85000': ['1172299', '1172300'], '85100': ['1172401', '1172402'] };
+const MASTER_LOTS: Record<string, number> = Object.fromEntries([
+  ...Object.values(IDS).flat().map(id => [id, 20]), ...Object.values(JAN_IDS).flat().map(id => [id, 25]),
+]);
 
 async function mockApi(page: Page, state: MockState) {
   await page.route('**/api/**', async (route: Route) => {
@@ -47,14 +55,19 @@ async function mockApi(page: Page, state: MockState) {
       const kind = u.searchParams.get('kind') ?? 'underlying';
       return json(route, { success: true, candles: candles(kind === 'option' ? 300 : und === 'SENSEX' ? SPOT : 25350), interval: '5' });
     }
-    if (p === '/api/options/expiries') return json(route, { success: true, data: [und === 'SENSEX' ? '2026-12-03' : '2026-12-01'] });
+    if (p === '/api/options/expiries') return json(route, { success: true, data: [und === 'SENSEX' ? (state.jan ? '2027-01-07' : '2026-12-03') : '2026-12-01'] });
+    if (p === '/api/index-scalper/lots') {
+      (state.lotCalls ??= []).push(req.url());
+      const ids = (u.searchParams.get('ids') ?? '').split(',').filter(Boolean);
+      return json(route, { success: true, lots: Object.fromEntries(ids.filter(id => MASTER_LOTS[id]).map(id => [id, MASTER_LOTS[id]])) });
+    }
     if (p === '/api/scalper/lookup') {
       state.lookups.push(`${und}:${u.searchParams.get('expiry')}`);
-      const ids = und === 'SENSEX' ? IDS : NIFTY_IDS;
+      const ids = und === 'SENSEX' ? (state.jan ? JAN_IDS : IDS) : NIFTY_IDS;
       const strikes = Object.fromEntries(Object.entries(ids).map(([k, [ce, pe]]) => [k, { ceId: ce, peId: pe }]));
       // the shape scripts/tools/scalper_api.py `lookup` returns: SENSEX's lot from the expiry's own rows + its BSE future
       return json(route, { success: true, data: und === 'SENSEX'
-        ? { lotSize: LOT, strikes, future: { securityId: FUT_ID, expiry: '2026-12-31' }, freezeQty: 1001 }
+        ? { lotSize: state.jan ? 25 : LOT, strikes, future: { securityId: FUT_ID, expiry: '2026-12-31' }, freezeQty: 1001 }
         : { lotSize: 65, strikes } });
     }
     if (p === '/api/options/chain') return json(route, { success: true, data: { chain: { oc: {} }, spot: SPOT } });
@@ -73,7 +86,7 @@ async function mockApi(page: Page, state: MockState) {
       return json(route, {
         success: true, status: { status: 'RUNNING' },
         quotes: und === 'SENSEX'
-          ? { underlying: 'SENSEX', expiry: '2026-12-03', spot: SPOT, atm: 85000, updated_at: sessionIso(), strikes,
+          ? { underlying: 'SENSEX', expiry: state.jan ? '2027-01-07' : '2026-12-03', spot: SPOT, atm: 85000, updated_at: sessionIso(), strikes,
               future: { ltp: SPOT + 40, symbol: '', expiry: '2026-12-31', volume: 5000 } }
           : { underlying: 'NIFTY', expiry: '2026-12-01', spot: 25350, atm: 25350, updated_at: sessionIso(), strikes },
       });
@@ -130,7 +143,7 @@ async function openSensex(page: Page, context: import('@playwright/test').Browse
   await expect(page.getByLabel('Broker for new orders')).toBeEnabled({ timeout: 30_000 }); // hydrated: clicks land
   await page.getByRole('button', { name: 'SENSEX', exact: true }).click();
   await expect(page.getByRole('button', { name: 'SENSEX', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await expect.poll(() => state.lookups.includes('SENSEX:2026-12-03'), { timeout: 15_000 }).toBe(true);
+  await expect.poll(() => state.lookups.includes(`SENSEX:${state.jan ? '2027-01-07' : '2026-12-03'}`), { timeout: 15_000 }).toBe(true);
 }
 
 test.describe('Index Scalper - SENSEX (BSE)', () => {
@@ -271,6 +284,45 @@ test.describe('Index Scalper - SENSEX (BSE)', () => {
     expect(state.calls[0].path).toBe('/api/index-scalper/kotak-order');
     expect(state.calls[0].body).toMatchObject({ tradingSymbol: 'SENSEX26D0385000CE', quantity: 60, side: 'SELL', intent: 'open' });
     expect(state.calls[0].body).not.toHaveProperty('securityId');
+    expect(state.blocked).toEqual([]);
+  });
+  test('a Dec position (lot 20) under a Jan screen (lot 25) is sized with ITS lot: 4 lots shown, Reverse sends 80 units, not 100', async ({ page, context }) => {
+    const state = newState();
+    state.jan = true;
+    state.positions = [
+      { tradingSymbol: 'SENSEX-Dec2026-85000-CE', securityId: '1165299', exchangeSegment: 'BSE_FNO', productType: 'INTRADAY', netQty: -80, sellAvg: 320.5, buyAvg: 0, costPrice: 320.5, positionType: 'SHORT' },
+    ];
+    await openSensex(page, context, state);
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: /Arm REAL on Dhan/i }).click();
+    // the Dec contract's lot is asked from the master list (it is not on the Jan screen)
+    await expect.poll(() => (state.lotCalls ?? []).some(c => c.includes('segment=BSE_FNO') && c.includes('1165299')), { timeout: 15_000 }).toBe(true);
+    const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
+    await expect(chip.getByTestId('position-lots')).toHaveText('4', { timeout: 15_000 }); // 80 / 20, not 80 / 25
+    await chip.getByRole('button', { name: 'Reverse CE 85000' }).click();
+    await page.getByRole('alertdialog', { name: 'Reverse position' }).getByRole('button', { name: /^Reverse to long/ }).click();
+    await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(2);
+    expect(state.calls[0].body).toMatchObject({ securityId: '1165299', exchangeSegment: 'BSE_FNO', side: 'BUY', quantity: 80, source: 'isxx' });
+    expect(state.calls[1].body).toMatchObject({ securityId: '1165299', exchangeSegment: 'BSE_FNO', side: 'BUY', quantity: 80, source: 'isx' });
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('a held contract whose lot the master list does not know: Reverse is refused, nothing sent', async ({ page, context }) => {
+    const state = newState();
+    state.jan = true;
+    state.positions = [
+      { tradingSymbol: 'SENSEX-Dec2026-85000-PE', securityId: '1199999', exchangeSegment: 'BSE_FNO', productType: 'INTRADAY', netQty: 40, buyAvg: 200, sellAvg: 0, costPrice: 200, positionType: 'LONG' },
+    ];
+    await openSensex(page, context, state);
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: /Arm REAL on Dhan/i }).click();
+    const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
+    await expect(chip).toBeVisible({ timeout: 15_000 });
+    await expect.poll(() => (state.lotCalls ?? []).some(c => c.includes('1199999')), { timeout: 15_000 }).toBe(true);
+    await chip.getByRole('button', { name: 'Reverse PE 85000' }).click();
+    await page.getByRole('alertdialog', { name: 'Reverse position' }).getByRole('button', { name: /^Reverse to short/ }).click();
+    await expect(page.getByText(/Cannot reverse PE 85000/)).toBeVisible({ timeout: 15_000 });
+    expect(state.calls).toEqual([]);
     expect(state.blocked).toEqual([]);
   });
 });

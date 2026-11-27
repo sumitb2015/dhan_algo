@@ -5,7 +5,7 @@
 
 import { parseTradingSymbol, symbolMatchesUnderlying } from './positionLegs.ts';
 import { dedupePositions, positionProduct } from './positionProduct.ts';
-import { isMcx, pnlMultiplier, type Underlying } from './indexScalperInstrument.ts';
+import { INSTRUMENTS, isMcx, pnlMultiplier, type Underlying } from './indexScalperInstrument.ts';
 
 export interface ScalperLeg {
   /** Stable key: `securityId|product` for a REAL broker row (a security can carry an INTRADAY and a MARGIN row), the
@@ -194,6 +194,27 @@ export function parseScalperContract(tradingSymbol: string, underlying: Underlyi
   return null;
 }
 
+/**
+ * The contract of one Dhan position row on this underlying, or null. The trading symbol first (`parseScalperContract`);
+ * when its form is one the parser does not know, an index OPTION is taken from the row's own contract fields instead:
+ * the underlying's segment (NIFTY NSE_FNO, SENSEX BSE_FNO), the exact root, `drvOptionType` CALL / PUT and a positive
+ * `drvStrikePrice`. Dhan's position symbol for a BSE option has never been seen in this repo (2026-11-27), and a SENSEX
+ * leg that silently failed to parse would be missing from Exit All and the MTM guard. Futures and MCX never fall back.
+ */
+export function dhanRowContract(r: Record<string, unknown>, underlying: Underlying): { strike: number; type: 'CE' | 'PE' | 'FUT' } | null {
+  const sym = String(r.tradingSymbol ?? r.trading_symbol ?? '');
+  const parsed = parseScalperContract(sym, underlying);
+  if (parsed) return parsed;
+  if (isMcx(underlying)) return null;
+  if (String(r.exchangeSegment ?? r.exchange_segment ?? '').toUpperCase() !== INSTRUMENTS[underlying].dhanSegment) return null;
+  if (!new RegExp(`^${underlying}(?=[\\s\\d-]|$)`).test(sym.trim().toUpperCase())) return null;
+  const t = String(r.drvOptionType ?? '').toUpperCase();
+  const type = t === 'CALL' || t === 'CE' ? 'CE' : t === 'PUT' || t === 'PE' ? 'PE' : null;
+  const strike = Number(r.drvStrikePrice);
+  if (!type || !Number.isFinite(strike) || strike <= 0) return null;
+  return { strike, type };
+}
+
 /** NIFTY option strike/type out of a Dhan trading symbol ("NIFTY-Dec2026-25350-PE"); null for anything else. Kept for backwards compatibility. */
 export function parseNiftyOption(tradingSymbol: string): { strike: number; type: 'CE' | 'PE' } | null {
   const parsed = parseScalperContract(tradingSymbol, 'NIFTY');
@@ -213,7 +234,7 @@ export function legsFromDhanPositions(
   const mult = pnlMultiplier(underlying, 'dhan');
   for (const r of dedupePositions(rows)) {
     const sym = String(r.tradingSymbol ?? r.trading_symbol ?? '');
-    const parsed = parseScalperContract(sym, underlying);
+    const parsed = dhanRowContract(r, underlying);
     if (!parsed) continue;
     const netQty = Number(r.netQty);
     if (!Number.isFinite(netQty) || netQty === 0) continue;

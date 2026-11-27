@@ -61,6 +61,8 @@ async function mock(page: Page, s: KState) {
       const map: Record<string, unknown> = {};
       for (const k of Object.keys(DHAN_IDS)) for (const t of ['CE', 'PE'] as const) map[KSYM(k, t)] = { underlying: 'NIFTY', expiry: '2026-12-01', strike: Number(k), side: t };
       Object.assign(map, s.extraSyms ?? {});
+      // each Kotak contract's own lot (symbol-lookup carries it): NIFTY is 65 on every expiry
+      for (const v of Object.values(map) as Record<string, unknown>[]) if (v && v.lotSize === undefined) v.lotSize = 65;
       return json(route, { success: true, data: map });
     }
     if (p === '/api/scalper/kotak/funds') return json(route, { success: true, data: { availabelBalance: 500000, availableBalance: 500000, utilizedAmount: 1200 } });

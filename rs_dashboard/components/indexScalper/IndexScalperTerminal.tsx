@@ -51,6 +51,7 @@ import { istDateIso, isRegularSession } from '@/lib/nseHolidays';
 import {
   INSTRUMENTS, dhanOrderQty, dhanSegmentOfSymbol, isMcx, isUnderlying, kotakOrderQty, pnlMultiplier, lotUnits, qtyLots, nrmlOnly, openingProduct, type Underlying,
 } from '@/lib/indexScalperInstrument';
+import { buildLotMap, contractLot, missingLotIds } from '@/lib/indexScalperLots';
 import {
   applyFill, brokerCloseOrder, legsFromDhanPositions, legsKey, legsOpenedElsewhere, orderUnits, pageFilledQty, type ScalperLeg,
 } from '@/lib/indexScalperPositions';
@@ -667,6 +668,41 @@ export default function IndexScalperTerminal() {
   const simOrderRows = useMemo(() => simOrders.filter(o => o.underlying === underlying).map(simOrderRow), [simOrders, underlying]);
   const ordersView = useMemo(() => (real ? panelOrders : [...simOrderRows, ...panelOrders]), [real, panelOrders, simOrderRows]);
 
+  // Each contract's OWN lot size (lib/indexScalperLots.ts): the expiry on screen gives its strikes' lot, Kotak's symbol
+  // lookup each Kotak contract's, and the master list (api/index-scalper/lots) a Dhan position / order in another expiry.
+  // SENSEX's lot changes with the series (20 -> 25 from Jan 2027): a Dec leg sized with a Jan screen's lot could send 5
+  // Dec lots for "4". Unknown = refused, never the screen's lot.
+  const [masterLots, setMasterLots] = useState<{ u: Underlying; lots: Record<string, number> }>({ u: underlying, lots: {} });
+  const lotMap = useMemo(() => buildLotMap({
+    screenDhanIds: [...feed.strikeIds.values()].flatMap(v => [v.ceId, v.peId].filter((x): x is string => !!x)),
+    screenLot: feed.lotSize,
+    screenKotakSymbols: feed.kotak ? [...feed.kotak.strikes.values()].flatMap(v => [v.ceSymbol, v.peSymbol].filter((x): x is string => !!x)) : [],
+    kotakScreenLot: feed.kotak?.lotSize ?? null,
+    kotakSymbols: feed.kotak?.symbols ?? null,
+    master: masterLots.u === underlying ? masterLots.lots : null,
+  }), [feed.strikeIds, feed.lotSize, feed.kotak, masterLots, underlying]);
+  const lotMapRef = useRef(lotMap);
+  useEffect(() => { lotMapRef.current = lotMap; });
+  /** The lot of this contract (Dhan id or Kotak symbol), for qtyLots / lotUnits; null = unknown (refuse). */
+  const lotOf = useCallback((id: string | null | undefined) => contractLot(underlying, id, lotMapRef.current), [underlying]);
+  // Ask the master list for the lot of every held / working Dhan contract the screen expiry does not cover.
+  const lotWanted = useMemo(() => isMcx(underlying) ? [] : missingLotIds([
+    ...legs.map(l => l.securityId), ...ordersView.map(o => o.securityId ?? ''),
+  ], lotMap), [underlying, legs, ordersView, lotMap]);
+  const lotWantedKey = lotWanted.join(',');
+  useEffect(() => {
+    if (!lotWantedKey) return;
+    let dead = false;
+    fetch(`/api/index-scalper/lots?segment=${INSTRUMENTS[underlying].dhanSegment}&ids=${lotWantedKey}`)
+      .then(r => r.json())
+      .then((j: { success: boolean; lots?: Record<string, number> }) => {
+        if (dead || !j.success || !j.lots) return;
+        setMasterLots(prev => ({ u: underlying, lots: { ...(prev.u === underlying ? prev.lots : {}), ...j.lots } }));
+      })
+      .catch(() => {});
+    return () => { dead = true; };
+  }, [lotWantedKey, underlying]);
+
   // ── order placement ────────────────────────────────────────────────
   interface Outcome { ok: boolean; unknown?: boolean; text: string; orderId?: string }
 
@@ -751,9 +787,10 @@ export default function IndexScalperTerminal() {
   const placeContract = useCallback(async (req: TicketRequest): Promise<Outcome> => {
     const f = feedRef.current;
     const isFut = req.contract.type === 'FUT';
-    // The lookup that gives the lot size must have landed for the expiry on screen (f.lotSize is null until then):
-    // no guessed lot size, the order is refused instead.
-    const unitsPerLot = f.lotSize === null ? null : lotUnits(underlying, f.lotSize);
+    // THIS contract's own lot (lotOf: the screen expiry's strikes, Kotak's symbol map, or the master list for another
+    // expiry): a held SENSEX Dec leg traded with a Jan screen must not be sized at 25. Unknown = refused, never guessed.
+    const c0 = req.contract;
+    const unitsPerLot = lotUnits(underlying, lotOf(c0.securityId) ?? lotOf(c0.tradingSymbol));
     // Per-instrument cap on OPENING orders (CRUDEOIL 5 lots, else 20); the server re-checks it through the source tag.
     // An order that closes a leg (TP / SL bracket, the chip's "-") is never refused for its size.
     const size = orderUnits(req.lots, unitsPerLot, req.closesLeg ? Number.MAX_SAFE_INTEGER : INSTRUMENTS[underlying].maxLots);
@@ -818,7 +855,7 @@ export default function IndexScalperTerminal() {
         ? (f.future?.kotakSymbol ?? c.tradingSymbol)
         : (c.type === 'CE' ? k.strikes.get(c.strike)?.ceSymbol : k.strikes.get(c.strike)?.peSymbol);
       if (!sym) return { ok: false, text: `No Kotak contract for ${isFut ? 'FUT' : `${c.strike} ${c.type}`} on ${c.expiry}` };
-      const kotakLot = lotUnits(underlying, k.lotSize);
+      const kotakLot = lotUnits(underlying, lotOf(sym));
       if (kotakLot === null) return { ok: false, text: 'Kotak lot size unknown for this contract: refusing the order' };
       const kQty = kotakOrderQty(underlying, req.lots, kotakLot);
       const before = legsRef.current.find(l => l.securityId === sym)?.netQty ?? 0;
@@ -847,7 +884,7 @@ export default function IndexScalperTerminal() {
     loadPositions();
     void loadOrders();
     return out;
-  }, [real, sendReal, simFill, setSimOrders, rememberSpot, loadPositions, refreshAfterOrder, loadOrders, underlying, queueDefaultBrackets]);
+  }, [real, sendReal, simFill, setSimOrders, rememberSpot, loadPositions, refreshAfterOrder, loadOrders, underlying, queueDefaultBrackets, lotOf]);
 
   const submitTicket = useCallback(async (req: TicketRequest) => {
     if (ticketBusy) return;
@@ -940,7 +977,7 @@ export default function IndexScalperTerminal() {
       // Above the exchange freeze quantity a single order is rejected: close in freeze-sized slices, stopping at the
       // first one that is not placed (an unknown slice is never followed by another).
       const k = feedRef.current.kotak;
-      const slices = freezeSlices(order.units, k?.freezeQty ?? null, k?.lotSize ?? null);
+      const slices = freezeSlices(order.units, k?.freezeQty ?? null, lotOf(leg.securityId));
       // Kotak's RMS adds the closing side's working orders to the exit: a full-size target still working turns the exit
       // into a fresh position, rejected for margin (2026-11-26). Cancel THIS page's own ones first and see them gone;
       // another placer's order is never cancelled from here, so an exit it would overfill is refused.
@@ -980,7 +1017,7 @@ export default function IndexScalperTerminal() {
       if (out.ok && out.orderId) watchPlaced(out.orderId, `Exit ${label}`);
     }
     return out;
-  }, [sendReal, cancelQuiet, loadKotakGuard, watchPlaced, flash]);
+  }, [sendReal, cancelQuiet, loadKotakGuard, watchPlaced, flash, lotOf]);
 
   /** Fresh broker rows (plus, on Kotak, the unknown-outcome guard) read right before an exit. */
   const readExitState = useCallback(async (): Promise<{ live: ScalperLeg[]; records: KotakRecord[]; book: Record<string, unknown>[] } | string> => {
@@ -1504,7 +1541,7 @@ export default function IndexScalperTerminal() {
         };
 
     // netQty is in the broker's own unit (Dhan MCX: lots; Kotak / SIM / NSE: units): leg.mult converts it.
-    const lots = qtyLots(underlying, req.leg.netQty, req.leg.mult ?? 1, feed.lotSize);
+    const lots = qtyLots(underlying, req.leg.netQty, req.leg.mult ?? 1, lotOf(req.leg.securityId));
     if (lots === null) {
       return say({ ok: false, text: `Cannot size the ${req.kind}: ${Math.abs(req.leg.netQty)} is not a whole number of lots (or the lot size is unknown)` });
     }
@@ -1523,7 +1560,7 @@ export default function IndexScalperTerminal() {
     void loadOrders();
     if (out.ok && out.orderId) watchPlaced(out.orderId, `${req.kind === 'TP' ? 'Target' : 'Stop loss'} on ${req.leg.type} ${req.leg.strike || ''}`.trim());
     return say(out);
-  }, [real, chartOpenOrders, chartContract, sendCancel, feed.expiry, feed.lotSize, underlying, placeContract, flash, loadOrders, watchPlaced]);
+  }, [real, chartOpenOrders, chartContract, sendCancel, feed.expiry, lotOf, underlying, placeContract, flash, loadOrders, watchPlaced]);
 
   // Default target / stop watcher: a queued default (queueDefaultBrackets) is placed once the book shows its leg on the
   // expected side and product, filled in full, with a live premium, through onSetBracket like a level typed on the chip.
@@ -1640,8 +1677,8 @@ export default function IndexScalperTerminal() {
     const levelErr = orderEditError(row.rawType, side, levels.price, levels.trigger, ltp, tick);
     if (levelErr) { flash({ ok: false, text: `Order ${row.id}: ${levelErr}` }); return false; }
     // Quantity in the broker's own unit: the current one, or the new lots converted like a new order.
-    const lotSize = kotak ? f.kotak?.lotSize ?? null : f.lotSize;
-    const unitsPerLot = lotUnits(underlying, lotSize);
+    // The ORDER's own contract lot (a Dec order shown under a Jan screen keeps 20), never the screen's.
+    const unitsPerLot = lotUnits(underlying, lotOf(row.securityId));
     let quantity = row.qty ?? 0;
     if (req.lots !== undefined) {
       const lotsErr = editLotsError(req.lots, row.tradedQty, INSTRUMENTS[underlying].maxLots);
@@ -1674,7 +1711,7 @@ export default function IndexScalperTerminal() {
       modifyBusyRef.current = false;
       void loadOrders();
     }
-  }, [real, underlying, flash, loadOrders, setSimOrders]);
+  }, [real, underlying, flash, loadOrders, setSimOrders, lotOf]);
 
   const onCancelBracket = useCallback(async (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => {
     if (req.orderId) {
@@ -1707,7 +1744,7 @@ export default function IndexScalperTerminal() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [underlying, exitSimLeg, placeContract, dropTrail, flash]);
   const reverseSimOnce = async (leg: ScalperLeg) => {
-    const lots = qtyLots(underlying, leg.netQty, leg.mult ?? 1, feedRef.current.lotSize);
+    const lots = qtyLots(underlying, leg.netQty, leg.mult ?? 1, lotOf(leg.securityId));
     const lotsErr = reverseLotsError(lots, INSTRUMENTS[underlying].maxLots);
     if (lotsErr) { flash({ ok: false, text: `Cannot reverse ${legName(leg)}: ${lotsErr}` }); return; }
     const revSide: 'BUY' | 'SELL' = leg.netQty > 0 ? 'SELL' : 'BUY';
@@ -1756,7 +1793,7 @@ export default function IndexScalperTerminal() {
     if (!row) return { ok: false, text: `Reverse ${name}: the position is no longer at the broker` };
     // MCX crude opens NRML only: an MIS crude leg cannot reopen as MIS (refused at the broker), nor flip into NRML here.
     if (nrmlOnly(underlying) && row.product !== 'MARGIN') return { ok: false, text: `${underlying} is NRML-only: Exit this ${row.product || 'intraday'} position, then open the other side (it goes as NRML)` };
-    const lots = qtyLots(underlying, row.netQty, row.mult ?? 1, kotak ? f.kotak?.lotSize ?? null : f.lotSize);
+    const lots = qtyLots(underlying, row.netQty, row.mult ?? 1, lotOf(row.securityId));
     const lotsErr = reverseLotsError(lots, INSTRUMENTS[underlying].maxLots);
     if (lotsErr) return { ok: false, text: `Cannot reverse ${name}: ${lotsErr}` };
     // A fresh order book: another placer's order on the closing side refuses (nothing sent); this page's own are
@@ -1796,7 +1833,7 @@ export default function IndexScalperTerminal() {
     return opened.ok
       ? { ok: true, text: `Reversed ${name}: closed, then ${isLong ? 'SELL' : 'BUY'} ${lots} lot${lots === 1 ? '' : 's'}${cancelled}: ${opened.text}` }
       : { ok: false, text: `${name} closed${cancelled}, but the other side was not opened: ${opened.text}` };
-  }, [underlying, readExitState, freshOrderRows, exitRealRow, placeContract, cancelQuiet, dropTrail, loadPositions, loadOrders]);
+  }, [underlying, readExitState, freshOrderRows, exitRealRow, placeContract, cancelQuiet, dropTrail, loadPositions, loadOrders, lotOf]);
 
   const onReversePosition = useCallback(async (leg: ScalperLeg, confirmed = false) => {
     if (ticketBusy || exitingId) return;
@@ -1823,10 +1860,10 @@ export default function IndexScalperTerminal() {
     const isLong = l.netQty > 0;
     return {
       leg: l, isLong,
-      lots: qtyLots(underlying, l.netQty, l.mult ?? 1, broker === 'kotak' ? feed.kotak?.lotSize ?? null : feed.lotSize),
+      lots: qtyLots(underlying, l.netQty, l.mult ?? 1, contractLot(underlying, l.securityId, lotMap)),
       blk: reverseBlockers(panelOrders, l.securityId, isLong),
     };
-  }, [reverseAsk, underlying, broker, feed.kotak?.lotSize, feed.lotSize, panelOrders]);
+  }, [reverseAsk, underlying, broker, lotMap, panelOrders]);
 
   // ── one-cancels-other for REAL targets / stops (lib/indexScalperOco.ts) ─────────────────────────────────────────────
   // Watches the REAL book: a contract that went flat gets this page's leftover target / stop cancelled (a stop left on
@@ -1869,7 +1906,7 @@ export default function IndexScalperTerminal() {
         for (const { order, qty } of acts.resize) {
           const mult = ocoPrevRef.current?.mult.get(order.securityId) ?? 1;
           const f = feedRef.current;
-          const lots = qtyLots(underlying, qty, mult, brokerRef.current === 'kotak' ? f.kotak?.lotSize ?? null : f.lotSize);
+          const lots = qtyLots(underlying, qty, mult, lotOf(order.securityId));
           const grow = order.qty !== null && qty > order.qty;
           if (lots === null || !(await onModifyOrder({ orderId: order.id, lots }))) failed.push(`${order.id} (could not ${grow ? 'grow' : 'cut'} it to ${qty})`);
           else if (grow) grown.push(`${order.rawType === 'LIMIT' ? 'target' : 'stop'} ${order.id} -> ${lots} lot${lots === 1 ? '' : 's'}`);
@@ -1888,7 +1925,7 @@ export default function IndexScalperTerminal() {
       const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
       if (locks?.request) await locks.request('index-scalper-oco', run); else await run();
     } finally { ocoBusyRef.current = false; }
-  }, [underlying, loadPositions, freshOrderRows, cancelQuiet, onModifyOrder, flash, loadOrders]);
+  }, [underlying, loadPositions, freshOrderRows, cancelQuiet, onModifyOrder, flash, loadOrders, lotOf]);
   useEffect(() => {
     if (!real || !bookReady) { ocoPrevRef.current = null; return; }
     const key = `${broker}|${underlying}`;
@@ -1976,8 +2013,8 @@ export default function IndexScalperTerminal() {
     if (exitingId || ticketBusy) return;
     const f = feedRef.current;
     const isLong = leg.netQty > 0;
-    const lotSize = brokerRef.current === 'kotak' && real ? f.kotak?.lotSize ?? null : f.lotSize;
-    const contractUnits = lotUnits(underlying, lotSize);
+    // The leg's OWN contract lot (a held Dec SENSEX leg under a Jan screen keeps 20): "+ 4" opened 5 Dec lots before.
+    const contractUnits = lotUnits(underlying, lotOf(leg.securityId));
     if (contractUnits === null) { flash({ ok: false, text: 'Lot size not known yet: nothing sent' }); return; }
     const c: PickedContract = { strike: leg.strike, type: leg.type, securityId: leg.securityId, tradingSymbol: leg.symbol, ltp: leg.ltp, expiry: f.expiry };
     const product = (leg.product as 'INTRADAY' | 'MARGIN') || 'INTRADAY';
@@ -2278,7 +2315,7 @@ export default function IndexScalperTerminal() {
               focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder} onModifyOrder={onModifyOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
-              onReversePosition={onReversePosition} trails={trails} onSetTrail={onSetTrail} onCancelTrail={onCancelTrail} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
+              onReversePosition={onReversePosition} trails={trails} onSetTrail={onSetTrail} onCancelTrail={onCancelTrail} feedLotSize={feed.lotSize} lotSizes={lotMap} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
               quick={quickProp} stepLots={quickEff.stepLots} real={real} onQuickTrade={onTradeContract}
             />
               {layout === 2 && <div className="w-px bg-zinc-800 shrink-0" />}
@@ -2294,7 +2331,7 @@ export default function IndexScalperTerminal() {
               focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder} onModifyOrder={onModifyOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
-              onReversePosition={onReversePosition} trails={trails} onSetTrail={onSetTrail} onCancelTrail={onCancelTrail} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
+              onReversePosition={onReversePosition} trails={trails} onSetTrail={onSetTrail} onCancelTrail={onCancelTrail} feedLotSize={feed.lotSize} lotSizes={lotMap} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
               quick={quickProp} stepLots={quickEff.stepLots} real={real} onQuickTrade={onTradeContract}
             />
               )}

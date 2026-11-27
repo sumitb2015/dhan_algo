@@ -50,6 +50,9 @@ Related: `dhan-trading-chart` (canvas, overlays, Quick Trade, OI profile, perf),
   chain keys on id 1 / BSE_FNO, which the bridge and `options_data_fetch.py` already encode), strike step 100, option and
   future tick Rs 0.05, `isx` tag, 20-lot cap (20 x 25 = 500 units, under `SOURCE_QTY_CAPS.isx` 1500). Quantities are UNITS
   on Dhan, Kotak and SIM (`pnlMultiplier` 1), like NIFTY.
+- **Every lots <-> units conversion uses the contract's own lot, never the screen expiry's** (`lib/indexScalperLots.ts`,
+  `lotOf` / `lotSizes`, master-list route `api/index-scalper/lots`, Kotak symbol-lookup `lotSize`). REAL shows every
+  expiry's legs; with SENSEX's 20 / 25 split the screen's lot over-sized edits and "+" on another expiry's leg.
 - **Lot size changes by series**: 20 to the Dec 2026 expiries, 25 from the Jan 2027 series. `scalper_api.py lookup` takes
   THE EXPIRY's own rows' `LOT_SIZE` for SENSEX (refuses when they disagree); `get_lot_size()` returns the first master
   row's, whatever its expiry. Kotak's lookup is per expiry too. `displayLotUnits` falls back to 1 (units), never 65.

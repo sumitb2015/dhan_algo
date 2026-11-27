@@ -76,6 +76,8 @@ async function mockApi(page: Page, state: MockState) {
       return json(route, { success: true });
     }
     if (p === '/api/index-scalper/tick') return json(route, { success: true, tick: state.tick ?? 0.05 });
+    // each contract's own lot (master list): every NIFTY expiry is 65
+    if (p === '/api/index-scalper/lots') return json(route, { success: true, lots: Object.fromEntries((u.searchParams.get('ids') ?? '').split(',').filter(Boolean).map(id => [id, 65])) });
     if (p === '/api/index-scalper/holdings') return json(route, { success: true, data: state.holdings ?? [] });
     if (p === '/api/scalper/fast-order') {
       state.calls.push({ path: p, body });

@@ -127,7 +127,7 @@ export function recordedIds(records: KotakRecord[]): Set<string> {
   return s;
 }
 
-export type KotakSymbolInfo = { expiry: string; strike: number; side: 'CE' | 'PE' | 'FUT' };
+export type KotakSymbolInfo = { expiry: string; strike: number; side: 'CE' | 'PE' | 'FUT'; /** The contract's own lot (Kotak units per lot), when the symbol lookup lists it. */ lotSize?: number };
 
 /** Kotak position rows (lib/kotakShape.ts shapeKotakPosition: no LTP) -> Scalper legs. Identity is trading
  *  symbol + product; the symbol also sits in `securityId` (the repo rule for Kotak). `priceOf` prices a leg from the

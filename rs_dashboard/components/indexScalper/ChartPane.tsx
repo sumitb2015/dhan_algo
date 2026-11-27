@@ -88,6 +88,8 @@ interface Props {
   onSetTrail: (leg: ScalperLeg, pts: number, tick: number) => void;
   onCancelTrail: (legId: string) => void;
   feedLotSize: number | null;
+  /** Each contract's own lot size (lib/indexScalperLots.ts), for the chips' lot counts. */
+  lotSizes?: Map<string, number>;
   orderQtyMult: number;
   /** Draw the Call / Put OI profile (underlying panes only: strikes are underlying levels, not premiums). */
   showOi: boolean;
@@ -310,7 +312,7 @@ function ChartPane(p: Props) {
           onReversePosition={p.onReversePosition}
           trails={p.trails} onSetTrail={p.onSetTrail} onCancelTrail={p.onCancelTrail}
           underlying={underlying}
-          feedLotSize={p.feedLotSize}
+          feedLotSize={p.feedLotSize} lotSizes={p.lotSizes}
           orderQtyMult={p.orderQtyMult}
           premium={isOption}
           tickSize={resolved.tick}
