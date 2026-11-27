@@ -128,7 +128,7 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry, chartsOnly = 
   const wingRef    = useRef(6);
 
   const fetchData = (wings = wingRef.current) => {
-    fetch(`/api/options/iv-history?underlying=CRUDEOIL&mode=cumulative&wings=${wings}`)
+    fetch(`/api/options/iv-history?underlying=CRUDEOIL&mode=cumulative&wings=${wings}&fallback=1`)
       .then(r => r.json())
       .then((j: CumulativeResponse) => {
         if (j.success) { setResponse(j); setError(''); }
@@ -325,6 +325,7 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry, chartsOnly = 
                   <XAxis
                     dataKey="ts"
                     type="number"
+                    scale="time"
                     domain={[xStart, xEnd]}
                     tickFormatter={fmtTick}
                     tick={{ fontSize: 9, fill: '#a1a1aa' }}
@@ -347,6 +348,7 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry, chartsOnly = 
                     strokeWidth={2}
                     fillOpacity={1}
                     fill="url(#ceGrad)"
+                    isAnimationActive={false}
                   />
                   <Area
                     type="monotone"
@@ -356,6 +358,7 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry, chartsOnly = 
                     strokeWidth={2}
                     fillOpacity={1}
                     fill="url(#peGrad)"
+                    isAnimationActive={false}
                   />
                 </AreaChart>
               </ResponsiveContainer>
@@ -376,6 +379,7 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry, chartsOnly = 
                   <XAxis
                     dataKey="ts"
                     type="number"
+                    scale="time"
                     domain={[xStart, xEnd]}
                     tickFormatter={fmtTick}
                     tick={{ fontSize: 9, fill: '#a1a1aa' }}
@@ -398,6 +402,7 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry, chartsOnly = 
                     stroke="#eab308"
                     strokeWidth={2.5}
                     dot={false}
+                    isAnimationActive={false}
                   />
                 </LineChart>
               </ResponsiveContainer>

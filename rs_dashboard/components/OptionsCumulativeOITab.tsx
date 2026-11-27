@@ -238,7 +238,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry, chartsOnly = f
   const wingRef    = useRef(10);
 
   const fetchData = (wings = wingRef.current) => {
-    fetch(`/api/options/iv-history?mode=cumulative&underlying=NIFTY&wings=${wings}`)
+    fetch(`/api/options/iv-history?mode=cumulative&underlying=NIFTY&wings=${wings}&fallback=1`)
       .then(res => res.json())
       .then((json: CumulativeResponse) => {
         setLoading(false);
@@ -302,6 +302,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry, chartsOnly = f
   const xAxisProps = {
     dataKey: 'ts',
     type: 'number' as const,
+    scale: 'time' as const,
     domain: [xStart, xEnd],
     tickFormatter: fmtTick,
     ticks: [
@@ -584,9 +585,9 @@ export default function OptionsCumulativeOITab({ expiry: _expiry, chartsOnly = f
                   formatter={(v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>}
                 />
                 <Area type="monotone" dataKey="ceOI" name="CE OI" stroke="#60a5fa" strokeWidth={2}
-                  fill="url(#cumGradCE)" dot={false} activeDot={{ r: 4, fill: '#60a5fa', strokeWidth: 0 }} />
+                  fill="url(#cumGradCE)" dot={false} isAnimationActive={false} activeDot={{ r: 4, fill: '#60a5fa', strokeWidth: 0 }} />
                 <Area type="monotone" dataKey="peOI" name="PE OI" stroke="#f87171" strokeWidth={2}
-                  fill="url(#cumGradPE)" dot={false} activeDot={{ r: 4, fill: '#f87171', strokeWidth: 0 }} />
+                  fill="url(#cumGradPE)" dot={false} isAnimationActive={false} activeDot={{ r: 4, fill: '#f87171', strokeWidth: 0 }} />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -641,6 +642,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry, chartsOnly = f
                   strokeWidth={2}
                   fill={diff >= 0 ? 'url(#cumGradDiffPos)' : 'url(#cumGradDiffNeg)'}
                   dot={false}
+                  isAnimationActive={false}
                   activeDot={{ r: 4, fill: diff >= 0 ? '#10b981' : '#ef4444', strokeWidth: 0 }}
                 />
               </AreaChart>
@@ -815,13 +817,13 @@ export default function OptionsCumulativeOITab({ expiry: _expiry, chartsOnly = f
               />
 
               {(metricFilter === 'all' || metricFilter === 'oiZ') && (
-                <Line type="monotone" dataKey="oiZ" name="OI_Z" stroke="#60a5fa" strokeWidth={2.5} dot={false} activeDot={{ r: 4 }} />
+                <Line type="monotone" dataKey="oiZ" name="OI_Z" stroke="#60a5fa" strokeWidth={2.5} dot={false} isAnimationActive={false} activeDot={{ r: 4 }} />
               )}
               {(metricFilter === 'all' || metricFilter === 'slopeZ') && (
-                <Line type="monotone" dataKey="slopeZ" name="Slope_Z" stroke="#fbbf24" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+                <Line type="monotone" dataKey="slopeZ" name="Slope_Z" stroke="#fbbf24" strokeWidth={2} dot={false} isAnimationActive={false} activeDot={{ r: 4 }} />
               )}
               {(metricFilter === 'all' || metricFilter === 'wpiZ') && (
-                <Line type="monotone" dataKey="wpiZ" name="WPI_Z" stroke="#c084fc" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+                <Line type="monotone" dataKey="wpiZ" name="WPI_Z" stroke="#c084fc" strokeWidth={2} dot={false} isAnimationActive={false} activeDot={{ r: 4 }} />
               )}
             </LineChart>
           </ResponsiveContainer>
