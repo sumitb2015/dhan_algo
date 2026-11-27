@@ -160,9 +160,9 @@ function TrendStripBody({ underlying, feed, refreshTick, settings }: { underlyin
       </span>
       {settings.structure && (
         <Light testId="trend-structure" label="Structure" dir={r?.structure.dir ?? null}
-          title={r?.structure.last
-            ? `Last break: ${r.structure.last.kind} ${r.structure.last.up ? 'up' : 'down'} at ${hhmm(r.structure.last.t)}, closing ${r.structure.last.up ? 'above the swing high' : 'below the swing low'} ${fmt(r.structure.last.level)} (swing length 3; BOS = with the structure, CHoCH = it turned). Not part of the bias`
-            : 'No break of structure yet on this timeframe (a swing needs 3 bars each side)'} />
+          title={r?.structure.high && r.structure.low
+            ? `Last swing high ${r.structure.high.label} ${fmt(r.structure.high.price)} at ${hhmm(r.structure.high.t)}, last swing low ${r.structure.low.label} ${fmt(r.structure.low.price)} at ${hhmm(r.structure.low.t)}: ${r.structure.dir === 1 ? 'higher highs and higher lows (up)' : r.structure.dir === -1 ? 'lower highs and lower lows (down)' : 'mixed'}. Swing length 3. Not part of the bias`
+            : 'Not enough swings yet on this timeframe (a swing needs 3 bars each side, and one before it to compare)'} />
       )}
       {settings.oiBuildup && <OiBuildupLight underlying={underlying} feed={feed} refreshTick={refreshTick} tf={tf} nowSec={nowSec} />}
       <span data-testid="trend-bias" data-bias={r?.bias ?? ''}

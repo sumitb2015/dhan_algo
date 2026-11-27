@@ -48,7 +48,7 @@ import dynamic from 'next/dynamic';
 const CumulativeOIModal = dynamic(() => import('@/components/CumulativeOIModal'), { ssr: false });
 import { useIndexScalperFeed } from './useIndexScalperFeed';
 import {
-  migrateIndicatorsV1, newIndicator, withStructure, withVolume, type IndicatorInstance, type IndicatorKind,
+  migrateIndicatorsV1, newIndicator, withStructure, withStructureLine, withVolume, type IndicatorInstance, type IndicatorKind,
 } from '@/lib/indexScalperIndicators';
 import { istDateIso, isRegularSession } from '@/lib/nseHolidays';
 import {
@@ -333,7 +333,7 @@ export default function IndexScalperTerminal() {
     const trendSet = clampTrendSettings(loadJson<unknown>(TREND_SETTINGS_KEY, null));
     if (readPref(STRUCTURE_ADDED_KEY) !== '1') {
       if (trendSet.structure) {
-        saved = withStructure(Array.isArray(saved) ? saved : defaultIndicators(), true, nextId());
+        saved = withStructureLine(withStructure(Array.isArray(saved) ? saved : defaultIndicators(), true, nextId()), trendSet.structureLine);
         // Saved with the flag, in one step: this effect can run twice (React dev Strict Mode), and a second run that
         // found the flag but the old list would drop the indicator again.
         savePref(IND_KEY, JSON.stringify(saved));
@@ -376,10 +376,16 @@ export default function IndexScalperTerminal() {
       savePref(TREND_SETTINGS_KEY, JSON.stringify(next));
       return next;
     });
-    // One switch for the strip's Structure light AND the chart's HH / HL / LH / LL, BOS / CHoCH labels.
+    // One switch for the strip's Structure light AND the chart's HH / HL / LH / LL labels.
     if (patch.structure !== undefined) {
       const on = patch.structure;
-      setIndicators(p => withStructure(p, on, nextId()));
+      const line = trendSettings.structureLine;   // a click handler: this render's settings are the current ones
+      setIndicators(p => withStructureLine(withStructure(p, on, nextId()), line));
+    }
+    // The line joining the chart's swings (the Market structure indicator's own `line` setting).
+    if (patch.structureLine !== undefined) {
+      const on = patch.structureLine;
+      setIndicators(p => withStructureLine(p, on));
     }
   };
   // Trend candles: cycles through CANDLE_COLOR_RULES (Off -> EMA 9 & 20 -> ...), remembered.
@@ -2653,13 +2659,19 @@ function TrendSettingsMenu({ settings, onPatch, onClose }: {
         <span>Futures OI buildup</span>
         <Switch size="sm" checked={settings.oiBuildup} onCheckedChange={v => onPatch({ oiBuildup: v })} aria-label="Futures OI buildup" />
       </label>
-      <label className={row} title="The strip's Structure light (direction of the last BOS / CHoCH) and the chart's HH / HL / LH / LL labels with BOS / CHoCH arrows">
+      <label className={row} title="The strip's Structure light (HH + HL = up, LH + LL = down) and the chart's HH / HL / LH / LL labels">
         <span>Market structure</span>
         <Switch size="sm" checked={settings.structure} onCheckedChange={v => onPatch({ structure: v })} aria-label="Market structure" />
       </label>
+      <label className={cn(row, 'pl-3', !settings.structure && 'opacity-50 cursor-not-allowed')}
+        title="The thin line on the chart joining the swings (HH to HL, LH to LL, ...); the labels stay">
+        <span>Line joining the swings</span>
+        <Switch size="sm" checked={settings.structureLine} disabled={!settings.structure}
+          onCheckedChange={v => onPatch({ structureLine: v })} aria-label="Line joining the swings" />
+      </label>
       <p className="text-[10px] leading-snug text-zinc-500">
         Both are extra lights, never part of the bias. Turning OI buildup off also stops its candle request.
-        Market structure also shows / hides the HH / HL / LH / LL and BOS / CHoCH labels on the chart (swing length: Indicators → Market structure).
+        Market structure also shows / hides the HH / HL / LH / LL labels on the chart (swing length: Indicators → Market structure).
       </p>
     </div>
   );

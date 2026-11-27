@@ -60,7 +60,8 @@ export type LineWidth = (typeof LINE_WIDTHS)[number];
 /** A saved width if it is one of LINE_WIDTHS, else null (default widths). */
 export const validWidth = (w: unknown): LineWidth | null => (LINE_WIDTHS as readonly unknown[]).includes(w) ? (w as LineWidth) : null;
 
-export interface ParamDef { key: string; label: string; def: number; min: number; max: number }
+/** `toggle`: an on / off setting stored as 1 / 0 (min 0, max 1), shown as a checkbox. */
+export interface ParamDef { key: string; label: string; def: number; min: number; max: number; toggle?: boolean }
 
 export interface CatalogEntry {
   kind: IndicatorKind;
@@ -116,11 +117,14 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
     params: [{ key: 'fast', label: 'Fast', def: 12, min: 2, max: 100 }, { key: 'slow', label: 'Slow', def: 26, min: 3, max: 200 }, { key: 'signal', label: 'Signal', def: 9, min: 2, max: 100 }],
   },
   { kind: 'adx', label: 'ADX / DMI', pane: 'sub', color: '#eab308', params: [{ key: 'period', label: 'Length', def: 14, min: 2, max: 100 }] },
-  // Swing highs / lows (HH, LH, HL, LL) joined by a zig-zag, and breaks of structure (BOS with the trend, CHoCH against
-  // it): lib/indexScalperStructure.ts. A swing shows `len` bars after it printed (the pivot's confirmation lag).
+  // Swing highs / lows labelled HH, LH, HL, LL (lib/indexScalperStructure.ts), optionally joined by a thin line. A swing
+  // shows `len` bars after it printed (the pivot's confirmation lag).
   {
-    kind: 'structure', label: 'Market structure (HH / HL / LH / LL, BOS / CHoCH)', pane: 'price', color: '#94a3b8',
-    params: [{ key: 'len', label: 'Swing length (bars each side)', def: 3, min: 1, max: 20 }],
+    kind: 'structure', label: 'Market structure (HH / HL / LH / LL)', pane: 'price', color: '#94a3b8',
+    params: [
+      { key: 'len', label: 'Swing length (bars each side)', def: 3, min: 1, max: 20 },
+      { key: 'line', label: 'Line joining the swings', def: 1, min: 0, max: 1, toggle: true },
+    ],
   },
 ];
 
@@ -151,6 +155,14 @@ export function withVolume(list: IndicatorInstance[], id: string, visible = true
   return [...list, { ...newIndicator('volume', id), visible }];
 }
 
+/** The Market structure indicator's "line joining the swings" (1 on / 0 off) on every structure indicator in the list,
+ *  from the trend strip's settings. Returns the same list when nothing changes. */
+export function withStructureLine(list: IndicatorInstance[], on: boolean): IndicatorInstance[] {
+  const v = on ? 1 : 0;
+  if (!list.some(i => i.kind === 'structure' && (i.params.line ?? 1) !== v)) return list;
+  return list.map(i => (i.kind === 'structure' ? { ...i, params: { ...i.params, line: v } } : i));
+}
+
 /** The chart's Market structure labels, driven by the trend strip's "Market structure" switch (one switch for the strip
  *  light AND the chart labels). On: un-hide the structure indicator(s), or add one when there is none. Off: hide them,
  *  keeping their swing length. Returns the same list when nothing changes. */
@@ -174,8 +186,9 @@ export function newIndicator(kind: IndicatorKind, id: string): IndicatorInstance
 
 export function indicatorLabel(ind: IndicatorInstance): string {
   const c = catalogEntry(ind.kind);
-  const ps = c.params.map(p => ind.params[p.key] ?? p.def).join(', ');
-  const name = ind.kind === 'vwap' ? 'VWAP' : ind.kind === 'cpr' ? 'CPR' : ind.kind === 'pivots' ? 'Pivots S/R' : ind.kind === 'daylevels' ? 'Day H/L' : c.label;
+  // On / off settings are not numbers to show ("Structure (3)", not "(3, 1)").
+  const ps = c.params.filter(p => !p.toggle).map(p => ind.params[p.key] ?? p.def).join(', ');
+  const name = ind.kind === 'vwap' ? 'VWAP' : ind.kind === 'cpr' ? 'CPR' : ind.kind === 'pivots' ? 'Pivots S/R' : ind.kind === 'daylevels' ? 'Day H/L' : ind.kind === 'structure' ? 'Structure' : c.label;
   return ps ? `${name} (${ps})` : name;
 }
 
@@ -507,37 +520,21 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
       };
     }
     case 'structure': {
-      // The forming (last) bar is left out: its high / close can still move, so it never confirms a swing or a break
-      // (after the close that costs the last bar one bar of lag, never a swing that later disappears).
+      // The forming (last) bar is left out: its high / low can still move, so it never confirms a swing (after the close
+      // that costs the last bar one bar of lag, never a swing that later disappears). Labels ride on the swing points of
+      // this one series (a marker needs a value at its bar); the line joining them is hidden when `line` is 0.
       const ms = marketStructure(bars.slice(0, -1), p('len'));
       const values: (number | null)[] = bars.map(() => null);
       for (const sw of ms.swings) values[sw.i] = sw.price;
       const GREY = '#94a3b8';
-      // Swing labels ride on the zig-zag (a point at every swing). Break arrows ride on their OWN series with a value
-      // only at each break bar (its low for an up break, its high for a down one), drawn transparent: a marker on a
-      // time where its series has no value (whitespace) is drawn at the nearest point instead, which put a 14:40 CHoCH
-      // on the 14:38 swing high (seen live 2026-11-27).
-      const swingMarkers: NonNullable<OutSeries['markers']> = ms.swings.map(sw => ({
+      const markers: NonNullable<OutSeries['markers']> = ms.swings.map(sw => ({
         i: sw.i, price: sw.price, up: sw.kind === 'H', size: 0.5, shape: 'circle' as const,
         position: (sw.kind === 'H' ? 'aboveBar' : 'belowBar') as 'aboveBar' | 'belowBar',
         color: sw.label === 'HH' || sw.label === 'HL' ? UP : sw.label === 'LH' || sw.label === 'LL' ? DOWN : GREY,
         ...(sw.label ? { text: sw.label } : {}),
       }));
-      const brk: (number | null)[] = bars.map(() => null);
-      for (const b of ms.breaks) brk[b.i] = b.up ? bars[b.i].l : bars[b.i].h;
-      const breakMarkers: NonNullable<OutSeries['markers']> = ms.breaks.map(b => ({
-        i: b.i, price: b.up ? bars[b.i].l : bars[b.i].h, up: b.up, text: b.kind, size: 1,
-        shape: (b.up ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
-        position: (b.up ? 'belowBar' : 'aboveBar') as 'aboveBar' | 'belowBar',
-        color: b.up ? UP : DOWN,
-      }));
-      return {
-        pane: 'price',
-        series: [
-          { key: 'v', label, axisLabel: 'Structure', color: ind.color, style: 'line', values, markers: swingMarkers, noLabel: true, lineWidth: 1 },
-          { key: 'brk', label: `${label} breaks`, axisLabel: 'BOS / CHoCH', color: 'transparent', style: 'line', values: brk, markers: breakMarkers, noLabel: true, lineWidth: 1 },
-        ],
-      };
+      const color = p('line') === 0 ? 'transparent' : ind.color;
+      return { pane: 'price', series: [{ key: 'v', label, axisLabel: 'Structure', color, style: 'line', values, markers, noLabel: true, lineWidth: 1 }] };
     }
   }
 }

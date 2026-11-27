@@ -81,7 +81,7 @@ test('mtfSummary / mtfText: alignment and counts', () => {
   assert.equal(mtfSummary([r('bear'), r('bear')]).aligned, 'bear');
 });
 
-test('structure light: the direction of the last break of structure', () => {
+test('structure light: HH + HL up, LH + LL down (the latest labelled swing high and low)', () => {
   // wavy trends (pullbacks make the swings); a perfectly smooth rise has no swing high, so no structure yet
   // (bars centred on their close: mk's open = previous close makes the bar after a peak tie its high, and ties are not swings)
   const wave = (path: (i: number) => number) => Array.from({ length: 80 }, (_, i) => {
@@ -92,7 +92,8 @@ test('structure light: the direction of the last break of structure', () => {
   const d = trendRead(wave(i => 26000 - i * 8 + Math.sin(i / 2) * 30))!;
   assert.equal(trendRead(up)!.structure.dir, null);
   assert.equal(u.structure.dir, 1);
-  assert.equal(u.structure.last?.up, true);
+  assert.deepEqual([u.structure.high?.label, u.structure.low?.label], ['HH', 'HL']);
+  assert.ok(u.structure.high!.t > 0 && u.structure.low!.t > 0);
   assert.equal(d.structure.dir, -1);
   assert.equal(trendRead(up.slice(0, 5))!.structure.dir, null); // no swing known yet
 });
@@ -124,7 +125,7 @@ test('oiBuildup: price x OI change on the last bar vs the one before', () => {
 });
 
 test('trend settings: anything missing or malformed is on; only an explicit false turns a light off', () => {
-  assert.deepEqual(clampTrendSettings(null), { oiBuildup: true, structure: true });
-  assert.deepEqual(clampTrendSettings({ oiBuildup: false }), { oiBuildup: false, structure: true });
-  assert.deepEqual(clampTrendSettings({ structure: 'no', oiBuildup: 0 }), { oiBuildup: true, structure: true });
+  assert.deepEqual(clampTrendSettings(null), { oiBuildup: true, structure: true, structureLine: true });
+  assert.deepEqual(clampTrendSettings({ oiBuildup: false, structureLine: false }), { oiBuildup: false, structure: true, structureLine: false });
+  assert.deepEqual(clampTrendSettings({ structure: 'no', oiBuildup: 0 }), { oiBuildup: true, structure: true, structureLine: true });
 });

@@ -11,13 +11,13 @@
 // Bias: Bullish / Bearish when VWAP, EMA and ST all point one way, Mixed otherwise, null while any is not computable.
 // Strength: Choppy when ADX < 20; Strong when ADX >= 25 and the DI points with the bias.
 // Two more lights, shown or hidden in the strip's settings, never part of the bias:
-//   Structure  direction of the last break of structure (lib/indexScalperStructure.ts, swing length 3)
+//   Structure  swing pattern (lib/indexScalperStructure.ts, swing length 3): HH + HL up, LH + LL down, else mixed
 //   OI         futures OI buildup on the last closed bar vs the one before (price x OI change: long buildup, short
 //              buildup, short covering, long unwinding; freshMoney's buildupOf), from the future's 1-minute bars with OI
 
 import { adxDmiArray, emaSmaSeeded, supertrendSeries } from './indicators.ts';
 import { sessionVwap, type Bar } from './indexScalperIndicators.ts';
-import { marketStructure, STRUCTURE_LEN, type StructureBreak } from './indexScalperStructure.ts';
+import { marketStructure, STRUCTURE_LEN, type Swing } from './indexScalperStructure.ts';
 import { buildupOf, BUILDUP_TEXT, type Buildup } from './freshMoney.ts';
 
 export type Dir = 1 | -1 | 0;
@@ -34,8 +34,8 @@ export interface TrendRead {
   ema: { fast: number | null; slow: number | null; dir: Dir | null };
   st: { line: number | null; dir: Dir | null };
   adx: { adx: number | null; plusDi: number | null; minusDi: number | null; dir: Dir | null };
-  /** Direction of the last break of structure and that break (with the bar time of the break). */
-  structure: { dir: Dir | null; last: (StructureBreak & { t: number }) | null };
+  /** Swing pattern: 1 = HH + HL, -1 = LH + LL, 0 = mixed; with the latest labelled swing high / low and their bar times. */
+  structure: { dir: Dir | null; high: (Swing & { t: number }) | null; low: (Swing & { t: number }) | null };
   bias: Bias | null;
   strength: Strength;
 }
@@ -87,8 +87,11 @@ export function trendRead(bars: Bar[]): TrendRead | null {
     else if (adx.adx >= P.strongFrom && ((bias === 'bull' && adx.dir === 1) || (bias === 'bear' && adx.dir === -1))) strength = 'strong';
   }
   const ms = marketStructure(bars, STRUCTURE_LEN);
-  const lb = ms.breaks[ms.breaks.length - 1];
-  const structure = { dir: ms.dir, last: lb ? { ...lb, t: bars[lb.i].t } : null };
+  const structure = {
+    dir: ms.dir,
+    high: ms.lastHigh ? { ...ms.lastHigh, t: bars[ms.lastHigh.i].t } : null,
+    low: ms.lastLow ? { ...ms.lastLow, t: bars[ms.lastLow.i].t } : null,
+  };
   return { t: b.t, close: b.c, vwap, ema, st, adx, structure, bias, strength };
 }
 
@@ -169,10 +172,11 @@ export function oiBuildup(bars: Bar[]): OiBuildupRead | null {
 export const buildupName = (k: Buildup | null): string => (k ? BUILDUP_TEXT[k].name : 'No OI change');
 
 /** The strip's own settings (gear menu next to its switch), stored as JSON; anything missing is on. */
-export interface TrendSettings { oiBuildup: boolean; structure: boolean }
+/** `structureLine`: the line joining the chart's HH / HL / LH / LL swings (the Market structure indicator's `line`). */
+export interface TrendSettings { oiBuildup: boolean; structure: boolean; structureLine: boolean }
 export const TREND_SETTINGS_KEY = 'indexScalper.trendSettings';
-export const DEFAULT_TREND_SETTINGS: TrendSettings = { oiBuildup: true, structure: true };
+export const DEFAULT_TREND_SETTINGS: TrendSettings = { oiBuildup: true, structure: true, structureLine: true };
 export function clampTrendSettings(raw: unknown): TrendSettings {
   const o = (raw && typeof raw === 'object' ? raw : {}) as Partial<Record<keyof TrendSettings, unknown>>;
-  return { oiBuildup: o.oiBuildup !== false, structure: o.structure !== false };
+  return { oiBuildup: o.oiBuildup !== false, structure: o.structure !== false, structureLine: o.structureLine !== false };
 }

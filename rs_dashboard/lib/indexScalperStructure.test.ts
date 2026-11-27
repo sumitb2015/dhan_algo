@@ -29,53 +29,75 @@ test('a swing is never used before it is known: no break, no label until bar i +
   assert.deepEqual(marketStructure(bars, 2).swings.map(x => x.i), [2]);
 });
 
-test('breaks: BOS with the structure, CHoCH against it; a level breaks once; dir = last break', () => {
-  // up leg: swing high 110 (bar 2) broken by close 112 at bar 6 -> first break = BOS up
-  // then a swing low 104 (bar 8) broken by close 100 at bar 12 -> against an up structure = CHoCH down
-  const bars = B([
-    [100, 96, 98], [105, 97, 103], [110, 101, 108], [104, 98, 100], [103, 99, 101],
-    [107, 102, 106], [113, 105, 112], [114, 108, 113], [111, 104, 106], [112, 106, 110],
-    [113, 107, 111], [109, 105, 106], [106, 98, 100], [104, 97, 99],
+test('direction: HH + HL up, LH + LL down, mixed otherwise, null until both kinds are labelled', () => {
+  // highs 110 then 115 (HH), lows 95 then 100 (HL): up
+  const up = B([
+    [100, 96, 98], [105, 97, 103], [110, 101, 108], [104, 98, 100], [101, 95, 97],
+    [103, 99, 102], [108, 101, 107], [115, 106, 113], [109, 102, 104], [104, 100, 102],
+    [106, 101, 105], [107, 103, 106],
   ]);
-  const s = marketStructure(bars, 2);
-  assert.deepEqual(s.breaks.map(b => `${b.kind}${b.up ? '↑' : '↓'}@${b.i}:${b.level}`), ['BOS↑@6:110', 'CHoCH↓@12:104']);
-  assert.equal(s.dir, -1);
-  assert.equal(s.breaks.filter(b => b.level === 110).length, 1); // closes above 110 later do not break it again
+  const u = marketStructure(up, 2);
+  assert.equal(u.dir, 1);
+  assert.deepEqual([u.lastHigh?.label, u.lastLow?.label], ['HH', 'HL']);
+  // the mirror image (negated prices): LH + LL, down
+  const down = up.map(b => ({ h: -b.l, l: -b.h, c: -b.c }));
+  const d = marketStructure(down, 2);
+  assert.equal(d.dir, -1);
+  assert.deepEqual([d.lastHigh?.label, d.lastLow?.label], ['LH', 'LL']);
+  // only the first swing of each kind (nothing to compare): no direction
+  assert.equal(marketStructure(up.slice(0, 7), 2).dir, null);
+  // HH with a LL: mixed
+  const mixed = B([
+    [100, 96, 98], [105, 97, 103], [110, 101, 108], [104, 98, 100], [101, 95, 97],
+    [103, 99, 102], [108, 101, 107], [115, 106, 113], [109, 92, 104], [104, 100, 102],
+    [106, 101, 105], [107, 103, 106],
+  ]);
+  assert.equal(marketStructure(mixed, 2).dir, 0);
 });
 
 test('empty / too short / len < 1: nothing', () => {
-  assert.deepEqual(marketStructure([], 3), { swings: [], breaks: [], dir: null });
+  assert.deepEqual(marketStructure([], 3), { swings: [], dir: null, lastHigh: null, lastLow: null });
   assert.equal(marketStructure(B([[1, 0, 1], [2, 1, 2]]), 3).swings.length, 0);
-  assert.deepEqual(marketStructure(B([[1, 0, 1]]), 0), { swings: [], breaks: [], dir: null });
+  assert.deepEqual(marketStructure(B([[1, 0, 1]]), 0), { swings: [], dir: null, lastHigh: null, lastLow: null });
 });
 
-test('chart indicator: zig-zag through the swings, labelled swing markers, BOS / CHoCH arrows; the forming bar is left out', async () => {
-  const { computeIndicator, newIndicator } = await import('./indexScalperIndicators.ts');
+test('chart indicator: swing labels only (no BOS / CHoCH), line on by default and hideable; the forming bar is left out', async () => {
+  const { computeIndicator, newIndicator, indicatorLabel } = await import('./indexScalperIndicators.ts');
   const rows: [number, number, number][] = [
     [100, 96, 98], [105, 97, 103], [110, 101, 108], [104, 98, 100], [103, 99, 101],
     [107, 102, 106], [113, 105, 112], [114, 108, 113], [111, 104, 106], [112, 106, 110],
     [113, 107, 111], [109, 105, 106], [106, 98, 100], [104, 97, 99],
   ];
   const bars = rows.map(([h, l, c], i) => ({ t: 1_800_000_000 + i * 300, o: c, h, l, c }));
-  const ind = { ...newIndicator('structure', 's1'), params: { len: 2 } };
+  const ind = { ...newIndicator('structure', 's1'), params: { len: 2, line: 1 } };
   const out = computeIndicator(bars, ind);
-  const [s, brk] = out.series;
-  assert.equal(out.pane, 'price');
+  assert.equal(out.series.length, 1);                       // the break-arrow series is gone
+  const [s] = out.series;
   assert.equal(s.noLabel, true);
-  assert.equal(s.values.length, bars.length);
+  assert.equal(s.color, ind.color);
   assert.deepEqual(s.values.flatMap((v, i) => (v === null ? [] : [`${i}:${v}`])), ['2:110', '7:114', '8:104', '10:113']);
   assert.deepEqual(s.markers!.map(m => `${m.i}:${m.text ?? '-'}`), ['2:-', '7:HH', '8:-', '10:LH']);
-  // every marker sits on a bar where ITS series has a value: a marker on whitespace is drawn at the nearest point
-  // instead (a 14:40 CHoCH showed on the 14:38 swing high, live 2026-11-27)
-  for (const ser of out.series) for (const m of ser.markers ?? []) assert.notEqual(ser.values[m.i], null, `${ser.key} marker at ${m.i}`);
-  assert.equal(brk.color, 'transparent');
-  assert.equal(brk.noLabel, true);
-  assert.deepEqual(brk.markers!.map(m => `${m.text}${m.up ? '↑' : '↓'}@${m.i}`), ['BOS↑@6', 'CHoCH↓@12']);
-  assert.equal(brk.values[6], 105);  // up break: under the break bar's low
-  assert.equal(brk.values[12], 106); // down break: over the break bar's high
-  // the forming (last) bar never confirms: a close below 104 on it alone would not be a break
-  const formingOnly = computeIndicator(bars.slice(0, 13), ind).series.flatMap(x => x.markers ?? []).map(m => m.text);
-  assert.equal(formingOnly.includes('CHoCH'), false);
+  assert.equal(s.markers!.some(m => m.text === 'BOS' || m.text === 'CHoCH'), false);
+  for (const m of s.markers!) assert.notEqual(s.values[m.i], null);   // a marker needs a value at its bar
+  // line off: the same points (the labels still need them), drawn transparent
+  const off = computeIndicator(bars, { ...ind, params: { len: 2, line: 0 } }).series[0];
+  assert.equal(off.color, 'transparent');
+  assert.deepEqual(off.values, s.values);
+  assert.deepEqual(off.markers, s.markers);
+  assert.equal(indicatorLabel(ind), 'Structure (2)');       // the on / off setting is not shown as a number
+  // the forming (last) bar never confirms a swing
+  assert.deepEqual(computeIndicator(bars.slice(0, 12), ind).series[0].markers!.map(m => m.i), [2, 7, 8]);
+});
+
+test('withStructureLine: sets the line on every structure indicator, same list when nothing changes', async () => {
+  const { newIndicator, withStructureLine } = await import('./indexScalperIndicators.ts');
+  const list = [newIndicator('ema', 'a'), newIndicator('structure', 's')];
+  const off = withStructureLine(list, false);
+  assert.equal(off.find(i => i.kind === 'structure')!.params.line, 0);
+  assert.equal(off.find(i => i.kind === 'ema'), list[0]);
+  assert.equal(withStructureLine(off, false), off);
+  assert.equal(withStructureLine(list, true), list);         // default (1): already on
+  assert.equal(withStructureLine(off, true).find(i => i.kind === 'structure')!.params.line, 1);
 });
 
 test('withStructure: the strip switch shows / hides the chart labels, adding the indicator once when there is none', async () => {

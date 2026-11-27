@@ -90,10 +90,12 @@ Related skills:
   (`applyTick`'s `volDelta`; `mergeHistory` keeps the larger of history / ticks for the forming bar, never the sum).
   Equal weight put CRUDEOILM's VWAP at 7503.01 vs Dhan's 7513.11 (2026-11-25); weighted it matched to the paisa.
 - **Market structure:** swing highs / lows by the repo's strict pivot rule (`lib/indexScalperStructure.ts`, `len` bars
-  each side, default 3) joined by a 1 px zig-zag (null values = whitespace, which the line joins), HH / LH / HL / LL text
-  markers and BOS / CHoCH arrows (`OutSeries.markers` with `text` / `shape` / `position`). The forming (last) bar is left
-  out, so a swing or break never appears and then vanishes; a swing shows `len` bars after it printed. `noLabel`: no
-  price-scale label (the zig-zag's last point is a past swing).
+  each side, default 3) labelled HH / LH / HL / LL as text markers riding on the swing points of ONE line series (a
+  marker on a time where its series has no value is drawn at the nearest point instead). The 1 px line joining them is
+  optional (`line` param, a `toggle` ParamDef shown as a checkbox; off = the series drawn transparent, the points stay for
+  the labels). The forming (last) bar is left out, so a swing never appears and then vanishes; a swing shows `len` bars
+  after it printed. `noLabel`: no price-scale label. **BOS / CHoCH markers were removed 2026-11-27** (user: logic and
+  display not correct); do not bring them back without a new spec.
 - **Proof:** a "matches TradingView" claim needs a fixture with candles and the broker chart's printed values.
   A visual check is not proof.
 

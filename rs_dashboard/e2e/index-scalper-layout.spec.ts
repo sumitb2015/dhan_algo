@@ -321,6 +321,15 @@ test.describe('Index Scalper layout + option charts', () => {
     const structureInd = () => page.evaluate(() => (JSON.parse(localStorage.getItem('indexScalper.indicators.v2') ?? '[]') as { kind: string; visible: boolean }[])
       .filter(i => i.kind === 'structure').map(i => i.visible));
     await expect.poll(structureInd).toEqual([true]);
+    // the line joining the swings: on by default, its own switch turns it off (the indicator's `line` setting)
+    const structureLine = () => page.evaluate(() => (JSON.parse(localStorage.getItem('indexScalper.indicators.v2') ?? '[]') as { kind: string; params: { line?: number } }[])
+      .filter(i => i.kind === 'structure').map(i => i.params.line ?? 1));
+    await expect.poll(structureLine).toEqual([1]);
+    await page.getByRole('button', { name: 'Trend strip settings' }).click();
+    await page.getByRole('dialog', { name: 'Trend strip settings panel' }).getByRole('switch', { name: 'Line joining the swings' }).click();
+    await expect.poll(structureLine).toEqual([0]);
+    await expect(strip2.getByTestId('trend-structure')).toBeVisible();   // the labels and the light stay
+    await page.keyboard.press('Escape');
     // each can be turned off in the strip's settings, and stays off after a reload
     await page.getByRole('button', { name: 'Trend strip settings' }).click();
     const menu = page.getByRole('dialog', { name: 'Trend strip settings panel' });

@@ -116,10 +116,18 @@ export default function IndicatorPicker({ open, indicators, editId, onAdd, onCha
 
         {editing ? (
           <div className="p-4 flex flex-col gap-3">
-            {catalogEntry(editing.kind).params.map(p => (
+            {catalogEntry(editing.kind).params.map(p => (p.toggle ? (
+              // An on / off setting (stored 1 / 0): a checkbox, applied at once.
+              <label key={p.key} className="flex items-center justify-between gap-3 text-xs text-zinc-300 cursor-pointer">
+                {p.label}
+                <input type="checkbox" aria-label={p.label} checked={(editing.params[p.key] ?? p.def) !== 0}
+                  onChange={e => onChange(editing.id, { params: { ...editing.params, [p.key]: e.target.checked ? 1 : 0 } })}
+                  className="w-4 h-4 accent-sky-500 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60" />
+              </label>
+            ) : (
               <ParamField key={p.key} label={p.label} value={editing.params[p.key] ?? p.def}
                 onCommit={n => onChange(editing.id, { params: { ...editing.params, [p.key]: clampParam(editing.kind, p.key, n) } })} />
-            ))}
+            )))}
             {catalogEntry(editing.kind).fixedStyle && <div className="text-xs text-zinc-400">{volumeNote ?? 'Green / red bars by candle direction, along the bottom of the price pane. Futures and options only: the index has no volume.'}</div>}
             {editing.kind === 'daylevels' && <DayLevelLines ind={editing} onChange={onChange} />}
             {!catalogEntry(editing.kind).fixedStyle && editing.kind !== 'daylevels' && <>
