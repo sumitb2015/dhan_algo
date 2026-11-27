@@ -14,7 +14,8 @@ import { FTS_KOTAK_MAX_ORDER_LOTS } from './focusToolUnderlyings.ts';
 // has run live; REAL is Dhan-only today, so this is a backstop for when Kotak is turned on.
 // isx = Index Scalper (/index-scalper) opens: 20 lots, its MAX_LOTS (the Dhan twin is SOURCE_QTY_CAPS.isx).
 // isxc = the same page on full-size CRUDEOIL (100 bbl a lot): 5 lots (the Dhan twin is SOURCE_QTY_CAPS_MCX.isxc).
-export const SOURCE_LOT_CAPS: Record<string, number> = { as: 100, bds: 20, alab: 20, fts: FTS_KOTAK_MAX_ORDER_LOTS, pl: 20, pnf: 20, pnfa: 20, gbx: 1, fm: 20, bs: 50, isx: 20, isxc: 5 };
+// pa = Price Alerts' Kotak orders (lib/priceAlertServer.ts): MAX_ALERT_LOTS (10, lib/priceAlerts.ts); Dhan twin SOURCE_QTY_CAPS.pa.
+export const SOURCE_LOT_CAPS: Record<string, number> = { pa: 10, as: 100, bds: 20, alab: 20, fts: FTS_KOTAK_MAX_ORDER_LOTS, pl: 20, pnf: 20, pnfa: 20, gbx: 1, fm: 20, bs: 50, isx: 20, isxc: 5 };
 
 /** NSE/BSE options and futures tick at 0.05; used only when the instrument cache has no tick for the contract. */
 export const DEFAULT_FO_TICK = 0.05;

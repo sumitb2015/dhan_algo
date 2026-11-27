@@ -13,6 +13,8 @@ export interface AlertDialogInit {
   /** Label for the prefilled instrument (the chart's name for it). */
   instrumentLabel?: string;
   value?: number;
+  /** Default broker for a "Place order" action (the opening page's broker); an edited alert keeps its own. */
+  broker?: string;
   /** Set by openDialog: the panel was open, so closing the dialog reopens it. */
   fromPanel?: boolean;
 }

@@ -26,7 +26,7 @@ import { INSTRUMENTS, isMcx, type Underlying } from '@/lib/indexScalperInstrumen
 import { toIsoDate } from '@/components/DataChip';
 import { cn } from '@/lib/utils';
 import { alertsFor, armAlertOrders, postAlertAction, priceAlertsStore, usePriceAlertsView } from '@/lib/priceAlertsUi';
-import { CONDITIONS, type InstrumentSpec } from '@/lib/priceAlerts';
+import { CONDITIONS, alertBroker, type InstrumentSpec } from '@/lib/priceAlerts';
 import { toast } from 'sonner';
 import type { TrailState } from '@/lib/indexScalperTrail';
 
@@ -48,6 +48,8 @@ interface Props {
   feed: IndexScalperFeed;
   days: number;
   refreshTick: number;
+  /** The page's broker: the default broker of an alert's "Place order" opened from this chart. */
+  broker?: string;
   /** The underlying pane's order contract (the future), and its name. */
   futureContract: PickedContract | null;
   futureName: string;
@@ -179,7 +181,7 @@ function ChartPane(p: Props) {
     return alertsFor(alertsView, alertTarget.segment, alertTarget.securityId).map(a => ({
       id: a.id, price: a.value, paused: a.status === 'paused',
       unarmed: a.action.kind === 'trade' && a.status === 'active' && !armed,
-      title: `${CONDITIONS[a.condition]}${a.action.kind === 'trade' ? ` · ${a.action.side} ${a.action.lots}L` : ''}`,
+      title: `${CONDITIONS[a.condition]}${a.action.kind === 'trade' ? ` · ${a.action.side} ${a.action.lots}L${alertBroker(a.action) === 'kotak' ? ' Kotak' : ''}` : ''}`,
     }));
   }, [alertsView, alertTarget]);
   const armAlerts = useCallback(() => {
@@ -189,8 +191,8 @@ function ChartPane(p: Props) {
   const { onAlert } = p;
   const addAlert = useCallback((sym: string, price: number) => {
     if (!alertTarget) { onAlert(sym, price); return; }
-    priceAlertsStore.openDialog({ instrument: alertTarget.spec, instrumentLabel: sym, value: price });
-  }, [alertTarget, onAlert]);
+    priceAlertsStore.openDialog({ instrument: alertTarget.spec, instrumentLabel: sym, value: price, broker: p.broker });
+  }, [alertTarget, onAlert, p.broker]);
   const moveAlert = useCallback((id: string, value: number): Promise<boolean> =>
     postAlertAction({ action: 'move', id, value }).then(
       () => { toast.success(`Alert moved to ${value}`); return true; },

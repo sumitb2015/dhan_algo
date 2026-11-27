@@ -5,16 +5,18 @@ import { toast } from 'sonner';
 import { AlarmClock, Loader2, ShieldAlert, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
-  ALERT_UNDERLYINGS, CONDITIONS, DEFAULT_SOUND_SEC, MAX_ALERT_LOTS, MAX_SOUND_SEC, hasIndex, sessionCloseMs,
-  type AlertCondition, type InstrumentSpec, type PriceAlert,
+  ALERT_BROKERS, ALERT_UNDERLYINGS, CONDITIONS, DEFAULT_SOUND_SEC, MAX_ALERT_LOTS, MAX_SOUND_SEC, alertBroker, hasIndex,
+  isMcxAlertUnderlying, sessionCloseMs,
+  type AlertBroker, type AlertCondition, type InstrumentSpec, type PriceAlert,
 } from '@/lib/priceAlerts';
 import { postAlertAction, usePriceAlertsUi, type AlertDialogInit } from '@/lib/priceAlertsUi';
 
 // "Create alert on <symbol>" — the TradingView-style dialog, for NIFTY (index, futures, options) and MCX CRUDEOIL /
 // CRUDEOILM (futures, options) only. Expiries and strikes come from master_list.csv through the P&F contract route and are
 // picked automatically (nearest expiry, ATM strike); the server resolves the security id. Expiration offers the valid
-// expiries (the alert stops at that day's session close). A trade alert places ONE Dhan MARKET order when it fires, so it
-// is always "Once only", and only on a day REAL orders are armed in the panel.
+// expiries (the alert stops at that day's session close). A trade alert places ONE MARKET order on Dhan or Kotak when it
+// fires (Kotak: the same contract resolved server-side in Kotak's master; crude is NRML only there), so it is always
+// "Once only", and only on a day REAL orders are armed in the panel.
 
 type Kind = InstrumentSpec['kind'];
 interface Draft { kind: Kind; underlying: string; expiry: string; strike: string; optType: 'CE' | 'PE' }
@@ -179,6 +181,10 @@ export default function AlertDialog({ init, onClose }: { init: AlertDialogInit; 
   const [side, setSide] = useState<'BUY' | 'SELL'>(ea?.kind === 'trade' ? ea.side : 'BUY');
   const [lots, setLots] = useState(ea?.kind === 'trade' ? String(ea.lots) : '1');
   const [product, setProduct] = useState<'INTRADAY' | 'MARGIN'>(ea?.kind === 'trade' ? ea.product : 'INTRADAY');
+  const [broker, setBroker] = useState<AlertBroker>(ea?.kind === 'trade' ? alertBroker(ea) : init.broker === 'kotak' ? 'kotak' : 'dhan');
+  // Kotak rejects a fresh MIS crude order after accepting it: a Kotak crude alert is NRML only.
+  const nrmlOnly = broker === 'kotak' && isMcxAlertUnderlying(contract.underlying);
+  const effProduct = nrmlOnly ? 'MARGIN' : product;
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -223,7 +229,7 @@ export default function AlertDialog({ init, onClose }: { init: AlertDialogInit; 
     if (isTrade) {
       const c = specOf(contract);
       if (typeof c === 'string') { toast.error(`Trade: ${c}`); return; }
-      action = { kind: 'trade', contract: c, side, lots: Number(lots), product };
+      action = { kind: 'trade', contract: c, side, lots: Number(lots), product: effProduct, broker };
     }
     const exp = expiresAt();
     if (typeof exp === 'string') { toast.error(exp); return; }
@@ -315,7 +321,11 @@ export default function AlertDialog({ init, onClose }: { init: AlertDialogInit; 
           {isTrade && (
             <div className="space-y-3 rounded-xl border border-red-500/30 bg-red-500/5 p-3">
               <div className="flex items-center gap-1.5 text-[11px] font-bold text-red-400">
-                <ShieldAlert className="h-3.5 w-3.5" /> REAL Dhan MARKET order when it fires
+                <ShieldAlert className="h-3.5 w-3.5" /> REAL {ALERT_BROKERS[broker]} MARKET order when it fires
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-zinc-400">Broker</span>
+                <Seg ariaLabel="Broker" value={broker} options={[['dhan', 'Dhan'], ['kotak', 'Kotak']]} onChange={setBroker} />
               </div>
               <ContractPicker d={contract} set={setContractP} allowIndex={false} c={tradeC} />
               <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
@@ -324,11 +334,12 @@ export default function AlertDialog({ init, onClose }: { init: AlertDialogInit; 
                   Lots
                   <input aria-label="Lots" type="number" min={1} max={MAX_ALERT_LOTS} className={cn(field, 'w-14 font-mono')} value={lots} onChange={e => setLots(e.target.value)} />
                 </label>
-                <Seg ariaLabel="Product" value={product} options={[['INTRADAY', 'MIS'], ['MARGIN', 'NRML']]} onChange={setProduct} />
+                <Seg ariaLabel="Product" value={effProduct} options={nrmlOnly ? [['MARGIN', 'NRML']] : [['INTRADAY', 'MIS'], ['MARGIN', 'NRML']]} onChange={setProduct} />
               </div>
               <p className="text-[10px] text-zinc-400 leading-relaxed">
                 Max {MAX_ALERT_LOTS} lots. Sent only during market hours and on a day REAL orders are armed in the alerts panel; otherwise it only notifies.
                 An order with an unknown outcome is never resent.
+                {broker === 'kotak' && <> Kotak: the contract is looked up in Kotak&apos;s own instrument list when you save; needs a live Kotak session when it fires{nrmlOnly ? '; crude is NRML only' : ''}.</>}
               </p>
             </div>
           )}

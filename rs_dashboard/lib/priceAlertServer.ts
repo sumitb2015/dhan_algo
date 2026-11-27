@@ -5,15 +5,22 @@ import { DEBUG_DIR } from '@/lib/ivSnapshotFiles';
 import { readJsonFile, withFileLock, writeJsonAtomic } from '@/lib/lockedJsonFile';
 import { createBridgeWsClient } from '@/lib/bridgeWsClient';
 import { placeDhanOrder } from '@/lib/dhanPlaceOrder';
+import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
+import { buildKotakOrderPayload } from '@/lib/kotakOrderPayload';
+import { kotakDerivativeBySymbol, kotakFutureContract, kotakOptionContract } from '@/lib/kotakContracts';
+import { isKotakTokenValid, kotakGet, kotakRows, KOTAK_PATHS } from '@/lib/kotakToken';
+import { shapeKotakOrderStatus } from '@/lib/kotakShape';
+import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { globalOnce } from '@/lib/globalOnce';
 import { indexSpotId, resolveFuture, resolveOption } from '@/lib/pnfContracts';
 import { istDateIso } from '@/lib/nseHolidays';
 import { mcxSession } from '@/lib/mcxSession';
 import { readLadderSettings, timeStringToHhmm } from '@/lib/priceLadderSettings';
 import {
-  alertCorrelationId, alertLabel, alertOrderQty, appendLog, emptyAlertsState, expiryReason, newId, stepAlert, tradeBlock, tradeLine,
+  alertActionQty, alertBroker, alertCorrelationId, alertLabel, alertOrderQty, appendLog, kotakLotMismatch, emptyAlertsState, expiryReason, newId, stepAlert, tradeBlock, tradeLine,
   DEFAULT_SOUND_SEC,
-  type AlertEvent, type AlertsView, type AlertInput, type AlertInstrument, type AlertMemory, type AlertsState, type InstrumentSpec, type OrderOutcome, type PriceAlert,
+  type AlertEvent, type AlertsView, type AlertInput, type AlertInstrument, type AlertMemory, type AlertsState, type InstrumentSpec,
+  type KotakAlertContract, type OrderOutcome, type PriceAlert,
 } from '@/lib/priceAlerts';
 
 // The Price Alerts server watcher (docs/PRICE_ALERTS_GUIDE.md). It owns debug/price_alerts.json (alerts + daily REAL arm)
@@ -116,8 +123,26 @@ export function resolveSpec(spec: InstrumentSpec): AlertInstrument | string {
     : `No ${spec.underlying} ${spec.strike} ${spec.optType} expiring ${spec.expiry}`;
 }
 
+/** The same contract in Kotak's own master (scripts/tools/kotak_instruments_cache.py, may refresh it: create / update only,
+ *  never on the order path), checked against the master list's lot, or an error. */
+async function resolveKotak(c: AlertInstrument): Promise<KotakAlertContract | string> {
+  if (!c.expiry) return 'An index cannot be traded';
+  let k;
+  try {
+    k = c.kind === 'option' && c.strike && c.optType
+      ? await kotakOptionContract(c.underlying, c.expiry, c.strike, c.optType)
+      : await kotakFutureContract(c.underlying, c.expiry);
+  } catch (e) {
+    return `Could not read Kotak's instrument list: ${(e as Error).message}`;
+  }
+  if (!k) return `Kotak does not list ${c.displayName} (expiry ${c.expiry})`;
+  const mismatch = kotakLotMismatch(c, k.lotSize);
+  if (mismatch) return mismatch;
+  return { tradingSymbol: k.tradingsymbol, lotSize: k.lotSize, segment: k.segment };
+}
+
 /** Turns a checked input into the alert's resolved fields, or an error. */
-export function resolveInput(input: AlertInput): Pick<PriceAlert, 'instrument' | 'condition' | 'value' | 'trigger' | 'expiresAt' | 'soundSec' | 'message' | 'action'> | string {
+export async function resolveInput(input: AlertInput): Promise<Pick<PriceAlert, 'instrument' | 'condition' | 'value' | 'trigger' | 'expiresAt' | 'soundSec' | 'message' | 'action'> | string> {
   const instrument = resolveSpec(input.instrument);
   if (typeof instrument === 'string') return instrument;
   let action: PriceAlert['action'] = { kind: 'notify' };
@@ -126,7 +151,14 @@ export function resolveInput(input: AlertInput): Pick<PriceAlert, 'instrument' |
     if (typeof contract === 'string') return contract;
     if (contract.segment === 'IDX_I') return 'An index cannot be traded';
     if (!alertOrderQty(contract, input.action.lots)) return `${contract.displayName} has no usable lot size`;
-    action = { kind: 'trade', contract, side: input.action.side, lots: input.action.lots, product: input.action.product };
+    const base = { kind: 'trade' as const, contract, side: input.action.side, lots: input.action.lots, product: input.action.product };
+    if (input.action.broker === 'kotak') {
+      const kotak = await resolveKotak(contract);
+      if (typeof kotak === 'string') return kotak;
+      action = { ...base, broker: 'kotak', kotak };
+    } else {
+      action = { ...base, broker: 'dhan' };
+    }
   }
   return {
     instrument, condition: input.condition, value: input.value, trigger: input.trigger, expiresAt: input.expiresAt,
@@ -200,6 +232,60 @@ const toOutcome = (r: Awaited<ReturnType<typeof placeDhanOrder>>, qty: number, a
     : r.status === 'unknown' ? { status: 'unknown', message: `${r.error} (correlation id kept on the alert)`, qty, at }
       : { status: 'rejected', message: r.error, qty, at };
 
+type TradeAction = Extract<PriceAlert['action'], { kind: 'trade' }>;
+
+/** How long after a placed Kotak order its status is read back: Kotak's RMS can reject an order AFTER returning its number. */
+const KOTAK_CHECK_DELAYS_MS = [2500, 3000];
+
+/**
+ * A Kotak alert order. The contract is re-read from the on-disk instrument cache (never refreshed here: a refresh is a
+ * Python spawn of up to 120 s), the payload goes through the shared builder with source 'pa' (SOURCE_LOT_CAPS, 10 lots) and
+ * the freeze-quantity check, and placement through placeKotakOrder (placed / rejected / unknown, order-book reconcile).
+ * A placed order is then looked up in the order book: an RMS rejection after the number is recorded as rejected.
+ */
+async function sendKotak(action: TradeAction, qty: number): Promise<OrderOutcome> {
+  const k = action.kotak;
+  const at = () => Date.now();
+  if (!k) return { status: 'skipped', message: 'No Kotak contract on this alert — order skipped', at: at() };
+  // Nothing is sent without a usable session: a send that cannot authenticate would only come back "unknown".
+  if (!isKotakTokenValid()) return { status: 'rejected', message: 'No valid Kotak session (log in to Kotak from Autologin) — not sent', qty, at: at() };
+  const contract = kotakDerivativeBySymbol(k.tradingSymbol, action.contract.underlying);
+  if (!contract) return { status: 'rejected', message: `${k.tradingSymbol} is not in the Kotak instrument cache — not sent`, qty, at: at() };
+  if (contract.lotSize !== k.lotSize) {
+    return { status: 'rejected', message: `Kotak's lot for ${k.tradingSymbol} changed (${k.lotSize} -> ${contract.lotSize}) — not sent; edit the alert`, qty, at: at() };
+  }
+  if (contract.freezeQty && qty > contract.freezeQty) {
+    return { status: 'rejected', message: `Quantity ${qty} exceeds Kotak's freeze quantity ${contract.freezeQty} — not sent`, qty, at: at() };
+  }
+  const built = buildKotakOrderPayload({
+    tradingsymbol: k.tradingSymbol, quantity: qty, side: action.side, orderType: 'MARKET',
+    exchange: contract.segment || k.segment, product: action.product === 'MARGIN' ? 'NRML' : 'MIS', source: 'pa',
+  }, contract);
+  if ('error' in built) return { status: 'rejected', message: built.error, qty, at: at() };
+  let r: Awaited<ReturnType<typeof placeKotakOrder>>;
+  try {
+    r = await placeKotakOrder(built.payload);
+  } catch (err) {
+    return { status: 'unknown', message: `Kotak order send threw: ${String((err as Error)?.message ?? err)} — check the order book before retrying`, qty, at: at() };
+  }
+  if (r.status === 'rejected') return { status: 'rejected', message: r.error, qty, at: at() };
+  if (r.status === 'unknown') return { status: 'unknown', message: r.error, qty, at: at() };
+  invalidateBrokerCache('kotak');
+  for (const wait of KOTAK_CHECK_DELAYS_MS) {
+    await new Promise(res => setTimeout(res, wait));
+    try {
+      const row = kotakRows(await kotakGet(KOTAK_PATHS.orderBook)).find(o => String(o.nOrdNo ?? '') === r.orderId);
+      if (!row) continue;
+      const st = shapeKotakOrderStatus(row, r.orderId);
+      if (st.orderStatus === 'REJECTED') {
+        return { status: 'rejected', message: `Kotak rejected order #${r.orderId} after accepting it${st.reason ? `: ${st.reason}` : ''}`, qty, at: at() };
+      }
+      if (st.orderStatus !== 'TRANSIT') break;            // filled, working or cancelled: it reached the exchange
+    } catch { /* order book unreadable: the order is still reported placed */ }
+  }
+  return { status: 'placed', orderId: r.orderId, qty, at: at() };
+}
+
 /** Sends a claimed trade alert's order (outside the lock) and records the outcome on the alert and its log event. */
 async function sendOrder(alert: PriceAlert, eventId: string, armedOn: string | null): Promise<void> {
   const now = Date.now();
@@ -210,9 +296,11 @@ async function sendOrder(alert: PriceAlert, eventId: string, armedOn: string | n
     mcx: mcxSession(istDateIso(now), timeStringToHhmm(settings.mcxAutoExitTime)).autoExit,
   });
   if (alert.action.kind !== 'trade') return;
-  const qty = alertOrderQty(alert.action.contract, alert.action.lots);
+  const qty = alertActionQty(alert.action);
   if (block) {
     outcome = { status: 'skipped', message: block, at: now };
+  } else if (alertBroker(alert.action) === 'kotak') {
+    outcome = await sendKotak(alert.action, qty);
   } else {
     try {
       const r = await placeDhanOrder({

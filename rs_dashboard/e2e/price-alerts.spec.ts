@@ -140,6 +140,39 @@ test.describe('Price Alerts', () => {
     expect(s.blocked).toEqual([]);
   });
 
+  test('Kotak order alert: broker sent with the trade, crude is NRML only on Kotak, header names the broker', async ({ page, context }) => {
+    const s = newState();
+    await signIn(context);
+    await mockApi(page, s);
+    await page.goto('/movers-plus', { waitUntil: 'domcontentloaded' });
+    await openPanel(page);
+    await page.getByRole('button', { name: 'Create alert' }).click();
+    const dlg = page.getByRole('dialog', { name: 'Create alert' });
+    await dlg.getByLabel('Value', { exact: true }).fill('24100');
+    await dlg.getByRole('radiogroup', { name: 'Action' }).getByRole('radio', { name: 'Place order' }).click();
+    await expect(dlg.getByText('REAL Dhan MARKET order when it fires')).toBeVisible();
+
+    // the trade's contract: CRUDE MINI option (the second Underlying picker is the trade's)
+    await dlg.getByRole('radiogroup', { name: 'Underlying' }).nth(1).getByRole('radio', { name: 'CRUDE MINI' }).click();
+    await expect(dlg.getByLabel('Strike').nth(0)).toHaveValue('7850');
+    const product = dlg.getByRole('radiogroup', { name: 'Product' });
+    await expect(product.getByRole('radio')).toHaveText(['MIS', 'NRML']);
+
+    await dlg.getByRole('radiogroup', { name: 'Broker' }).getByRole('radio', { name: 'Kotak' }).click();
+    await expect(dlg.getByText('REAL Kotak MARKET order when it fires')).toBeVisible();
+    await expect(product.getByRole('radio')).toHaveText(['NRML']);      // Kotak rejects a fresh MIS crude order
+    await dlg.getByLabel('Lots').fill('3');
+    await dlg.getByRole('button', { name: 'Create' }).click();
+    await expect(dlg).toHaveCount(0);
+
+    const alert = s.calls.find(c => c.body?.action === 'create')?.body?.alert as Record<string, unknown>;
+    expect(alert.action).toEqual({
+      kind: 'trade', broker: 'kotak', side: 'BUY', lots: 3, product: 'MARGIN',
+      contract: { kind: 'option', underlying: 'CRUDEOILM', expiry: '2027-12-16', strike: 7850, optType: 'CE' },
+    });
+    expect(s.blocked).toEqual([]);
+  });
+
   test('a fired alert on the stream shows a toast with Stop sound; events already in the log on load do not', async ({ page, context }) => {
     const s = newState();
     const old = { id: 'e0', at: 1, alertId: 'a0', symbol: 'NIFTY', condition: 'gt', value: 1, price: 2, message: 'old one', soundSec: 3, action: 'notify' };

@@ -5,8 +5,8 @@
  * An alert watches ONE instrument's last price (an index, a future or an option premium) against a level:
  *   Crossing / Crossing Up / Crossing Down  — an EVENT between two observed prices (needs a previous price)
  *   Greater Than / Less Than               — a STATE of the current price
- * and, when it fires, notifies (sound for N seconds) or places ONE Dhan MARKET order on a fixed contract chosen when the
- * alert was made. A trade alert is always "Once only": it can never trade twice.
+ * and, when it fires, notifies (sound for N seconds) or places ONE MARKET order — on Dhan, or on Kotak (the same contract
+ * resolved in Kotak's own master when the alert is saved) — on a fixed contract chosen when the alert was made. A trade alert is always "Once only": it can never trade twice.
  *
  * The first price seen for an alert (after creation or a server restart) is only a baseline: it never fires a crossing, so a
  * stale or replayed packet cannot fire one either.
@@ -54,9 +54,27 @@ export interface AlertInstrument {
   optType?: 'CE' | 'PE';
 }
 
+export type AlertBroker = 'dhan' | 'kotak';
+export const ALERT_BROKERS: Record<AlertBroker, string> = { dhan: 'Dhan', kotak: 'Kotak' };
+
+/** The Kotak contract a Kotak trade alert sends to, resolved from Kotak's instrument master when the alert is saved.
+ *  `lotSize` is Kotak's own unit per lot: NSE units (NIFTY 65), MCX BARRELS (CRUDEOILM 10, CRUDEOIL 100). */
+export interface KotakAlertContract { tradingSymbol: string; lotSize: number; segment: string }
+
 export type AlertAction =
   | { kind: 'notify' }
-  | { kind: 'trade'; contract: AlertInstrument; side: 'BUY' | 'SELL'; lots: number; product: 'INTRADAY' | 'MARGIN' };
+  | {
+    kind: 'trade'; contract: AlertInstrument; side: 'BUY' | 'SELL'; lots: number; product: 'INTRADAY' | 'MARGIN';
+    /** Absent = Dhan (every alert saved before Kotak was offered). */
+    broker?: AlertBroker;
+    /** Kotak alerts only: the same contract in Kotak's master. */
+    kotak?: KotakAlertContract;
+  };
+
+type TradeAction = Extract<AlertAction, { kind: 'trade' }>;
+
+/** The broker a trade alert's order goes to (absent = Dhan). */
+export const alertBroker = (a: Pick<TradeAction, 'broker'>): AlertBroker => (a.broker === 'kotak' ? 'kotak' : 'dhan');
 
 export type OrderOutcome =
   | { status: 'placed'; orderId: string; qty: number; at: number }
@@ -180,6 +198,35 @@ export function alertOrderQty(contract: Pick<AlertInstrument, 'segment' | 'lot'>
   return contract.lot > 0 ? lots * contract.lot : 0;
 }
 
+/** Kotak order quantity: always lots x Kotak's own lot (NSE units, MCX barrels — Kotak's MCX quantity is barrels, 10x / 100x
+ *  Dhan's lot count). 0 = refuse. */
+export function kotakAlertQty(kotak: Pick<KotakAlertContract, 'lotSize'> | undefined, lots: number): number {
+  if (!Number.isInteger(lots) || lots < 1 || lots > MAX_ALERT_LOTS) return 0;
+  return kotak && kotak.lotSize > 0 ? lots * kotak.lotSize : 0;
+}
+
+/** The order quantity of a trade alert in its broker's own unit (0 = refuse). */
+export const alertActionQty = (a: Pick<TradeAction, 'broker' | 'kotak' | 'contract' | 'lots'>): number =>
+  alertBroker(a) === 'kotak' ? kotakAlertQty(a.kotak, a.lots) : alertOrderQty(a.contract, a.lots);
+
+/** Barrels per lot on MCX crude (MCX_LOT_MULTIPLIER in lib/positionPnl.ts): Kotak's lot must match it. */
+const MCX_BARRELS: Record<string, number> = { CRUDEOILM: 10, CRUDEOIL: 100 };
+
+/**
+ * Why Kotak's contract cannot stand in for the Dhan one, or null. NSE: Kotak's lot must equal the master list's (a mismatch
+ * means the two masters disagree on the contract, and the order would be the wrong size). MCX: Kotak's lot is in barrels and
+ * must equal the barrels per lot (10 / 100).
+ */
+export function kotakLotMismatch(contract: Pick<AlertInstrument, 'segment' | 'lot' | 'underlying' | 'displayName'>, kotakLot: number): string | null {
+  if (!(kotakLot > 0)) return `Kotak lists no lot size for ${contract.displayName}`;
+  const want = contract.segment === 'MCX_COMM' ? MCX_BARRELS[contract.underlying] : contract.lot;
+  if (!(want > 0)) return `No known lot size for ${contract.displayName}`;
+  return kotakLot === want ? null : `Kotak's lot for ${contract.displayName} is ${kotakLot}, expected ${want}${contract.segment === 'MCX_COMM' ? ' barrels' : ''} — not saved`;
+}
+
+/** Kotak's RMS accepts a fresh MIS crude order and then rejects it ("No Fresh trade allowed ... NON-SQROFF"): refused up front. */
+export const KOTAK_MCX_NRML_ONLY = 'Kotak crude (MCX) orders are NRML only: Kotak rejects a fresh Intraday (MIS) crude order';
+
 const hhmm = (now: number) => {
   const d = new Date(now + 19_800_000);
   return d.getUTCHours() * 100 + d.getUTCMinutes();
@@ -209,6 +256,7 @@ const label = (t: number) => `${String(Math.floor(t / 100)).padStart(2, '0')}:${
 export function tradeBlock(state: Pick<AlertsState, 'armedOn'>, a: PriceAlert, now: number, mis?: Partial<MisCutoffs>): string | null {
   if (a.action.kind !== 'trade') return 'Not a trade alert';
   const c = a.action.contract;
+  const kotak = alertBroker(a.action) === 'kotak';
   if (state.armedOn !== istDateIso(now)) return 'REAL orders are not armed today — order skipped';
   if (c.expiry && c.expiry < istDateIso(now)) return `${c.displayName} has expired — order skipped`;
   if (!sessionOpen(c.segment, now)) return `${c.segment === 'MCX_COMM' ? 'MCX' : 'NSE'} market is closed — order skipped`;
@@ -216,7 +264,9 @@ export function tradeBlock(state: Pick<AlertsState, 'armedOn'>, a: PriceAlert, n
     const cutoff = c.segment === 'MCX_COMM' ? (mis?.mcx ?? mcxSession(istDateIso(now)).autoExit) : (mis?.nse ?? 1517);
     if (hhmm(now) >= cutoff) return `Past the ${label(cutoff)} intraday (MIS) cutoff — order skipped`;
   }
-  if (!alertOrderQty(c, a.action.lots)) return `Lots must be 1-${MAX_ALERT_LOTS} with a known lot size — order skipped`;
+  if (kotak && c.segment === 'MCX_COMM' && a.action.product === 'INTRADAY') return `${KOTAK_MCX_NRML_ONLY} — order skipped`;
+  if (kotak && !a.action.kotak?.tradingSymbol) return 'No Kotak contract on this alert — edit and save it again; order skipped';
+  if (!alertActionQty(a.action)) return `Lots must be 1-${MAX_ALERT_LOTS} with a known lot size — order skipped`;
   return null;
 }
 
@@ -248,7 +298,9 @@ export function unarmedTradeMarkets(view: Pick<AlertsView, 'alerts' | 'armedToda
 }
 
 export const tradeLine = (a: AlertAction): string | undefined =>
-  a.kind === 'trade' ? `${a.side} ${a.lots} lot${a.lots === 1 ? '' : 's'} ${a.contract.displayName} (${a.product === 'MARGIN' ? 'NRML' : 'MIS'})` : undefined;
+  a.kind === 'trade'
+    ? `${a.side} ${a.lots} lot${a.lots === 1 ? '' : 's'} ${a.contract.displayName} (${a.product === 'MARGIN' ? 'NRML' : 'MIS'}) on ${ALERT_BROKERS[alertBroker(a)]}`
+    : undefined;
 
 /** A Dhan correlationId for an alert order (8-25 lowercase letters/digits, prefixed with the 'pa' source). */
 export const alertCorrelationId = (alertId: string, now: number): string =>
@@ -264,7 +316,7 @@ export interface AlertInput {
   expiresAt: number | null;
   soundSec: number;
   message: string;
-  action: { kind: 'notify' } | { kind: 'trade'; contract: InstrumentSpec; side: 'BUY' | 'SELL'; lots: number; product: 'INTRADAY' | 'MARGIN' };
+  action: { kind: 'notify' } | { kind: 'trade'; contract: InstrumentSpec; side: 'BUY' | 'SELL'; lots: number; product: 'INTRADAY' | 'MARGIN'; broker: AlertBroker };
 }
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
@@ -338,7 +390,10 @@ export function parseAlertInput(raw: unknown, now: number): AlertInput | string 
     const lots = Number(act.lots);
     if (!Number.isInteger(lots) || lots < 1 || lots > MAX_ALERT_LOTS) return `Lots must be a whole number 1-${MAX_ALERT_LOTS}`;
     const product = act.product === 'MARGIN' ? 'MARGIN' : 'INTRADAY';
-    action = { kind: 'trade', contract, side, lots, product };
+    if (act.broker !== undefined && act.broker !== 'dhan' && act.broker !== 'kotak') return 'Broker must be Dhan or Kotak';
+    const broker: AlertBroker = act.broker === 'kotak' ? 'kotak' : 'dhan';
+    if (broker === 'kotak' && contract.kind !== 'index' && isMcxAlertUnderlying(contract.underlying) && product === 'INTRADAY') return KOTAK_MCX_NRML_ONLY;
+    action = { kind: 'trade', contract, side, lots, product, broker };
     trigger = 'once';
   } else if (act.kind !== undefined && act.kind !== 'notify') {
     return 'Unknown action';

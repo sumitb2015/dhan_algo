@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   conditionMet, stepAlert, expiryReason, alertOrderQty, sessionOpen, tradeBlock, parseAlertInput, appendLog, alertCorrelationId,
-  sessionCloseMs, unarmedTradeAlerts, unarmedTradeMarkets, EVERY_COOLDOWN_MS, MAX_ALERT_LOTS, MAX_LOG, type PriceAlert, type AlertEvent, type AlertMemory,
+  sessionCloseMs, unarmedTradeAlerts, unarmedTradeMarkets, alertActionQty, alertBroker, kotakAlertQty, kotakLotMismatch, tradeLine, EVERY_COOLDOWN_MS, MAX_ALERT_LOTS, MAX_LOG, type PriceAlert, type AlertEvent, type AlertMemory,
 } from './priceAlerts.ts';
 
 // 2026-11-26 is a Thursday. IST = UTC + 5:30.
@@ -187,4 +187,72 @@ test('unarmed trade markets: open markets with an active trade alert that would 
   assert.deepEqual(unarmedTradeAlerts(at([nse, mcx, notify]), ist(21, 0)).map(a => a.id), ['mcx1']);
   assert.deepEqual(unarmedTradeAlerts(at([nse, mcx, notify]), ist(10, 0)).map(a => a.id), ['abc123', 'mcx1']);
   assert.deepEqual(unarmedTradeAlerts(at([nse, mcx], true), ist(10, 0)), []);
+});
+
+// ── Kotak trade alerts ──
+
+const kotakAlert = (over: Partial<Extract<PriceAlert['action'], { kind: 'trade' }>> = {}, alertOver: Partial<PriceAlert> = {}): PriceAlert => {
+  const b = base(alertOver);
+  if (b.action.kind !== 'trade') throw new Error('trade base');
+  return { ...b, action: { ...b.action, broker: 'kotak', kotak: { tradingSymbol: 'NIFTY26D0124000CE', lotSize: 65, segment: 'nse_fo' }, ...over } };
+};
+const crude = { kind: 'future' as const, segment: 'MCX_COMM' as const, securityId: '777', displayName: 'CRUDEOILM FUT', underlying: 'CRUDEOILM', expiry: '2026-12-17', lot: 1 };
+
+test('broker: an alert saved before Kotak was offered is Dhan; tradeLine names the broker', () => {
+  const b = base();
+  if (b.action.kind !== 'trade') throw new Error('trade base');
+  assert.equal(alertBroker(b.action), 'dhan');
+  assert.match(String(tradeLine(b.action)), /on Dhan$/);
+  assert.match(String(tradeLine(kotakAlert().action)), /on Kotak$/);
+});
+
+test('Kotak quantity: lots x Kotak lot (NSE units, MCX barrels), never the Dhan lot count', () => {
+  assert.equal(kotakAlertQty({ lotSize: 65 }, 2), 130);
+  assert.equal(kotakAlertQty({ lotSize: 10 }, 3), 30, 'CRUDEOILM: 3 lots = 30 barrels on Kotak');
+  assert.equal(kotakAlertQty({ lotSize: 100 }, 1), 100);
+  assert.equal(kotakAlertQty({ lotSize: 65 }, MAX_ALERT_LOTS + 1), 0);
+  assert.equal(kotakAlertQty(undefined, 1), 0, 'no Kotak contract = refuse');
+  const a = kotakAlert({ contract: crude, lots: 3, product: 'MARGIN', kotak: { tradingSymbol: 'CRUDEOILM17DEC26FUT', lotSize: 10, segment: 'mcx_fo' } });
+  if (a.action.kind !== 'trade') throw new Error('trade');
+  assert.equal(alertActionQty(a.action), 30);
+  const d = base({ action: { ...a.action, broker: 'dhan' } });
+  if (d.action.kind !== 'trade') throw new Error('trade');
+  assert.equal(alertActionQty(d.action), 3, 'Dhan MCX quantity stays in lots');
+});
+
+test('Kotak lot check: NSE lot must match the master list, MCX lot must be the barrels per lot', () => {
+  const nifty = { segment: 'NSE_FNO' as const, lot: 65, underlying: 'NIFTY', displayName: 'NIFTY 24000 CE' };
+  assert.equal(kotakLotMismatch(nifty, 65), null);
+  assert.match(String(kotakLotMismatch(nifty, 75)), /is 75, expected 65/);
+  assert.equal(kotakLotMismatch({ ...crude }, 10), null);
+  assert.match(String(kotakLotMismatch({ ...crude }, 1)), /expected 10 barrels/);
+  assert.equal(kotakLotMismatch({ ...crude, underlying: 'CRUDEOIL' }, 100), null);
+  assert.match(String(kotakLotMismatch(nifty, 0)), /no lot size/);
+});
+
+test('Kotak trade block: crude MIS refused, missing contract refused, NSE MIS allowed', () => {
+  const now = ist(10, 0);
+  const armed = { armedOn: '2026-11-26' };
+  assert.equal(tradeBlock(armed, kotakAlert(), now), null);
+  assert.match(String(tradeBlock(armed, kotakAlert({ kotak: undefined }), now)), /No Kotak contract/);
+  const mcxNow = ist(19, 0);
+  const mis = kotakAlert({ contract: crude, product: 'INTRADAY', kotak: { tradingSymbol: 'CRUDEOILM17DEC26FUT', lotSize: 10, segment: 'mcx_fo' } });
+  assert.match(String(tradeBlock(armed, mis, mcxNow)), /NRML only/);
+  const nrml = kotakAlert({ contract: crude, product: 'MARGIN', kotak: { tradingSymbol: 'CRUDEOILM17DEC26FUT', lotSize: 10, segment: 'mcx_fo' } });
+  assert.equal(tradeBlock(armed, nrml, mcxNow), null);
+});
+
+test('input: broker defaults to Dhan, Kotak crude MIS refused, unknown broker refused', () => {
+  const body = (action: Record<string, unknown>) => ({ instrument: { kind: 'index', symbol: 'NIFTY' }, condition: 'gt', value: 1, action });
+  const opt = { kind: 'option', underlying: 'NIFTY', expiry: '2026-12-01', strike: 24000, optType: 'CE' };
+  const fut = { kind: 'future', underlying: 'CRUDEOILM', expiry: '2026-12-17' };
+  const d = parseAlertInput(body({ kind: 'trade', contract: opt, side: 'BUY', lots: 1 }), 0);
+  assert.ok(typeof d !== 'string' && d.action.kind === 'trade' && d.action.broker === 'dhan');
+  const k = parseAlertInput(body({ kind: 'trade', contract: opt, side: 'SELL', lots: 2, broker: 'kotak' }), 0);
+  assert.ok(typeof k !== 'string' && k.action.kind === 'trade' && k.action.broker === 'kotak');
+  assert.match(String(parseAlertInput(body({ kind: 'trade', contract: fut, side: 'BUY', lots: 1, broker: 'kotak' }), 0)), /NRML only/);
+  const kn = parseAlertInput(body({ kind: 'trade', contract: fut, side: 'BUY', lots: 1, broker: 'kotak', product: 'MARGIN' }), 0);
+  assert.ok(typeof kn !== 'string');
+  assert.ok(typeof parseAlertInput(body({ kind: 'trade', contract: fut, side: 'BUY', lots: 1, broker: 'dhan' }), 0) !== 'string', 'Dhan crude MIS unchanged');
+  assert.match(String(parseAlertInput(body({ kind: 'trade', contract: opt, side: 'BUY', lots: 1, broker: 'zerodha' }), 0)), /Dhan or Kotak/);
 });

@@ -32,6 +32,13 @@ async function mockApi(page: Page, state: State) {
     if (p === '/api/index-scalper/candles') {
       state.candleReqs.push(u.search);
       const opt = u.searchParams.get('kind') === 'option';
+      // trendUp + oi=1: the future's 1-minute bars with rising price AND rising open interest (a long buildup)
+      if (u.searchParams.get('kind') === 'future' && state.trendUp && u.searchParams.get('oi') === '1') {
+        return json(route, { success: true, interval: '1', candles: Array.from({ length: 400 }, (_, i) => {
+          const c = SPOT - 300 + i * 2, o = c - 1;
+          return { t: Date.UTC(2026, 10, 10, 3, 45, 0) / 1000 + i * 60, o, h: c + 1, l: o - 1, c, v: 1000, oi: 12_000_000 + i * 500 };
+        }) });
+      }
       if (u.searchParams.get('kind') === 'future') return json(route, { success: true, candles: bars(SPOT + 110, 40).map((b, i) => ({ ...b, v: 50_000 + (i % 7) * 9_000 })), interval: u.searchParams.get('interval') });
       // trendUp: a steady rise on every timeframe of the underlying (the trend strip's 3m / 5m / 15m / 1h)
       const step = Number(u.searchParams.get('interval') ?? '5') * 60;
@@ -305,8 +312,30 @@ test.describe('Index Scalper layout + option charts', () => {
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(page.getByTestId('trend-strip').getByTestId('trend-tf')).toHaveText('15m', { timeout: 60_000 });
 
+    // the optional lights: futures OI buildup (rising price + rising OI = LB) and market structure, both on by default
+    const strip2 = page.getByTestId('trend-strip');
+    await expect(strip2.getByTestId('trend-oi')).toHaveAttribute('data-buildup', 'LB', { timeout: 30_000 });
+    expect(state.candleReqs.some(q => q.includes('kind=future') && q.includes('oi=1') && q.includes('interval=1&'))).toBe(true);
+    await expect(strip2.getByTestId('trend-structure')).toBeVisible();
+    // each can be turned off in the strip's settings, and stays off after a reload
+    await page.getByRole('button', { name: 'Trend strip settings' }).click();
+    const menu = page.getByRole('dialog', { name: 'Trend strip settings panel' });
+    await menu.getByRole('switch', { name: 'Futures OI buildup' }).click();
+    await menu.getByRole('switch', { name: 'Market structure' }).click();
+    await expect(strip2.getByTestId('trend-oi')).toHaveCount(0);
+    await expect(strip2.getByTestId('trend-structure')).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    const oiReqs = state.candleReqs.filter(q => q.includes('oi=1')).length;
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('trend-strip').getByTestId('trend-bias')).toHaveText('BULLISH', { timeout: 60_000 });
+    await expect(page.getByTestId('trend-strip').getByTestId('trend-oi')).toHaveCount(0);
+    await expect(page.getByTestId('trend-strip').getByTestId('trend-structure')).toHaveCount(0);
+    expect(state.candleReqs.filter(q => q.includes('oi=1')).length).toBe(oiReqs); // OI off: its candles are not fetched
+
     await page.getByRole('switch', { name: 'Trend strip' }).click();
     await expect(page.getByTestId('trend-strip')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Trend strip settings' })).toBeDisabled();
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(page.getByRole('switch', { name: 'Trend strip' })).toHaveAttribute('aria-checked', 'false', { timeout: 60_000 });
     await expect(page.getByTestId('trend-strip')).toHaveCount(0);

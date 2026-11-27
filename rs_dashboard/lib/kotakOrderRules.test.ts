@@ -56,3 +56,9 @@ test('isxc (Index Scalper on full-size CRUDEOIL): 5 lots = 500 barrels on Kotak'
   assert.match(sourceLotCapError(600, 'isxc', 'CRUDEOIL15JAN277900CE', 100)!, /cap of 5 lots/);
   assert.equal(sourceLotCapError(200, 'isx', 'CRUDEOILM15JAN2712800CE', 10), null); // the mini keeps 20 lots
 });
+
+test('pa (Price Alerts) Kotak opens are capped at 10 lots', () => {
+  assert.equal(sourceLotCapError(650, 'pa', 'NIFTY26D0124000CE', 65), null);
+  assert.match(String(sourceLotCapError(715, 'pa', 'NIFTY26D0124000CE', 65)), /cap of 10 lots/);
+  assert.match(String(sourceLotCapError(1100, 'pa', 'CRUDEOILM17DEC26FUT', 10)), /cap of 10 lots/);
+});

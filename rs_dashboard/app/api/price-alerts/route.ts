@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 // Price Alerts (docs/PRICE_ALERTS_GUIDE.md). GET = alerts + arm state + recent fired events. POST = one action:
 //   create {alert} | update {id, alert} | move {id, value} | pause {id} | resume {id} | delete {id}
 //   arm | disarm | settings {defaultSoundSec} | clearLog
-// A trade alert places a REAL Dhan order when it fires (server watcher, lib/priceAlertServer.ts) — only on a day it was
+// A trade alert places a REAL Dhan or Kotak order when it fires (server watcher, lib/priceAlertServer.ts) — only on a day it was
 // armed. Instruments are resolved here from master_list.csv; the browser never supplies a security id.
 
 const bad = (error: string, status = 400) => NextResponse.json({ success: false, error }, { status });
@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
     if (action === 'create' || action === 'update') {
       const input = parseAlertInput(body.alert, now);
       if (typeof input === 'string') return bad(input);
-      const resolved = resolveInput(input);
+      const resolved = await resolveInput(input);
       if (typeof resolved === 'string') return bad(resolved);
       const err = await updateAlerts<string | null>(action, s => {
         if (action === 'create') {
