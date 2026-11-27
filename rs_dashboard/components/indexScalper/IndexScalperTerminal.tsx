@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AreaChart, OctagonX, BarChart3, Building2, CandlestickChart, Columns2, Gauge, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Scaling, Target, Trash2, TrendingUp, Volume2, VolumeX, Zap,
+  Compass,
 } from 'lucide-react';
 import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { useTabLeader } from '@/hooks/useTabLeader';
@@ -29,6 +30,7 @@ import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import { scalperRoute } from '@/hooks/useBrokerSelector';
 import { type DrawTool } from './ScalperChart';
 import ChartPane, { type PaneCfg } from './ChartPane';
+import TrendStrip from './TrendStrip';
 import OptionChainPanel, { type PickedContract } from './OptionChainPanel';
 import OrderTicket, { type TicketRequest, type TicketOrderType } from './OrderTicket';
 import DhanScalperWidget from './DhanScalperWidget';
@@ -75,6 +77,7 @@ import { QUICK_ON_KEY, QUICK_SETTINGS_KEY, DEFAULT_QUICK, MAX_QUICK_RANGE, clamp
 const LAYOUT_KEY = 'indexScalper.layout.v2';
 const LAYOUT_KEY_V1 = 'indexScalper.layout.v1';
 const OI_KEY = 'indexScalper.oiProfile';
+const TREND_KEY = 'indexScalper.trend';
 const GRID_KEY = 'indexScalper.grid';
 // The old scale-bar volume switch (read once, to add the Volume indicator hidden for a viewer who had turned it off).
 const VOL_KEY = 'indexScalper.volume';
@@ -174,6 +177,8 @@ export default function IndexScalperTerminal() {
   const [paneStatus, setPaneStatus] = useState<[PaneStatus, PaneStatus]>([NO_STATUS, NO_STATUS]);
   // Call / Put OI bars at each strike on the underlying chart(s). Per viewer, on by default.
   const [showOi, setShowOi] = useState(true);
+  // Trend strip + multi-timeframe check above the charts (TrendStrip.tsx; display only), on by default.
+  const [showTrend, setShowTrend] = useState(true);
   const [showGrid, setShowGridState] = useState(true);
   const [candleColorRule, setCandleColorRuleState] = useState<CandleColorRule>('off');
   // Quick Trade (strike lines with live C / P chips, Buy / Sell in one click). OFF by default: off, the page is exactly
@@ -336,6 +341,7 @@ export default function IndexScalperTerminal() {
       }
     }
     if (readPref(OI_KEY) === '0') setShowOi(false);
+    if (readPref(TREND_KEY) === '0') setShowTrend(false);
     if (readPref(GRID_KEY) === '0') setShowGridState(false);
     setCandleColorRuleState(parseCandleColorRule(readPref(CANDLE_COLOR_KEY)));
     setOiModeState(parseOiMode(readPref(OI_MODE_KEY)));
@@ -345,6 +351,7 @@ export default function IndexScalperTerminal() {
     setLayoutReady(true);
   }, []);
   const setOi = (on: boolean) => { setShowOi(on); savePref(OI_KEY, on ? '1' : '0'); };
+  const setTrend = (on: boolean) => { setShowTrend(on); savePref(TREND_KEY, on ? '1' : '0'); };
   // Trend candles: cycles through CANDLE_COLOR_RULES (Off -> EMA 9 & 20 -> ...), remembered.
   const cycleCandleColor = () => {
     const i = CANDLE_COLOR_RULES.findIndex(r => r.id === candleColorRule);
@@ -2181,6 +2188,12 @@ export default function IndexScalperTerminal() {
             <Switch size="sm" checked={showOi} onCheckedChange={setOi} aria-label="OI profile" />
             <span className={cn('w-6 text-[10px] font-bold hidden min-[2200px]:inline', showOi ? 'text-emerald-400' : 'text-zinc-500')} aria-hidden>{showOi ? 'ON' : 'OFF'}</span>
           </label>
+          <label className="flex items-center gap-1.5 h-7 px-1.5 rounded text-xs font-semibold text-zinc-300 cursor-pointer select-none hover:bg-zinc-800"
+            title="Trend strip: VWAP / EMA 9-20 / Supertrend / ADX and the bias on 3m, 5m, 15m and 1h, above the charts">
+            <Compass className="w-4 h-4" aria-hidden />
+            <span className="hidden min-[2200px]:inline">Trend</span>
+            <Switch size="sm" checked={showTrend} onCheckedChange={setTrend} aria-label="Trend strip" />
+          </label>
           {sep}
           <div className="relative flex items-center">
             <label className="flex items-center gap-1.5 h-7 px-1.5 rounded text-xs font-semibold text-zinc-300 cursor-pointer select-none hover:bg-zinc-800"
@@ -2313,6 +2326,8 @@ export default function IndexScalperTerminal() {
             className="w-9 h-9 flex items-center justify-center rounded text-zinc-400 hover:text-rose-400 hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60"><Trash2 className="w-[18px] h-[18px]" /></button>
         </div>
 
+        <div className="flex flex-col flex-1 min-w-0 min-h-0">
+        {showTrend && layoutReady && <TrendStrip underlying={underlying} feed={feed} days={days} refreshTick={refreshTick} />}
         <div className="relative flex flex-1 min-w-0 min-h-0">
           {indReady && layoutReady && (
             <>
@@ -2353,6 +2368,7 @@ export default function IndexScalperTerminal() {
             <div role="status" className={cn('absolute left-1/2 -translate-x-1/2 bottom-4 z-30 max-w-[70%] px-3 py-2 rounded border text-xs font-semibold',
               toast.ok ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40' : 'bg-rose-500/15 text-rose-300 border-rose-500/40')}>{toast.text}</div>
           )}
+        </div>
         </div>
       </div>
 

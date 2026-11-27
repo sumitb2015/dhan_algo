@@ -20,7 +20,7 @@ function bars(level: number, swing: number) {
   });
 }
 
-interface State { calls: Call[]; blocked: Call[]; bridgeStarts: string[]; candleReqs: string[]; positions: Record<string, unknown>[]; orders: Record<string, unknown>[]; noSpot?: boolean; noPrevOi?: boolean; noLtpStrike?: number; snapChain?: boolean; ce25350?: number; optVolume?: boolean }
+interface State { calls: Call[]; blocked: Call[]; bridgeStarts: string[]; candleReqs: string[]; positions: Record<string, unknown>[]; orders: Record<string, unknown>[]; noSpot?: boolean; noPrevOi?: boolean; noLtpStrike?: number; snapChain?: boolean; ce25350?: number; optVolume?: boolean; trendUp?: boolean }
 
 async function mockApi(page: Page, state: State) {
   await page.route('**/api/**', async (route: Route) => {
@@ -33,7 +33,13 @@ async function mockApi(page: Page, state: State) {
       state.candleReqs.push(u.search);
       const opt = u.searchParams.get('kind') === 'option';
       if (u.searchParams.get('kind') === 'future') return json(route, { success: true, candles: bars(SPOT + 110, 40).map((b, i) => ({ ...b, v: 50_000 + (i % 7) * 9_000 })), interval: u.searchParams.get('interval') });
-      const cs = opt ? bars(210, 20) : bars(SPOT, 40);
+      // trendUp: a steady rise on every timeframe of the underlying (the trend strip's 3m / 5m / 15m / 1h)
+      const step = Number(u.searchParams.get('interval') ?? '5') * 60;
+      const rising = () => Array.from({ length: 80 }, (_, i) => {
+        const c = SPOT - 800 + i * 10 + (i % 3 === 0 ? -4 : 0), o = c - 6;
+        return { t: Date.UTC(2026, 10, 10, 3, 45, 0) / 1000 + i * step, o, h: c + 5, l: o - 5, c };
+      });
+      const cs = opt ? bars(210, 20) : state.trendUp ? rising() : bars(SPOT, 40);
       // option bars carry volume when asked (the index never does)
       return json(route, { success: true, candles: opt && state.optVolume ? cs.map((b, i) => ({ ...b, v: 1000 + (i % 9) * 400 })) : cs, interval: u.searchParams.get('interval') });
     }
@@ -259,6 +265,39 @@ test.describe('Index Scalper layout + option charts', () => {
     // ...while total OI still draws
     await page.getByRole('button', { name: 'Total OI' }).click();
     await expect(page.getByTestId('chart-pane-0').getByTestId('oi-change-unavailable')).toHaveCount(0);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('trend strip: VWAP / EMA / ST / ADX lights and the bias on 3m-1h, timeframe picked from the MTF chips, toggled off', async ({ page, context }) => {
+    const state = newState();
+    state.trendUp = true;
+    state.noSpot = true; // no live ticks: the reads come from the (rising) history only
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    const strip = page.getByTestId('trend-strip');
+    await expect(strip).toBeVisible({ timeout: 60_000 });
+    for (const tf of ['3', '5', '15', '60']) {
+      await expect(strip.getByTestId(`mtf-chip-${tf}`)).toHaveAttribute('data-bias', 'bull', { timeout: 30_000 });
+    }
+    await expect(strip.getByTestId('trend-tf')).toHaveText('5m');
+    await expect(strip.getByTestId('trend-bias')).toHaveText('BULLISH');
+    for (const l of ['trend-vwap', 'trend-ema', 'trend-st']) await expect(strip.getByTestId(l)).toHaveAttribute('data-dir', '1');
+    await expect(strip.getByTestId('trend-strength')).toHaveText('Strong');
+    await expect(strip.getByTestId('mtf-summary')).toHaveText('4/4 bull ALIGNED');
+    // every trend timeframe was loaded for the underlying (never an option or the future)
+    for (const tf of ['3', '5', '15', '60']) expect(state.candleReqs.some(q => q.includes(`interval=${tf}&`) && !q.includes('kind='))).toBe(true);
+
+    await strip.getByRole('button', { name: '15 minute trend: bullish' }).click();
+    await expect(strip.getByTestId('trend-tf')).toHaveText('15m');
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('trend-strip').getByTestId('trend-tf')).toHaveText('15m', { timeout: 60_000 });
+
+    await page.getByRole('switch', { name: 'Trend strip' }).click();
+    await expect(page.getByTestId('trend-strip')).toHaveCount(0);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('switch', { name: 'Trend strip' })).toHaveAttribute('aria-checked', 'false', { timeout: 60_000 });
+    await expect(page.getByTestId('trend-strip')).toHaveCount(0);
     expect(state.blocked).toEqual([]);
   });
 
