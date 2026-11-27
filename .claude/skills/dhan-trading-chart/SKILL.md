@@ -47,7 +47,7 @@ Related skills:
 | NIFTY / SENSEX FUT pane (chart only: volume, VWAP) | `ChartSource { kind: 'future' }` -> `resolveSource(..., futureDhanId)` (the lookup's `data.future`); live price / volume from the bridge's `future` only when its expiry matches (`feed.indexFuture`); candles `kind=future` (NSE_FNO / FUTIDX); `ordersEnabled={false}` hides the "+" menu; no legs, orders, brackets, Quick Trade or OI profile on it |
 | What a pane plots; which legs / orders / TP-SL belong on it | `lib/indexScalperChartSource.ts`: `resolveSource` (strike pinned once resolved, ATM fallback), `legOnChart`, `bracketsOnChart`, `orderOnChart` (by `OrderRowView.securityId`, `isOption`) |
 | Quick Trade (live C / P chips on every strike in view, Buy / Sell in one click) | `QuickStrikeOverlay.tsx` over underlying panes; pure rules `lib/indexScalperQuickTrade.ts` (`visibleStrikeRows`, `clampQuickSettings`); header switch, off by default |
-| Call / Put OI profile (Total or Chg) | `lib/indexScalperOiProfile.ts` (`oiProfileKey`, label placement, `fmtOI`); one overlay canvas in `ScalperChart.tsx`; header OI switch + Total / Chg |
+| Call / Put OI profile (Total / Chg / OI+Δ / ΔOI) | `lib/indexScalperOiProfile.ts` (`oiProfileKey`, `oiBars`, `oiBarLabel`, label placement, `parseOiMode`); one overlay canvas in `ScalperChart.tsx`; header OI switch + mode buttons |
 | Per-pane candles (underlying or one option's premium) | `useChartBars.ts`; route `candles?kind=option&securityId=` (NSE_FNO/OPTIDX, MCX_COMM/OPTFUT) |
 | Placing / moving brackets (SIM and REAL) | `IndexScalperTerminal.tsx`: `onSetBracket`, `onCancelBracket`, `onReversePosition`, `onPlaceChartOrder` |
 
@@ -290,6 +290,10 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
   REST snapshot passes `previous_oi`. `oi_chg_pct` 0.0 cannot tell "no change" from "no baseline", so a strike with no
   baseline gets **no bar, never a zero**; a bridge started before `prev_oi` existed is read from a non-zero
   `oi_chg_pct` only, and the pane says when no previous-day OI exists. Added OI = filled bar, shed OI = outline.
+- **OI + Δ and Δ OI** (2026-11-27, the Fresh Money board's views): `both` = each side's total OI as one bar split
+  held (dim) / added today (bright) / cut today (dashed outline tail past today's OI), via Fresh Money's `stackParts`,
+  scaled on max(today, previous close); unknown change = all held. `delta` = ONE bar per strike centred on its level,
+  |Call − Put|, red when calls are heavier, green when puts are (filled, never an outline: negative is not shed OI).
 - **Labels by priority** (`b752a099`): largest Call / Put first, then by OI; a label that would touch another is
   dropped, so zoomed out they do not pile up.
 

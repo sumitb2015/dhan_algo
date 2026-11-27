@@ -4,7 +4,22 @@
 // Display only. The source is the live bridge chain, else Dhan's REST snapshot (feed.chain): OI never prices or sends.
 // OI is in the units the bridge carries (Dhan's: contracts x lot size), shown compact (K / L / Cr).
 
-export type OiMode = 'total' | 'change';
+import { stackParts } from './freshMoney.ts';
+
+/** What the bars show (the same four views as the Fresh Money board):
+ *  - `total`: each side's total OI;
+ *  - `change`: each side's OI change since the previous day;
+ *  - `both` ("OI + Δ"): each side's total OI as one bar with today's change inside it, outward from the axis:
+ *    [held since the previous close | added today] or [held | cut today, an outline tail past today's OI];
+ *  - `delta` ("Δ OI"): ONE bar per strike, |Call OI − Put OI|, red when calls are heavier, green when puts are. */
+export type OiMode = 'total' | 'change' | 'both' | 'delta';
+
+export const OI_MODES: readonly OiMode[] = ['total', 'change', 'both', 'delta'];
+
+/** A saved mode string back to a mode; anything else is `total`. */
+export function parseOiMode(v: unknown): OiMode {
+  return OI_MODES.includes(v as OiMode) ? (v as OiMode) : 'total';
+}
 
 /** `ceChg` / `peChg`: OI change since the previous day, in the same units; null when there is no previous-day OI
  *  (unknown is not zero: such a strike gets no change bar). */
@@ -20,6 +35,8 @@ export interface OiProfile {
   maxPeChgStrike: number | null;
   /** Any strike with a known change: false when the source has no previous-day OI at all. */
   hasChange: boolean;
+  /** Strike with the largest |Call OI − Put OI| (null when every strike is balanced). */
+  maxDeltaStrike: number | null;
 }
 
 interface SideLike { oi?: number; prev_oi?: number; oi_chg_pct?: number }
@@ -57,15 +74,16 @@ export function buildOiProfile(strikes: Record<string, StrikeLike> | null | unde
   // Seeded at 0 with a strict ">": an all-zero side nominates no strike (no signal), not the lowest one.
   let maxCe = 0, maxPe = 0, maxCeStrike: number | null = null, maxPeStrike: number | null = null;
   let maxCeChg = 0, maxPeChg = 0, maxCeChgStrike: number | null = null, maxPeChgStrike: number | null = null;
-  let hasChange = false;
+  let hasChange = false, maxDelta = 0, maxDeltaStrike: number | null = null;
   for (const r of rows) {
+    if (Math.abs(r.ce - r.pe) > maxDelta) { maxDelta = Math.abs(r.ce - r.pe); maxDeltaStrike = r.strike; }
     if (r.ce > maxCe) { maxCe = r.ce; maxCeStrike = r.strike; }
     if (r.pe > maxPe) { maxPe = r.pe; maxPeStrike = r.strike; }
     if (r.ceChg !== null || r.peChg !== null) hasChange = true;
     if (r.ceChg !== null && r.ceChg > maxCeChg) { maxCeChg = r.ceChg; maxCeChgStrike = r.strike; }
     if (r.peChg !== null && r.peChg > maxPeChg) { maxPeChg = r.peChg; maxPeChgStrike = r.strike; }
   }
-  return { rows, maxCe, maxCeStrike, maxPe, maxPeStrike, maxCeChgStrike, maxPeChgStrike, hasChange };
+  return { rows, maxCe, maxCeStrike, maxPe, maxPeStrike, maxCeChgStrike, maxPeChgStrike, hasChange, maxDeltaStrike };
 }
 
 /** One string for everything the overlay draws, so the memoised chart re-renders only when OI actually changes (most
@@ -74,15 +92,22 @@ export function oiProfileKey(p: OiProfile | null): string {
   return p ? p.rows.map(r => `${r.strike}:${r.ce}:${r.pe}:${r.ceChg}:${r.peChg}`).join(',') : '';
 }
 
-/** `oi` is the value drawn: the total OI, or the change (negative = OI shed; drawn as an outline). */
-export interface OiBar { strike: number; side: 'CE' | 'PE'; x: number; y: number; w: number; h: number; oi: number; max: boolean; neg: boolean }
+/** `oi` is the value drawn: the total OI, the change (negative = OI shed; drawn as an outline), or in `delta` mode
+ *  Call − Put (side = the heavier one). In `both` mode `chg` is today's change (null = unknown) and `held` / `added` /
+ *  `cut` are the segment widths in px, from the axis outward (held, then added or the cut tail); they sum to `w`. */
+export interface OiBar {
+  strike: number; side: 'CE' | 'PE'; x: number; y: number; w: number; h: number; oi: number; max: boolean; neg: boolean;
+  chg?: number | null; held?: number; added?: number; cut?: number;
+}
 
 /**
  * Bar rectangles in plot pixels. Bars grow leftwards from the plot's right edge (`right`, just left of the price axis),
  * the longest `maxW` wide; the Call bar sits just above the strike's level, the Put bar just below it, each up to half
  * the strike spacing tall. Strikes off screen (`yOf` null, or outside 0..height) are skipped. Bars share ONE scale (the
  * largest magnitude among the strikes on screen) so a Call and a Put bar compare directly. In `change` mode the length is
- * |change|; a strike side with an unknown change gets no bar.
+ * |change|; a strike side with an unknown change gets no bar. In `both` mode a side's bar is its total OI split into
+ * held / added / cut segments (unknown change: all held). In `delta` mode each strike gets one bar, |Call − Put|, centred
+ * on its level.
  */
 export function oiBars(
   p: OiProfile,
@@ -105,13 +130,41 @@ export function oiBars(
   gaps.sort((a, b) => a - b);
   const gap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 16;
   const h = Math.max(2, Math.min(14, gap / 2 - 1));
+  const out: OiBar[] = [];
+  if (mode === 'delta') {
+    // One bar centred on the strike's level, as tall as a Call and a Put bar together.
+    const scale = Math.max(0, ...placed.map(({ r }) => Math.abs(r.ce - r.pe)));
+    if (!(scale > 0)) return [];
+    for (const { r, y } of placed) {
+      const d = r.ce - r.pe;
+      if (d === 0) continue;
+      const w = Math.max(1, (Math.abs(d) / scale) * maxW);
+      out.push({ strike: r.strike, side: d > 0 ? 'CE' : 'PE', x: right - w, y: y - h, w, h: 2 * h, oi: d, max: r.strike === p.maxDeltaStrike, neg: false });
+    }
+    return out;
+  }
+  if (mode === 'both') {
+    // Length = the larger of today's and the previous close's OI, so a cut shows as a tail past today's OI.
+    const parts = (oi: number, chg: number | null) => (oi > 0 ? stackParts(oi, chg) : null);
+    const scale = Math.max(0, ...placed.map(({ r }) => Math.max(parts(r.ce, r.ceChg)?.total ?? 0, parts(r.pe, r.peChg)?.total ?? 0)));
+    if (!(scale > 0)) return [];
+    const push = (r: OiRow, side: 'CE' | 'PE', top: number) => {
+      const oi = side === 'CE' ? r.ce : r.pe, chg = side === 'CE' ? r.ceChg : r.peChg;
+      const sp = parts(oi, chg);
+      if (!sp || sp.total === 0) return;
+      const w = Math.max(1, (sp.total / scale) * maxW), k = w / sp.total;
+      out.push({ strike: r.strike, side, x: right - w, y: top, w, h, oi, chg, max: r.strike === (side === 'CE' ? p.maxCeStrike : p.maxPeStrike),
+        neg: false, held: sp.held * k, added: sp.added * k, cut: sp.cut * k });
+    };
+    for (const { r, y } of placed) { push(r, 'CE', y - h); push(r, 'PE', y); }
+    return out;
+  }
   const ceVal = (r: OiRow) => (mode === 'change' ? r.ceChg : r.ce);
   const peVal = (r: OiRow) => (mode === 'change' ? r.peChg : r.pe);
   const scale = Math.max(0, ...placed.map(({ r }) => Math.max(Math.abs(ceVal(r) ?? 0), Math.abs(peVal(r) ?? 0))));
   if (!(scale > 0)) return [];
   const ceMax = mode === 'change' ? p.maxCeChgStrike : p.maxCeStrike;
   const peMax = mode === 'change' ? p.maxPeChgStrike : p.maxPeStrike;
-  const out: OiBar[] = [];
   for (const { r, y } of placed) {
     const c = ceVal(r), q = peVal(r);
     if (c !== null && c !== 0) {
@@ -191,4 +244,12 @@ export function fmtOI(n: number | undefined): string {
 export function fmtOIChange(n: number): string {
   if (n === 0) return '0';
   return `${n > 0 ? '+' : '-'}${fmtOI(Math.abs(n)).replace(' ', '')}`;
+}
+
+/** A bar's label: total "1.38Cr", change "+12.0K", OI + Δ "1.38Cr +12.0K" (change unknown: the total alone), Δ OI
+ *  signed Call − Put ("+45.2L" calls heavier, "-45.2L" puts heavier). */
+export function oiBarLabel(b: OiBar, mode: OiMode): string {
+  if (mode === 'change' || mode === 'delta') return fmtOIChange(b.oi);
+  const total = fmtOI(b.oi).replace(' ', '');
+  return mode === 'both' && b.chg != null ? `${total} ${fmtOIChange(b.chg)}` : total;
 }

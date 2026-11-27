@@ -227,6 +227,18 @@ test.describe('Index Scalper layout + option charts', () => {
     await expect.poll(painted).toBeGreaterThan(100);
     await expect(left.getByTestId('oi-change-unavailable')).toHaveCount(0);
 
+    // OI + Δ (total with today's change inside) and Δ OI (Call − Put): each a different picture again
+    const chgPx = await painted();
+    const both = page.getByRole('button', { name: 'OI plus change' }), delta = page.getByRole('button', { name: 'Call minus Put OI' });
+    await both.click();
+    await expect(both).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(async () => { const n = await painted(); return n > 200 && n !== chgPx && n !== totalPx; }, { timeout: 10_000 }).toBe(true);
+    const bothPx = await painted();
+    await delta.click();
+    await expect(delta).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(async () => { const n = await painted(); return n > 100 && n !== bothPx; }, { timeout: 10_000 }).toBe(true);
+    await chg.click();
+
     // remembered across a reload
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(page.getByRole('button', { name: 'Change in OI' })).toHaveAttribute('aria-pressed', 'true', { timeout: 60_000 });

@@ -20,7 +20,7 @@ import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { INSTRUMENTS, displayLotUnits, isMcx, qtyUnits, type Underlying } from '@/lib/indexScalperInstrument';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
-import { fmtOI, fmtOIChange, oiBars, oiBarsBelowChips, placeOiLabels, type OiMode, type OiProfile } from '@/lib/indexScalperOiProfile';
+import { oiBarLabel, oiBars, oiBarsBelowChips, placeOiLabels, type OiMode, type OiProfile } from '@/lib/indexScalperOiProfile';
 import { legPremiumPnl, premiumBracketsFor } from '@/lib/indexScalperPremiumBrackets';
 import PremiumBracketControls from './PremiumBracketControls';
 import TrailControl from './TrailControl';
@@ -1220,12 +1220,30 @@ function ScalperChart(props: Props) {
       ctx.textAlign = 'right';
       // Labels by priority without overlap (largest Call / Put first, then by OI): zoomed out, the strikes are a few px
       // apart and every bar's label used to pile onto its neighbours.
-      const text = (b: (typeof bars)[number]) => (oiMode === 'change' ? fmtOIChange(b.oi) : fmtOI(b.oi).replace(' ', ''));
+      const text = (b: (typeof bars)[number]) => oiBarLabel(b, oiMode);
       const labelled = placeOiLabels(bars, b => ctx.measureText(text(b)).width);
       bars.forEach((b, i) => {
         // Data colours (CLAUDE.md theming exception): Calls rose, Puts emerald; the largest of each stronger.
         const rgb = b.side === 'CE' ? '244,63,94' : '16,185,129';
-        if (b.neg) {
+        if (oiMode === 'both' && b.held !== undefined) {
+          // OI + Δ: from the axis outward, held since the previous close (dim), then added today (bright) or the OI cut
+          // today as a dashed outline tail (that OI is gone).
+          const held = b.held, added = b.added ?? 0, cut = b.cut ?? 0;
+          const axisX = b.x + b.w;
+          ctx.fillStyle = `rgba(${rgb},${b.max ? 0.4 : 0.22})`;
+          ctx.fillRect(axisX - held, b.y, held, b.h);
+          if (added > 0) {
+            ctx.fillStyle = `rgba(${rgb},0.85)`;
+            ctx.fillRect(axisX - held - added, b.y, added, b.h);
+          }
+          if (cut > 0) {
+            ctx.strokeStyle = `rgba(${rgb},0.8)`;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 2]);
+            ctx.strokeRect(b.x + 0.5, b.y + 0.5, Math.max(0, cut - 1), Math.max(0, b.h - 1));
+            ctx.setLineDash([]);
+          }
+        } else if (b.neg) {
           // OI shed today: an outline of the same length, so it reads as "taken off", not as fresh writing.
           ctx.strokeStyle = `rgba(${rgb},0.85)`;
           ctx.lineWidth = 1;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildOiProfile, fmtOI, fmtOIChange, oiBars, oiChange, oiProfileKey, placeOiLabels, oiBarsBelowChips, type OiBar } from './indexScalperOiProfile.ts';
+import { buildOiProfile, fmtOI, fmtOIChange, oiBarLabel, oiBars, oiChange, oiProfileKey, parseOiMode, placeOiLabels, oiBarsBelowChips, type OiBar } from './indexScalperOiProfile.ts';
 
 const chain = {
   '25300': { strike: 25300, ce: { oi: 1_000_000 }, pe: { oi: 4_000_000 } },
@@ -150,4 +150,57 @@ test('oiBarsBelowChips: a strike under a position chip gets its Call / Put bars 
   // only a Put bar on the strike, touching the chip's lower edge: moved too
   const pe = oiBarsBelowChips([bar(25800, 'PE', 200)], [{ top: 180, bottom: 204 }]);
   assert.equal(pe[0].y, 206);
+});
+
+test('OI + Δ mode: total OI split into held / added / cut, scaled on the larger of today and the previous close', () => {
+  const p = buildOiProfile({
+    '25300': { strike: 25300, ce: { oi: 1_000_000, prev_oi: 1_500_000 }, pe: { oi: 4_000_000, prev_oi: 3_000_000 } },
+    '25350': { strike: 25350, ce: { oi: 2_000_000 }, pe: { oi: 2_000_000, prev_oi: 2_000_000 } },
+  })!;
+  const yOf = (price: number) => 100 + (25400 - price);
+  const bars = oiBars(p, yOf, 500, 400, 200, 'both');
+  const pe300 = bars.find(b => b.strike === 25300 && b.side === 'PE')!;
+  assert.equal(pe300.w, 200);                    // 40L is the longest bar
+  assert.equal(pe300.held, 150);                 // 30L held since the previous close
+  assert.equal(pe300.added, 50);                 // +10L added today
+  assert.equal(pe300.cut, 0);
+  assert.equal(pe300.y, yOf(25300));             // Put below the level
+  const ce300 = bars.find(b => b.strike === 25300 && b.side === 'CE')!;
+  assert.equal(ce300.w, 75);                     // 15L previous close: the cut shows as a tail past today's 10L
+  assert.equal(ce300.held, 50);
+  assert.equal(ce300.cut, 25);
+  assert.equal(ce300.oi, 1_000_000);             // the label still reads today's total
+  assert.equal(ce300.chg, -500_000);
+  const ce350 = bars.find(b => b.strike === 25350 && b.side === 'CE')!;
+  assert.equal(ce350.chg, null);                 // unknown change: all of it held, no added / cut
+  assert.equal(ce350.held, ce350.w);
+  assert.equal(oiBarLabel(pe300, 'both'), '40.00L +10.00L');
+  assert.equal(oiBarLabel(ce350, 'both'), '20.00L');
+});
+
+test('Δ OI mode: one bar per strike, |Call − Put|, side = the heavier one, centred on the level', () => {
+  const p = buildOiProfile(chain)!;
+  assert.equal(p.maxDeltaStrike, 25400);         // 50L − 5L = 45L
+  const yOf = (price: number) => 100 + (25400 - price);
+  const bars = oiBars(p, yOf, 500, 400, 200, 'delta');
+  assert.equal(bars.length, 2);                  // 25350 is balanced: no bar
+  const b400 = bars.find(b => b.strike === 25400)!;
+  const b300 = bars.find(b => b.strike === 25300)!;
+  assert.equal(b400.side, 'CE');
+  assert.equal(b400.oi, 4_500_000);
+  assert.equal(b400.w, 200);
+  assert.equal(b400.max, true);
+  assert.equal(b300.side, 'PE');                 // puts heavier: −30L
+  assert.equal(b300.oi, -3_000_000);
+  assert.ok(Math.abs(b300.w - 200 * 30 / 45) < 1e-9);
+  assert.equal(b300.neg, false);                 // a negative Δ is not shed OI: filled, not outlined
+  assert.equal(b400.y + b400.h / 2, yOf(25400)); // centred on the strike
+  assert.equal(oiBarLabel(b400, 'delta'), '+45.00L');
+  assert.equal(oiBarLabel(b300, 'delta'), '-30.00L');
+});
+
+test('parseOiMode: saved modes round-trip, anything else is total', () => {
+  for (const m of ['total', 'change', 'both', 'delta'] as const) assert.equal(parseOiMode(m), m);
+  assert.equal(parseOiMode(null), 'total');
+  assert.equal(parseOiMode('flow'), 'total');
 });

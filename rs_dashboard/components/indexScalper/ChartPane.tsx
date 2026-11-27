@@ -282,7 +282,7 @@ function ChartPane(p: Props) {
           </span>
         )}
         {error && <span className="text-[10px] text-amber-400 truncate" title={error}>Candles: {error}</span>}
-        {oiProfile && p.oiMode === 'change' && !oiProfile.hasChange && (
+        {oiProfile && (p.oiMode === 'change' || p.oiMode === 'both') && !oiProfile.hasChange && (
           <span data-testid="oi-change-unavailable" className="text-[10px] text-amber-400 shrink-0"
             title="The chain has no previous-day OI for this expiry, so the change cannot be computed (it is not shown as zero).">
             OI change: no previous-day OI

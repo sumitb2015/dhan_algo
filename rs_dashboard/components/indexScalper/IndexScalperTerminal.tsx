@@ -64,7 +64,7 @@ import { readPref, savePref } from '@/lib/localPref';
 import { CANDLE_COLOR_KEY, CANDLE_COLOR_RULES, parseCandleColorRule, type CandleColorRule } from '@/lib/indexScalperCandleColor';
 import { cn } from '@/lib/utils';
 import { Switch } from '@/components/ui/switch';
-import type { OiMode } from '@/lib/indexScalperOiProfile';
+import { parseOiMode, type OiMode } from '@/lib/indexScalperOiProfile';
 import { editLotsError, isEditable, movedLevels, orderEditError } from '@/lib/indexScalperOrderEdit';
 import { DEFAULT_BRACKETS, DEFAULT_BRACKETS_KEY, SL_PCT_OPTIONS, TP_PCT_OPTIONS, bracketLabel, clampDefaultBrackets, parseBracketPoints, type BracketUnit, defaultBracketPlan, opensPosition, pendingLeg, type DefaultBracketSettings, type PendingDefault } from '@/lib/indexScalperDefaultBrackets';
 import { optionStopLimit, placedOrderState, premiumBracketsFor } from '@/lib/indexScalperPremiumBrackets';
@@ -338,7 +338,7 @@ export default function IndexScalperTerminal() {
     if (readPref(OI_KEY) === '0') setShowOi(false);
     if (readPref(GRID_KEY) === '0') setShowGridState(false);
     setCandleColorRuleState(parseCandleColorRule(readPref(CANDLE_COLOR_KEY)));
-    if (readPref(OI_MODE_KEY) === 'change') setOiModeState('change');
+    setOiModeState(parseOiMode(readPref(OI_MODE_KEY)));
     if (readPref(QUICK_ON_KEY) === '1') setQuickOnState(true);
     setQuickSettingsState(clampQuickSettings(loadJson<unknown>(QUICK_SETTINGS_KEY, null)));
     setDefBracketsState(clampDefaultBrackets(loadJson<unknown>(DEFAULT_BRACKETS_KEY, null)));
@@ -2216,10 +2216,10 @@ export default function IndexScalperTerminal() {
           </div>
           {sep}
           <div role="group" aria-label="OI shows" className={cn('flex rounded border border-zinc-700 overflow-hidden', !showOi && 'opacity-50')}
-            title={showOi ? 'Bars show the total OI, or today\'s change in OI (added = filled, shed = outlined)' : 'Turn the OI profile on first'}>
-            {([['total', 'Total'], ['change', 'Chg']] as const).map(([m, label]) => (
+            title={showOi ? 'Total OI; Chg = today\'s change (added filled, shed outlined); OI + Δ = total with today\'s change inside it (held dim, added bright, cut a dashed tail); Δ OI = Call − Put OI (red = calls heavier, green = puts heavier)' : 'Turn the OI profile on first'}>
+            {([['total', 'Total', 'Total OI'], ['change', 'Chg', 'Change in OI'], ['both', 'OI+Δ', 'OI plus change'], ['delta', 'ΔOI', 'Call minus Put OI']] as const).map(([m, label, name]) => (
               <button key={m} type="button" aria-pressed={oiMode === m} disabled={!showOi} onClick={() => setOiMode(m)}
-                aria-label={m === 'total' ? 'Total OI' : 'Change in OI'}
+                aria-label={name}
                 className={cn('h-6 px-1.5 text-[11px] font-bold transition-colors disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
                   oiMode === m ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}>{label}</button>
             ))}
