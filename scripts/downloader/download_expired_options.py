@@ -42,6 +42,18 @@ def _check_stop() -> bool:
         return True
     return False
 
+# Stop after this many missing files in a row fail with the same API error and nothing downloaded in between: every
+# remaining request would fail the same way (2026-11-28: all 105 November files hit DH-905 one by one, then the run
+# reported "already up to date").
+SAME_ERROR_STREAK_LIMIT = 6
+
+
+def _error_text(err: dict | None) -> str:
+    if not err:
+        return "empty response (no error code)"
+    return f"{err.get('code') or '?'} ({err.get('type', '')}): {err.get('message', '')}".strip()
+
+
 def _is_valid_file(file_path: str) -> bool:
     """Check if file exists and has non-empty content."""
     return os.path.exists(file_path) and os.path.getsize(file_path) > 0
@@ -226,6 +238,10 @@ def main():
 
         total_downloaded = 0
         total_skipped = 0
+        total_failed = 0         # missing files we asked for and did not get
+        total_missing = 0
+        last_error = None        # the last failed file's API error (None = an empty reply without one)
+        aborted_msg = None       # why the run stopped early, if it did
 
         for name, info in watchlist.items():
             if _check_stop():
@@ -267,6 +283,8 @@ def main():
                 f"({total_skipped} files already present)."
             )
 
+            total_missing += len(missing_tasks)
+            streak, streak_key = 0, None
             # Process only the missing tasks
             for task_idx, (expiry, strike_rel, save_dir, file_path) in enumerate(missing_tasks, 1):
                 if _check_stop():
@@ -285,6 +303,7 @@ def main():
                 _write_status(status_msg)
 
                 all_data = []
+                file_error = None
                 for o_type in ["CALL", "PUT"]:
                     if _check_stop():
                         _write_status("Stopped by user", done=True)
@@ -310,6 +329,8 @@ def main():
                         logger.error(f"Fatal API error — aborting: {msg}")
                         _write_status(f"Error: {msg}", done=True, error=msg)
                         return
+                    if df.empty and helper.last_api_error:
+                        file_error = dict(helper.last_api_error)
                     if not df.empty:
                         if 'option_type' not in df.columns:
                             df['option_type'] = "CE" if o_type == "CALL" else "PE"
@@ -331,9 +352,21 @@ def main():
                     final_df = final_df[cols]
                     final_df.to_csv(file_path, index=False)
                     total_downloaded += 1
+                    streak, streak_key = 0, None
                     logger.info(f"Saved: {file_path} ({len(final_df)} rows)")
                 else:
-                    logger.warning(f"No data for {name} {strike_rel} {expiry}")
+                    total_failed += 1
+                    last_error = file_error
+                    logger.warning(f"No data for {name} {strike_rel} {expiry}: {_error_text(file_error)}")
+                    # an empty reply with no error (a holiday week, a strike that never traded) is not a broken API
+                    key = (file_error or {}).get("code") or None
+                    streak = streak + 1 if key is not None and key == streak_key else (1 if key is not None else 0)
+                    streak_key = key
+                    if streak >= SAME_ERROR_STREAK_LIMIT:
+                        aborted_msg = (f"stopped after {streak} files in a row failed with the same error; "
+                                       f"{len(missing_tasks) - task_idx} {name} files not attempted")
+                        logger.error(f"Aborting {name}: {aborted_msg} — {_error_text(file_error)}")
+                        break
 
         # If new files were downloaded, sync to SQLite DB
         if total_downloaded > 0:
@@ -345,6 +378,14 @@ def main():
             except Exception as e:
                 logger.warning(f"Failed to sync SQLite database: {e}")
 
+        # "up to date" only when nothing was missing; a missing file that did not download is an error, never success
+        if total_failed or aborted_msg:
+            final_msg = (f"Incomplete: downloaded {total_downloaded} of {total_missing} missing files, "
+                         f"{total_failed} failed" + (f", {aborted_msg}" if aborted_msg else "") +
+                         f". Last error: {_error_text(last_error)}")
+            logger.error(final_msg)
+            _write_status(final_msg, done=True, error=final_msg)
+            return
         final_msg = (
             f"Done: Downloaded {total_downloaded} files, skipped {total_skipped} existing files"
             if total_downloaded > 0
