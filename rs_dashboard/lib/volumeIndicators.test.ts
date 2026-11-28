@@ -86,3 +86,33 @@ test('catalog wiring: panes, series and the band switches', () => {
   const vb = computeIndicator(bars, { ...newIndicator('vwapbands', 'a'), params: { m1: 1, m2: 0, m3: 3 } });
   assert.deepEqual(vb.series.map(s => s.axisLabel), ['VWAP', '+1σ', '−1σ', '+3σ', '−3σ']);
 });
+
+// Parity with a TradingView-style terminal (tradingcharts.co, built-in indicators at their defaults) on BHARTIARTL, read
+// off its chart on 2026-11-28 (volumeIndicators.parity.json `_source`). The bars start where the terminal's loaded
+// history started, which OBV (a running total) and RVOL (averages the sessions it has, up to 20) depend on. Compared at
+// the precision the terminal prints.
+const parity = JSON.parse(readFileSync(new URL('./volumeIndicators.parity.json', import.meta.url), 'utf8')) as Record<string, {
+  bars: [number, number, number, number, number, number][]; terminal: Record<string, number>;
+}>;
+
+for (const tf of ['tf1', 'tf15'] as const) {
+  test(`matches the tradingcharts.co terminal on BHARTIARTL ${tf === 'tf1' ? '1' : '15'}-minute bars (27 Nov 2026, last bar)`, () => {
+    const bs: Bar[] = parity[tf].bars.map(([t, o, h, l, c, v]) => ({ t, o, h, l, c, v }));
+    const want = parity[tf].terminal;
+    const last = (kind: Parameters<typeof newIndicator>[0], key = 'v') => {
+      const s = computeIndicator(bs, newIndicator(kind, 'p')).series.find(x => x.key === key);
+      return s?.values.at(-1) as number;
+    };
+    const near = (got: number, exp: number, halfUnit: number, name: string) =>
+      assert.ok(Math.abs(got - exp) <= halfUnit, `${name}: ours ${got}, terminal ${exp}`);
+    near(last('vwapbands'), want.vwap, 0.005, 'VWAP');
+    near(last('vwapbands', 'u1'), want.up1, 0.005, 'VWAP +1σ');
+    near(last('vwapbands', 'l1'), want.lo1, 0.005, 'VWAP −1σ');
+    near(last('vwma'), want.vwma20, 0.005, 'VWMA(20)');
+    near(last('mfi'), want.mfi14, 0.005, 'MFI(14)');
+    near(last('cmf'), want.cmf20, 0.005, 'CMF(20)');
+    near(last('rvol'), want.rvol20, 0.00005, 'RVOL(20)');
+    // printed as "-467.3K" / "2.25M"
+    near(last('obv'), want.obv, tf === 'tf1' ? 50 : 5000, 'OBV');
+  });
+}

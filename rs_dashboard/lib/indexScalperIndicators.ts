@@ -146,10 +146,10 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
   { kind: 'mfi', label: 'Money Flow Index (MFI)', pane: 'sub', color: '#f97316', needsVolume: true, params: [{ key: 'period', label: 'Length', def: 14, min: 2, max: 100 }] },
   { kind: 'cmf', label: 'Chaikin Money Flow (CMF)', pane: 'sub', color: '#14b8a6', needsVolume: true, params: [{ key: 'period', label: 'Length', def: 20, min: 2, max: 200 }] },
   // Bar volume ÷ the average at the same time of day over the previous N sessions (daily / weekly bars: the previous N
-  // bars). Bars at or above `hi` are highlighted.
+  // bars). Bars at or above `hi` are highlighted. Default 20, as the tradingcharts.co terminal's "Relative Volume at Time".
   {
     kind: 'rvol', label: 'Relative volume (at time of day)', pane: 'sub', color: '#64748b', needsVolume: true,
-    params: [{ key: 'days', label: 'Sessions to average', def: 10, min: 1, max: 60 }, { key: 'hi', label: 'Highlight at or above (×)', def: 2, min: 1, max: 20 }],
+    params: [{ key: 'days', label: 'Sessions to average', def: 20, min: 1, max: 60 }, { key: 'hi', label: 'Highlight at or above (×)', def: 2, min: 1, max: 20 }],
   },
 ];
 
