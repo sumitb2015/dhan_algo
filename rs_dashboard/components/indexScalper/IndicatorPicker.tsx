@@ -184,19 +184,16 @@ export default function IndicatorPicker({ open, indicators, editId, onAdd, onCha
                 </li>
               ))}
             </ul>
-            {/* "On chart" is only what the chart draws; an indicator hidden with the legend's eye is listed apart, so
-                it does not read as still on the chart (Remove deletes it, Show puts it back). */}
-            {([['On chart', indicators.filter(i => i.visible)], ['Hidden', indicators.filter(i => !i.visible)]] as const).map(([title, items]) => items.length > 0 && (
-              <div key={title} data-testid={title === 'Hidden' ? 'picker-hidden' : 'picker-on-chart'}>
-                <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mt-3 mb-1 px-1">{title}</div>
+            {/* Only what the chart draws. An indicator hidden with the legend's eye is left out here (the owner wants
+                this list to be the chart); it stays in the chart's legend, struck through, to show again or remove. */}
+            {indicators.some(i => i.visible) && (
+              <div data-testid="picker-on-chart">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mt-3 mb-1 px-1">On chart</div>
                 <ul className="max-h-48 overflow-auto">
-                  {items.map(i => (
+                  {indicators.filter(i => i.visible).map(i => (
                     <li key={i.id} className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-zinc-800">
-                      <span className={cn('flex items-center gap-2 text-sm', i.visible ? 'text-zinc-200' : 'text-zinc-500')}>
-                        <span className={cn('w-2 h-2 rounded-full', !i.visible && 'opacity-40')} style={{ backgroundColor: i.color }} />{indicatorLabel(i)}
-                      </span>
+                      <span className="flex items-center gap-2 text-sm text-zinc-200"><span className="w-2 h-2 rounded-full" style={{ backgroundColor: i.color }} />{indicatorLabel(i)}</span>
                       <span className="flex gap-1 text-xs">
-                        {!i.visible && <button type="button" aria-label={`Show ${indicatorLabel(i)}`} onClick={() => onChange(i.id, { visible: true })} className={cn('px-1.5 py-0.5 rounded text-emerald-400 hover:text-emerald-300 hover:bg-zinc-700', FOCUS)}>Show</button>}
                         <button type="button" aria-label={`Settings for ${indicatorLabel(i)}`} onClick={() => onEdit(i.id)} className={cn('px-1.5 py-0.5 rounded text-sky-400 hover:text-sky-300 hover:bg-zinc-700', FOCUS)}>Settings</button>
                         <button type="button" aria-label={`Remove ${indicatorLabel(i)}`} onClick={() => onRemove(i.id)} className={cn('px-1.5 py-0.5 rounded text-rose-400 hover:text-rose-300 hover:bg-zinc-700', FOCUS)}>Remove</button>
                       </span>
@@ -204,7 +201,7 @@ export default function IndicatorPicker({ open, indicators, editId, onAdd, onCha
                   ))}
                 </ul>
               </div>
-            ))}
+            )}
           </div>
         )}
       </div>
