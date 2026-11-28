@@ -111,3 +111,32 @@ export function donchian(bars: Bar[], len = 20): { upper: (number | null)[]; bas
   }
   return { upper, basis, lower };
 }
+
+/**
+ * TradingView / tradingcharts.co "Williams Fractal":
+ * Identifies local peaks (Up Fractal) and troughs (Down Fractal) across a 2*period + 1 bar window
+ * (default period = 2, giving Bill Williams' classic 5-bar formation).
+ *
+ * A bar n is an Up Fractal if its high is strictly greater than the highs of the `period` bars before it AND after it.
+ * A bar n is a Down Fractal if its low is strictly less than the lows of the `period` bars before it AND after it.
+ * Formed only on closed bars that have at least `period` subsequent bars (period <= n < bars.length - period).
+ * Exactly matches the tradingcharts.co terminal's built-in "Williams Fractal" values:
+ * - up: 1 on an Up Fractal bar, else null (terminal prints 1.00)
+ * - down: -1 on a Down Fractal bar, else null (terminal prints -1.00)
+ */
+export function williamsFractal(bars: { h: number; l: number }[], period = 2): { up: (number | null)[]; down: (number | null)[] } {
+  const n = bars.length;
+  const up: (number | null)[] = new Array(n).fill(null);
+  const down: (number | null)[] = new Array(n).fill(null);
+  for (let i = period; i < n - period; i++) {
+    let isUp = true, isDown = true;
+    for (let m = 1; m <= period; m++) {
+      if (bars[i].h <= bars[i - m].h || bars[i].h <= bars[i + m].h) isUp = false;
+      if (bars[i].l >= bars[i - m].l || bars[i].l >= bars[i + m].l) isDown = false;
+    }
+    if (isUp) up[i] = 1;
+    if (isDown) down[i] = -1;
+  }
+  return { up, down };
+}
+

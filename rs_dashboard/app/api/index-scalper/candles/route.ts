@@ -52,8 +52,8 @@ export async function GET(req: NextRequest) {
   const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(60, Math.floor(daysRaw))) : 10;
   // oi=1: open interest per bar ("oi"), futures only (the NIFTY / SENSEX future, crude's underlying pane); ignored on
   // the index and options. The trend strip's futures OI buildup reads it.
-  const mcxU = underlying === 'CRUDEOILM' || underlying === 'CRUDEOIL';
-  const withOi = sp.get('oi') === '1' && (kind === 'future' || (kind === 'underlying' && mcxU));
+  const mcx = underlying === 'CRUDEOILM' || underlying === 'CRUDEOIL';
+  const withOi = sp.get('oi') === '1' && (kind === 'future' || (kind === 'underlying' && mcx));
   const key = `idx-scalper:${underlying}:${kind}:${secId ?? ''}:${interval}:${days}${withOi ? ':oi' : ''}`;
 
   const hit = cache.get(key);
@@ -61,7 +61,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ success: true, ...hit.data }, { headers: { 'Cache-Control': 'no-store' } });
   }
   try {
-    const mcx = underlying === 'CRUDEOILM' || underlying === 'CRUDEOIL';
     const args = ['--symbol', underlying, '--interval', interval, '--days', String(days)];
     if (withOi) args.push('--oi');
     if (kind === 'option') {

@@ -5026,6 +5026,12 @@ class DhanHelper:
                         
                     elif ind_upper == 'SUPERTREND':
                         df_ta.ta.supertrend(append=True)
+
+                    elif ind_upper in ['FRACTAL', 'FRACTALS', 'WILLIAMS_FRACTAL', 'WILLIAMS_FRACTALS']:
+                        from lib.pivots import williams_fractal
+                        f_df = williams_fractal(df_ta, period=2)
+                        df_ta['FRACTAL_UP'] = f_df['up_fractal']
+                        df_ta['FRACTAL_DOWN'] = f_df['down_fractal']
                         
                     else:
                         method_name = ind.lower()

@@ -7,7 +7,7 @@
 // stable, so a feed push re-renders a pane only through `feed` (cheap) and the chart only when its own props change.
 
 import type { CandleColorRule } from '@/lib/indexScalperCandleColor';
-import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import ScalperChart, { DRAW_KEY, type ChartViewport, type DrawTool } from './ScalperChart';
 import QuickStrikeOverlay from './QuickStrikeOverlay';
@@ -20,7 +20,7 @@ import {
 } from '@/lib/indexScalperChartSource';
 import { legsKey, type ScalperLeg } from '@/lib/indexScalperPositions';
 import { buildOiProfile, oiProfileKey, type OiMode } from '@/lib/indexScalperOiProfile';
-import type { IndicatorInstance } from '@/lib/indexScalperIndicators';
+import { lastBarClosed, type IndicatorInstance } from '@/lib/indexScalperIndicators';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { INSTRUMENTS, isMcx, type Underlying } from '@/lib/indexScalperInstrument';
 import { toIsoDate } from '@/components/DataChip';
@@ -130,6 +130,15 @@ function ChartPane(p: Props) {
   }, [resolved.strike, source, cfg, index, onCfgChange]);
 
   const { bars, loading, error, noLiveTicks, tag: viewKey } = useChartBars(underlying, resolved, interval, p.days, p.refreshTick, feed);
+
+  // Has the last bar closed? A bar closes on time, not on a tick (and stays closed after the session), so a coarse clock
+  // lets market structure confirm a swing on it without waiting for the next bar's first tick.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowMs(Date.now()), 15_000);
+    return () => clearInterval(t);
+  }, []);
+  const lastClosed = lastBarClosed(bars, Number(interval), underlying, resolved.kind !== 'underlying', nowMs);
 
   const lastT = bars.length ? bars[bars.length - 1].t : null;
   const date = lastT !== null ? toIsoDate(String(lastT)) : null;
@@ -317,6 +326,7 @@ function ChartPane(p: Props) {
           alertLines={alertLines}
           onMoveAlert={moveAlert}
           onArmAlerts={armAlerts}
+          lastBarClosed={lastClosed}
           simBrackets={p.simBrackets}
           onSetBracket={p.onSetBracket}
           onCancelBracket={p.onCancelBracket}

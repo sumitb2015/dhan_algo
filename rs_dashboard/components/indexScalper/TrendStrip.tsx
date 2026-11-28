@@ -10,7 +10,7 @@
 //
 // Load order: the candles route runs its Python fetches one at a time with a 3.5 s gap (pyExec `spaced`), so four
 // fetches queued ahead of the charts' own held a cold chart back by ~15-20 s. The strip therefore starts only once the
-// charts report their candles loaded (`chartsIdle`; 20 s fallback), follows a refresh only after the charts' refetch,
+// charts report their candles loaded (`chartsIdle`; 20 s fallback), queues a refresh's fetches behind the charts' own,
 // and loads a fixed TREND_DAYS (never the range buttons' days: a range click re-fetched all four).
 
 import { memo, useEffect, useMemo, useState } from 'react';
@@ -88,8 +88,9 @@ function TrendStrip({ underlying, feed, refreshTick, chartsIdle, settings }: Pro
     const t = setTimeout(() => setStarted(true), START_FALLBACK_MS);
     return () => clearTimeout(t);
   }, [chartsIdle, started, sawBusy]);
-  // A refresh (tab back, feed back) re-fetches the charts first: the strip takes the new tick a render later, once the
-  // charts are idle, so its four fetches queue behind theirs.
+  // A refresh (tab back, feed back) re-fetches the charts first: the strip takes the new tick from an effect, so its
+  // fetches start a commit after the charts' and queue right behind them (the charts still count as idle on the refresh
+  // render itself, so it does not wait for them to finish; a refresh while the charts are loading waits until they are).
   const [tick, setTick] = useState(refreshTick);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect

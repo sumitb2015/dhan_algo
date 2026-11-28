@@ -369,7 +369,7 @@ export default function IndexScalperTerminal() {
     setLayoutReady(true);
   }, []);
   const setOi = (on: boolean) => { setShowOi(on); savePref(OI_KEY, on ? '1' : '0'); };
-  const setTrend = (on: boolean) => { setShowTrend(on); savePref(TREND_KEY, on ? '1' : '0'); };
+  const setTrend = (on: boolean) => { setShowTrend(on); if (!on) setTrendMenu(false); savePref(TREND_KEY, on ? '1' : '0'); };
   const patchTrendSettings = (patch: Partial<TrendSettings>) => {
     setTrendSettingsState(prev => {
       const next = clampTrendSettings({ ...prev, ...patch });
@@ -2713,7 +2713,7 @@ function DefaultBracketsMenu({ settings, onPatch, onClose }: {
       <DefaultLevelRow kind="SL" settings={settings} onPatch={onPatch} />
       <p className="text-[10px] leading-snug text-zinc-500">
         A new option position opened here at market gets these levels from its entry premium once it shows in the book:
-        a buy&apos;s target above entry and stop below, a sell&apos;s the other way. REAL places a Limit target and an SL-M stop;
+        a buy&apos;s target above entry and stop below, a sell&apos;s the other way. REAL places a Limit target and a stop-limit (SL) stop;
         SIM sets paper levels. Not for futures, added lots or limit entries; a position that already has a target / stop keeps it.
         A 100% stop is 2x entry on a sell; on a buy it would be 0, so a buy gets no stop. Points are premium points
         from entry (like the TSL), snapped to the tick away from entry.

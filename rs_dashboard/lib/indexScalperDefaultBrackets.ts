@@ -2,7 +2,8 @@
 // 30 %, stop 20 % of the entry premium, switchable off). Pure: no React. The terminal records a pending default when one
 // of its MARKET orders opens an option position from flat (or flips it), then, once the broker / paper book shows that
 // leg with an average price and a live premium, places the levels through its normal onSetBracket path (REAL: LIMIT
-// target + SL-M stop on that contract; SIM: paper levels). Each pending default is used at most once.
+// target + a stop-limit stop on that contract, as every option stop since 2026-11-26 (optionStopLimit); SIM: paper
+// levels). Each pending default is used at most once.
 
 import { parseBracketInput, premiumBracketError, snapAway } from './indexScalperPremiumBrackets.ts';
 

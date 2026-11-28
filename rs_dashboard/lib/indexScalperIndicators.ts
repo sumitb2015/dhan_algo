@@ -6,7 +6,7 @@ import { emaSmaSeeded, smaArray, rsiArray, stochRsiArray, adxDmiArray, supertren
 import { barAnchorSec, inMarketSession, inOrderSession } from './indexScalperSession.ts';
 import { marketStructure } from './indexScalperStructure.ts';
 import { cmf, hasVolume, mfi, obv, relativeVolume, vwapWithStdev, vwma } from './volumeIndicators.ts';
-import { awesomeOscillator, bbPercentB, bbWidth, bbZones, donchian, fourColor, macdPine, slopeStates } from './tvIndicators.ts';
+import { awesomeOscillator, bbPercentB, bbWidth, bbZones, donchian, fourColor, macdPine, slopeStates, williamsFractal } from './tvIndicators.ts';
 import { dowDrawings, dowKeyLevel, dowStructure } from './dowStructure.ts';
 import type { Underlying } from './indexScalperInstrument.ts';
 
@@ -16,7 +16,7 @@ export interface Bar { t: number; o: number; h: number; l: number; c: number; v?
 
 export type IndicatorKind = 'volume' | 'ema' | 'emacross' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'daylevels' | 'rsi' | 'stochrsi' | 'macd' | 'adx' | 'structure'
   | 'vwapbands' | 'obv' | 'mfi' | 'cmf' | 'vwma' | 'rvol'
-  | 'ao' | 'bbpctb' | 'bbw' | 'bbbars' | 'ema6' | 'donchian' | 'dow';
+  | 'ao' | 'bbpctb' | 'bbw' | 'bbbars' | 'ema6' | 'donchian' | 'dow' | 'fractals';
 
 export interface IndicatorInstance {
   id: string;
@@ -197,6 +197,13 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
       { key: 'level', label: 'Key level line', def: 1, min: 0, max: 1, toggle: true },
     ],
   },
+  // TradingView / tradingcharts.co "Williams Fractal": 2*period + 1 bar swing high/low pattern (default 2 bars each side).
+  // Up Fractal (green arrow above bar) when high is strictly greater than period bars before and after;
+  // Down Fractal (red arrow below bar) when low is strictly less than period bars before and after.
+  {
+    kind: 'fractals', label: 'Williams Fractal', pane: 'price', color: '#089981', fixedStyle: true,
+    params: [{ key: 'period', label: 'Periods', def: 2, min: 2, max: 100 }],
+  },
 ];
 
 /** The terminal's colours: Bollinger Bars zones (2 / 1 / −1 / −2), the MACD and RVOL four-way histograms (growing /
@@ -279,7 +286,7 @@ export function indicatorLabel(ind: IndicatorInstance): string {
     : ind.kind === 'vwapbands' ? 'VWAP bands' : ind.kind === 'vwma' ? 'VWMA' : ind.kind === 'obv' ? 'OBV' : ind.kind === 'mfi' ? 'MFI'
     : ind.kind === 'cmf' ? 'CMF' : ind.kind === 'rvol' ? 'RVOL' : ind.kind === 'ao' ? 'AO' : ind.kind === 'bbpctb' ? '%B'
     : ind.kind === 'bbw' ? 'BBW' : ind.kind === 'bbbars' ? 'BB Bars' : ind.kind === 'ema6' ? '6 EMA' : ind.kind === 'donchian' ? 'DC'
-    : ind.kind === 'dow' ? 'Dow Structure' : c.label;
+    : ind.kind === 'dow' ? 'Dow Structure' : ind.kind === 'fractals' ? 'Fractal' : c.label;
   return ps ? `${name} (${ps})` : name;
 }
 
@@ -450,9 +457,20 @@ export function bollinger(closes: number[], period: number, mult: number): { mid
   return { mid, up, lo };
 }
 
-/** The indicator's series, with its user-chosen line width (if any) applied to every line (never to a histogram). */
-export function computeIndicator(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
-  let out = computeSeries(bars, ind);
+/** Has the last bar's interval ended at `nowMs`? Outside the session every bar is closed (the 15:15 1h bar does not wait
+ *  until 16:15). `traded` = an option / future pane (F&O clock, to 15:40), else the underlying's market session. */
+export function lastBarClosed(bars: Bar[], intervalMin: number, underlying: Underlying, traded: boolean, nowMs: number): boolean {
+  const last = bars[bars.length - 1];
+  if (!last) return true;
+  const open = traded ? inOrderSession(underlying, nowMs) : inMarketSession(underlying, nowMs);
+  return !open || last.t + intervalMin * 60 <= nowMs / 1000;
+}
+
+/** The indicator's series, with its user-chosen line width (if any) applied to every line (never to a histogram).
+ *  `lastClosed`: the last bar's interval has ended (lastBarClosed); default false = it may still be forming. Only market
+ *  structure reads it (a forming bar never confirms a swing). */
+export function computeIndicator(bars: Bar[], ind: IndicatorInstance, opts: { lastClosed?: boolean } = {}): IndicatorOutput {
+  let out = computeSeries(bars, ind, !!opts.lastClosed);
   const w = validWidth(ind.width);
   if (w !== null) out = { ...out, series: out.series.map(s => (s.style === 'histogram' ? s : { ...s, lineWidth: w })) };
   // Day High / Low: each line's own colour / width / visibility (DH, DL, PDH, PDL set one by one), then a light shadow
@@ -580,7 +598,7 @@ function volumeSeries(bars: Bar[], ind: IndicatorInstance, label: string, p: (k:
   }
 }
 
-function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
+function computeSeries(bars: Bar[], ind: IndicatorInstance, lastClosed: boolean): IndicatorOutput {
   const closes = bars.map(b => b.c);
   const p = (k: string) => ind.params[k] ?? catalogEntry(ind.kind).params.find(x => x.key === k)!.def;
   const label = indicatorLabel(ind);
@@ -770,6 +788,44 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
         ],
       };
     }
+    case 'fractals': {
+      const period = Math.max(2, Math.floor(p('period')));
+      const f = williamsFractal(bars, period);
+      const upValues = bars.map(() => null as number | null);
+      const downValues = bars.map(() => null as number | null);
+      const upMarkers: NonNullable<OutSeries['markers']> = [];
+      const downMarkers: NonNullable<OutSeries['markers']> = [];
+      for (let i = 0; i < bars.length; i++) {
+        if (f.up[i] !== null) {
+          upValues[i] = bars[i].h;
+          upMarkers.push({
+            i, price: bars[i].h, up: true, color: '#089981',
+            shape: 'arrowUp', position: 'aboveBar', size: 1,
+          });
+        }
+        if (f.down[i] !== null) {
+          downValues[i] = bars[i].l;
+          downMarkers.push({
+            i, price: bars[i].l, up: false, color: '#F23645',
+            shape: 'arrowDown', position: 'belowBar', size: 1,
+          });
+        }
+      }
+      const sig = `${upMarkers.length}:${downMarkers.length}:${upMarkers.at(-1)?.i ?? 0}:${downMarkers.at(-1)?.i ?? 0}`;
+      return {
+        pane: 'price',
+        series: [
+          {
+            key: 'up', label: `${label} Up`, axisLabel: 'Up Fractal', color: 'transparent', style: 'line',
+            values: upValues, markers: upMarkers, noLabel: true, dataKey: `fractals:up:${period}:${sig}`,
+          },
+          {
+            key: 'down', label: `${label} Down`, axisLabel: 'Down Fractal', color: 'transparent', style: 'line',
+            values: downValues, markers: downMarkers, noLabel: true, dataKey: `fractals:down:${period}:${sig}`,
+          },
+        ],
+      };
+    }
     case 'adx': {
       const d = adxDmiArray(bars.map(b => b.h), bars.map(b => b.l), closes, p('period'));
       return {
@@ -782,12 +838,24 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
       };
     }
     case 'structure': {
-      // The forming (last) bar is left out: its high / low can still move, so it never confirms a swing (after the close
-      // that costs the last bar one bar of lag, never a swing that later disappears). Labels ride on the swing points of
-      // this one series (a marker needs a value at its bar); the line joining them is hidden when `line` is 0.
-      const ms = marketStructure(bars.slice(0, -1), p('len'));
+      // A forming last bar is left out: its high / low can still move, so it never confirms a swing (never a swing that
+      // later disappears). Once its interval has ended (`lastClosed`, also all day after the close) it counts, so the chart
+      // agrees with the trend strip's closed-bar read. Labels ride on the swing points of this one series (a marker needs
+      // a value at its bar); the line joining them is hidden when `line` is 0.
+      const ms = marketStructure(lastClosed ? bars : bars.slice(0, -1), p('len'));
       const values: (number | null)[] = bars.map(() => null);
-      for (const sw of ms.swings) values[sw.i] = sw.price;
+      // An outside bar can be a swing high AND a swing low (both labelled), but the line has one point per bar: it takes
+      // the one that keeps the zig-zag alternating (a low after a high, else the high), never just the last pushed.
+      let prevKind: 'H' | 'L' | null = null;
+      for (let k = 0; k < ms.swings.length; k++) {
+        const sw = ms.swings[k], next = ms.swings[k + 1];
+        if (next && next.i === sw.i) {
+          const pick: typeof sw = prevKind === 'H' ? (sw.kind === 'L' ? sw : next) : (sw.kind === 'H' ? sw : next);
+          values[sw.i] = pick.price; prevKind = pick.kind; k++;
+          continue;
+        }
+        values[sw.i] = sw.price; prevKind = sw.kind;
+      }
       const GREY = '#94a3b8';
       const markers: NonNullable<OutSeries['markers']> = ms.swings.map(sw => ({
         i: sw.i, price: sw.price, up: sw.kind === 'H', size: 0.5, shape: 'circle' as const,

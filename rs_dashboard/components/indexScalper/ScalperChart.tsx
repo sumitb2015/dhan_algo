@@ -135,6 +135,8 @@ interface Props {
   onMoveAlert?: (id: string, price: number) => Promise<boolean>;
   /** Arms REAL alert orders for today (confirm first); shown on the chip of a trade alert that is not armed. */
   onArmAlerts?: () => void;
+  /** The last bar's interval has ended (or the session is closed): market structure may confirm a swing on it. */
+  lastBarClosed?: boolean;
   simBrackets?: Record<string, { tp?: number; sl?: number }>;
   onSetBracket?: (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }) => void;
   onCancelBracket?: (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => void;
@@ -222,7 +224,7 @@ function ScalperChart(props: Props) {
   const {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, showGrid = true, candleColorRule = 'off', showVolume = true, volumeMaLen = 20, legs, entrySpots,
     onExitLeg, onAdjustLeg, adjustLots = 1, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
-    contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, ordersEnabled = true, onPlaceLimitOrder, onOpenTicket, onAlert, alertLines = NO_ALERT_LINES, onMoveAlert, onArmAlerts,
+    contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, ordersEnabled = true, onPlaceLimitOrder, onOpenTicket, onAlert, alertLines = NO_ALERT_LINES, onMoveAlert, onArmAlerts, lastBarClosed = false,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, trails, onSetTrail, onCancelTrail, underlying = 'NIFTY', feedLotSize, lotSizes, orderQtyMult = 1,
     premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, resetSeq = 0, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false, premiumOrders,
   } = props;
@@ -542,8 +544,8 @@ function ScalperChart(props: Props) {
 
   // ── data + indicators ──────────────────────────────────────────────
   const outputs = useMemo(
-    () => indicators.filter(i => i.visible).map(ind => ({ ind, out: computeIndicator(bars, ind) })),
-    [bars, indicators],
+    () => indicators.filter(i => i.visible).map(ind => ({ ind, out: computeIndicator(bars, ind, { lastClosed: lastBarClosed }) })),
+    [bars, indicators, lastBarClosed],
   );
   const trend = useMemo(() => trendStates(bars, candleColorRule), [bars, candleColorRule]);
   // Candle colours from an indicator (Bollinger Bars), else the candle-colour rule's trend: the last visible one wins.
@@ -608,7 +610,10 @@ function ScalperChart(props: Props) {
             }
             // A flat day level (DH / DL) that moved: today's whole line moves with it, so re-send just this series.
             if (s.flat && flatLastRef.current.get(k - 1) !== v) { api.setData(seriesData(s, bars) as never); flatLastRef.current.set(k - 1, v); continue; }
-            if (v === null) continue;
+            if (v === null) {
+              if (s.markers) syncMarkers(k - 1, s, api);
+              continue;
+            }
             const color = pointColor(s, s.values.length - 1);
             api.update((color ? { time: toTime(lastBar.t), value: v, color } : { time: toTime(lastBar.t), value: v }) as never);
             syncMarkers(k - 1, s, api);

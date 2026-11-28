@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { awesomeOscillator, bbPercentB, bbWidth, bbZones, fourColor, macdPine } from './tvIndicators.ts';
-import { BB_BAR_COLORS, bollinger, catalogEntry, computeIndicator, flipsAtLast, newIndicator, pointColor, type Bar } from './indexScalperIndicators.ts';
+import { awesomeOscillator, bbPercentB, bbWidth, bbZones, fourColor, macdPine, williamsFractal } from './tvIndicators.ts';
+import { BB_BAR_COLORS, bollinger, catalogEntry, computeIndicator, flipsAtLast, indicatorLabel, newIndicator, pointColor, type Bar } from './indexScalperIndicators.ts';
 
 // Parity with the tradingcharts.co terminal (tvIndicators.parity.json `_source`): its legend values on BHARTIARTL 1-minute
 // bars of 27 Nov 2026, against our functions on the same Dhan bars from where its loaded history started.
@@ -120,3 +120,94 @@ test('the ribbon stays continuous: no transparent gap where an EMA changes colou
   // a length of 0 hides that EMA
   assert.equal(computeIndicator(bars, { ...newIndicator('ema6', 'e'), params: { l1: 8, l2: 0, l3: 21, l4: 0, l5: 0, l6: 0 } }).series.length, 2);
 });
+
+test('Williams Fractal matches tradingcharts.co terminal formula exactly (values, marker shapes, and colours)', () => {
+  // 1. Synthetic pattern tests: peaks, valleys, strict-inequality ties, edge bounds
+  const testBars = [
+    { t: 0, o: 10, h: 11, l: 9, c: 10 },
+    { t: 1, o: 10, h: 13, l: 8, c: 12 },
+    { t: 2, o: 12, h: 16, l: 11, c: 15 }, // peak high 16 > 11, 13, 14, 12 -> Up Fractal
+    { t: 3, o: 15, h: 14, l: 10, c: 12 },
+    { t: 4, o: 12, h: 12, l: 7, c: 8 },
+    { t: 5, o: 8, h: 10, l: 5, c: 6 },   // valley low 5 < 11, 10, 7, 6, 8 -> Down Fractal
+    { t: 6, o: 6, h: 9, l: 6, c: 8 },
+    { t: 7, o: 8, h: 11, l: 7, c: 10 },
+    { t: 8, o: 10, h: 15, l: 9, c: 14 },
+    { t: 9, o: 14, h: 15, l: 9, c: 14 }, // tie high 15 == 15 -> neither is fractal (strict >)
+    { t: 10, o: 14, h: 12, l: 9, c: 10 },
+  ];
+  const syn = williamsFractal(testBars, 2);
+  assert.equal(syn.up[2], 1);
+  assert.equal(syn.down[2], null);
+  assert.equal(syn.up[5], null);
+  assert.equal(syn.down[5], -1);
+  assert.equal(syn.up[8], null); // tie invalidated
+  assert.equal(syn.up[9], null);
+  // first 2 and last 2 bars must be null (unconfirmed / incomplete window)
+  assert.equal(syn.up[0], null);
+  assert.equal(syn.up[1], null);
+  assert.equal(syn.up[9], null);
+  assert.equal(syn.up[10], null);
+
+  // 2. Exact match against the tradingcharts.co chunk-D-tlSZQY.js compute loop across all Dhan bars
+  const tcExpectedUp: (number | null)[] = new Array(bars.length).fill(null);
+  const tcExpectedDown: (number | null)[] = new Array(bars.length).fill(null);
+  const t = 2, r = bars.length;
+  for (let n = t; n < r - t; n++) {
+    let i = true, d = true;
+    for (let m = 1; m <= t; m++) {
+      if (bars[n].h <= bars[n - m].h || bars[n].h <= bars[n + m].h) i = false;
+      if (bars[n].l >= bars[n - m].l || bars[n].l >= bars[n + m].l) d = false;
+    }
+    if (i) tcExpectedUp[n] = 1;
+    if (d) tcExpectedDown[n] = -1;
+  }
+
+  const real = williamsFractal(bars, 2);
+  assert.deepEqual(real.up, tcExpectedUp);
+  assert.deepEqual(real.down, tcExpectedDown);
+
+  // 3. Catalog entry, label, series, and markers verification
+  const cat = catalogEntry('fractals');
+  assert.equal(cat.label, 'Williams Fractal');
+  assert.equal(cat.pane, 'price');
+  assert.equal(cat.color, '#089981');
+  assert.equal(cat.fixedStyle, true);
+  assert.deepEqual(cat.params, [{ key: 'period', label: 'Periods', def: 2, min: 2, max: 100 }]);
+
+  const ind = newIndicator('fractals', 'f');
+  assert.equal(indicatorLabel(ind), 'Fractal (2)');
+
+  const out = computeIndicator(bars, ind);
+  assert.equal(out.pane, 'price');
+  assert.equal(out.series.length, 2);
+  assert.equal(out.series[0].key, 'up');
+  assert.equal(out.series[0].axisLabel, 'Up Fractal');
+  assert.equal(out.series[0].color, 'transparent');
+  assert.equal(out.series[1].key, 'down');
+  assert.equal(out.series[1].axisLabel, 'Down Fractal');
+  assert.equal(out.series[1].color, 'transparent');
+
+  // Verify markers attach to the exact fractal bars and values carry price coordinates
+  const upMarkers = out.series[0].markers!;
+  const downMarkers = out.series[1].markers!;
+  assert.ok(upMarkers.length > 0);
+  assert.ok(downMarkers.length > 0);
+  for (const m of upMarkers) {
+    assert.equal(real.up[m.i], 1);
+    assert.equal(m.shape, 'arrowUp');
+    assert.equal(m.position, 'aboveBar');
+    assert.equal(m.color, '#089981');
+    assert.equal(m.price, bars[m.i].h);
+    assert.equal(out.series[0].values[m.i], bars[m.i].h);
+  }
+  for (const m of downMarkers) {
+    assert.equal(real.down[m.i], -1);
+    assert.equal(m.shape, 'arrowDown');
+    assert.equal(m.position, 'belowBar');
+    assert.equal(m.color, '#F23645');
+    assert.equal(m.price, bars[m.i].l);
+    assert.equal(out.series[1].values[m.i], bars[m.i].l);
+  }
+});
+

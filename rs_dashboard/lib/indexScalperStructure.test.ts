@@ -87,6 +87,27 @@ test('chart indicator: swing labels only (no BOS / CHoCH), line on by default an
   assert.equal(indicatorLabel(ind), 'Structure (2)');       // the on / off setting is not shown as a number
   // the forming (last) bar never confirms a swing
   assert.deepEqual(computeIndicator(bars.slice(0, 12), ind).series[0].markers!.map(m => m.i), [2, 7, 8]);
+  // once its interval has ended it does: bar 11 completes the right side of the bar-10 swing high (the strip's read)
+  assert.deepEqual(computeIndicator(bars.slice(0, 13), ind, { lastClosed: true }).series[0].markers!.map(m => m.i), [2, 7, 8, 10]);
+  assert.deepEqual(computeIndicator(bars.slice(0, 13), ind).series[0].markers!.map(m => m.i), [2, 7, 8]);
+});
+
+test('chart indicator: an outside bar (swing high and low) keeps both labels; the line takes the alternating point', async () => {
+  const { computeIndicator, newIndicator } = await import('./indexScalperIndicators.ts');
+  // bar 1 = swing high 110, bar 3 = outside bar (high 115 AND low 90), len 1
+  const rows: [number, number][] = [[100, 98], [110, 99], [105, 97], [115, 90], [108, 95], [109, 96]];
+  const bars = rows.map(([h, l], i) => ({ t: 1_800_000_000 + i * 300, o: l, h, l, c: l }));
+  const ind = { ...newIndicator('structure', 's1'), params: { len: 1, line: 1 } };
+  const [s] = computeIndicator(bars, ind, { lastClosed: true }).series;
+  assert.deepEqual(s.markers!.map(m => `${m.i}:${m.up ? 'H' : 'L'}`), ['1:H', '3:H', '3:L']);
+  // the swing before it is a high, so the outside bar's line point is its low (alternating)
+  assert.equal(s.values[3], 90);
+  // with a low before it instead, the line takes the outside bar's high
+  const lowFirst: [number, number][] = [[100, 98], [99, 92], [105, 97], [115, 90], [108, 95], [109, 96]];
+  const b2 = lowFirst.map(([h, l], i) => ({ t: 1_800_000_000 + i * 300, o: l, h, l, c: l }));
+  const [s2] = computeIndicator(b2, ind, { lastClosed: true }).series;
+  assert.deepEqual(s2.markers!.map(m => `${m.i}:${m.up ? 'H' : 'L'}`), ['1:L', '3:H', '3:L']);
+  assert.equal(s2.values[3], 115);
 });
 
 test('withStructureLine: sets the line on every structure indicator, same list when nothing changes', async () => {

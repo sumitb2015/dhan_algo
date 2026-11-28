@@ -426,3 +426,43 @@ def get_pivots(
             )
         return []
     return find_pivots(df.iloc[:-1], n, **kwargs)
+
+
+def williams_fractal(df: Optional[pd.DataFrame], period: int = 2) -> pd.DataFrame:
+    """Williams Fractals (default period=2, 5-bar window) matching tradingcharts.co and TradingView.
+
+    Bar i is an Up Fractal if High[i] > High[i-m] and High[i] > High[i+m] for all 1 <= m <= period.
+    Bar i is a Down Fractal if Low[i] < Low[i-m] and Low[i] < Low[i+m] for all 1 <= m <= period.
+    Only confirmed on bars with at least `period` subsequent bars (period <= i < n - period).
+
+    Returns a DataFrame with columns:
+        - 'up_fractal': 1.0 on Up Fractal bars, NaN otherwise (matching tradingcharts.co 1.00)
+        - 'down_fractal': -1.0 on Down Fractal bars, NaN otherwise (matching tradingcharts.co -1.00)
+    """
+    import numpy as np
+
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=["up_fractal", "down_fractal"])
+
+    highs = df["High"].values if "High" in df.columns else df["high"].values
+    lows = df["Low"].values if "Low" in df.columns else df["low"].values
+    n = len(df)
+
+    up = np.full(n, np.nan)
+    down = np.full(n, np.nan)
+
+    for i in range(period, n - period):
+        is_up = True
+        is_down = True
+        for m in range(1, period + 1):
+            if highs[i] <= highs[i - m] or highs[i] <= highs[i + m]:
+                is_up = False
+            if lows[i] >= lows[i - m] or lows[i] >= lows[i + m]:
+                is_down = False
+        if is_up:
+            up[i] = 1.0
+        if is_down:
+            down[i] = -1.0
+
+    return pd.DataFrame({"up_fractal": up, "down_fractal": down}, index=df.index)
+
