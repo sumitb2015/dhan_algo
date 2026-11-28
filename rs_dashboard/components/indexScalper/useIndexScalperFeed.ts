@@ -88,7 +88,11 @@ export function useIndexScalperFeed(
   const [expiryOwner, setExpiryOwner] = useState<Underlying>(underlying);
   const [lotSize, setLotSize] = useState<number | null>(null);
   const [strikeIdsRaw, setStrikeIdsRaw] = useState<Record<string, StrikeIds>>({});
-  const [dhanFuture, setDhanFuture] = useState<{ securityId: string; expiry: string } | null>(null);
+  // Tagged with the underlying it was looked up for: after an instrument switch the previous one's future stays in state
+  // until the new lookup lands, and its id must never stand in for this underlying's (the crude chart and the SENSEX
+  // FUT / OI fetches asked the candles route for the previous instrument's contract and got a 502).
+  const [dhanFutureRaw, setDhanFuture] = useState<{ securityId: string; expiry: string; owner: Underlying } | null>(null);
+  const dhanFuture = dhanFutureRaw && dhanFutureRaw.owner === underlying ? dhanFutureRaw : null;
   const [kotakFutureSymbol, setKotakFutureSymbol] = useState<string | null>(null);
   const [lookupFor, setLookupFor] = useState('');
   const [nowMs, setNowMs] = useState(0);
@@ -152,7 +156,7 @@ export function useIndexScalperFeed(
       .then((j: { success: boolean; data?: { lotSize?: number; strikes?: Record<string, StrikeIds>; future?: { securityId: string; expiry: string } } }) => {
         if (dead || !j.success || !j.data) return;
         setStrikeIdsRaw(j.data.strikes ?? {});
-        if (j.data.future) setDhanFuture(j.data.future);
+        if (j.data.future) setDhanFuture({ ...j.data.future, owner: underlying });
         if (typeof j.data.lotSize === 'number' && j.data.lotSize > 0) setLotSize(j.data.lotSize);
         setLookupFor(key);
       })

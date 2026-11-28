@@ -12,6 +12,11 @@ interface Result {
 }
 
 const cache = new Map<string, { data: Result; ts: number }>();
+// The signals of every request waiting on one key's (deduped) spawn. The spawns run one at a time, so a page that
+// switched instrument leaves its old fetches queued: when a spawn's turn comes and every request that wanted it has
+// disconnected, it is skipped instead of holding the new instrument's chart back by ~5 s each.
+const waiters = new Map<string, Set<AbortSignal>>();
+class Abandoned extends Error {}
 const TTL_MS = 20_000;
 
 export async function GET(req: NextRequest) {
@@ -72,17 +77,29 @@ export async function GET(req: NextRequest) {
     } else if (secId) {
       args.push('--security-id', secId);
     }
-    const data = await dedupe(key, () =>
-      spaced('dhan-spawn:index-scalper-candles', () =>
-        runPythonJson<Result>(SCRIPT, args, 40_000),
-      ),
-    );
+    let set = waiters.get(key);
+    if (!set) { set = new Set(); waiters.set(key, set); }
+    set.add(req.signal);
+    const mine = set;
+    let data: Result;
+    try {
+      data = await dedupe(key, () =>
+        spaced('dhan-spawn:index-scalper-candles', () => {
+          if ([...mine].every(s => s.aborted)) return Promise.reject(new Abandoned('abandoned'));
+          return runPythonJson<Result>(SCRIPT, args, 40_000);
+        }),
+      );
+    } finally {
+      mine.delete(req.signal);
+      if (mine.size === 0 && waiters.get(key) === mine) waiters.delete(key);
+    }
     if (data.error) {
       if (hit) return NextResponse.json({ success: true, stale: true, ...hit.data }, { headers: { 'Cache-Control': 'no-store' } });
       return NextResponse.json({ success: false, error: data.error }, { status: 502 });
     }
     cache.set(key, { data, ts: Date.now() });
     return NextResponse.json({ success: true, ...data }, { headers: { 'Cache-Control': 'no-store' } });
+    if (err instanceof Abandoned) return NextResponse.json({ success: false, error: 'abandoned' }, { status: 499 });
   } catch (err) {
     if (hit) return NextResponse.json({ success: true, stale: true, ...hit.data }, { headers: { 'Cache-Control': 'no-store' } });
     return NextResponse.json({ success: false, error: String((err as Error).message ?? err) }, { status: 500 });

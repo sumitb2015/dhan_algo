@@ -2373,7 +2373,7 @@ export default function IndexScalperTerminal() {
         </div>
 
         <div className="flex flex-col flex-1 min-w-0 min-h-0">
-        {showTrend && layoutReady && <TrendStrip underlying={underlying} feed={feed} refreshTick={refreshTick} chartsIdle={indReady && !loadingBars} settings={trendSettings} />}
+        {showTrend && layoutReady && <TrendStrip key={underlying} underlying={underlying} feed={feed} refreshTick={refreshTick} chartsIdle={indReady && !loadingBars} settings={trendSettings} />}
         <div className="relative flex flex-1 min-w-0 min-h-0">
           {indReady && layoutReady && (
             <>

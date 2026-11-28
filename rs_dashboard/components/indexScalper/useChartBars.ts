@@ -72,7 +72,10 @@ export function useChartBars(
       : isFuture ? `&kind=future&securityId=${contractId}`
       : (isMcx(underlying) && contractId ? `&securityId=${contractId}` : '');
     const forTag = tag;
-    fetch(`/api/index-scalper/candles?underlying=${underlying}&interval=${interval}&days=${days}${idParam}${wantOi ? '&oi=1' : ''}`)
+    // Aborted on a switch: the route then skips the Python spawn if it is still queued (it runs one at a time), so a
+    // superseded instrument's / interval's fetches never hold the new chart back.
+    const ac = new AbortController();
+    fetch(`/api/index-scalper/candles?underlying=${underlying}&interval=${interval}&days=${days}${idParam}${wantOi ? '&oi=1' : ''}`, { signal: ac.signal })
       .then(r => r.json())
       .then((j: { success: boolean; candles?: Bar[]; error?: string }) => {
         if (dead) return;
@@ -82,7 +85,7 @@ export function useChartBars(
       })
       .catch(e => { if (!dead) setError(String(e?.message ?? e)); })
       .finally(() => { if (!dead) setLoading(false); });
-    return () => { dead = true; };
+    return () => { dead = true; ac.abort(); };
   }, [underlying, interval, days, refreshTick, contractId, isOption, isFuture, traded, tag, wantOi]);
 
   const liveTagRef = useRef<string | null>(null);

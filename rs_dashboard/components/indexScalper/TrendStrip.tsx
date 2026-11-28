@@ -75,14 +75,19 @@ interface Props {
 }
 
 function TrendStrip({ underlying, feed, refreshTick, chartsIdle, settings }: Props) {
+  // Per underlying: the terminal remounts the strip on an instrument switch (key), and the charts' idle flag is still the
+  // OLD instrument's for a render or two after it, so the strip starts only once it has seen the charts busy and then
+  // idle again (20 s fallback). Starting on the stale idle queued its five fetches ahead of the new chart's.
   const [started, setStarted] = useState(false);
+  const [sawBusy, setSawBusy] = useState(false);
   useEffect(() => {
     if (started) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (chartsIdle) { setStarted(true); return; }
+    if (!chartsIdle) { if (!sawBusy) setSawBusy(true); }
+    else if (sawBusy) { setStarted(true); return; }
     const t = setTimeout(() => setStarted(true), START_FALLBACK_MS);
     return () => clearTimeout(t);
-  }, [chartsIdle, started]);
+  }, [chartsIdle, started, sawBusy]);
   // A refresh (tab back, feed back) re-fetches the charts first: the strip takes the new tick a render later, once the
   // charts are idle, so its four fetches queue behind theirs.
   const [tick, setTick] = useState(refreshTick);
