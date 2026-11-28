@@ -56,7 +56,7 @@ export type DailyAtrResult = {
  * Calculates Daily ATR from 1-minute bars by grouping bars into trading sessions.
  * Returns null if fewer than 1 session can be constructed.
  */
-export function calculateDailyAtr(bars: Bar[], maxSessions = 14): DailyAtrResult | null {
+export function calculateDailyAtr(bars: Bar[], maxSessions = 5): DailyAtrResult | null {
   if (bars.length === 0) return null;
   // Group into sessions
   const sessions: { high: number; low: number; close: number }[] = [];
@@ -81,12 +81,13 @@ export function calculateDailyAtr(bars: Bar[], maxSessions = 14): DailyAtrResult
   if (curSession) sessions.push({ high: curSession.high, low: curSession.low, close: curSession.close });
   if (sessions.length === 0) return null;
 
-  // Calculate True Range for the recent sessions
-  const recent = sessions.slice(-maxSessions);
+  // Calculate True Range for the recent 5 sessions (accounting for gap vs session prior to window)
+  const startIndex = Math.max(0, sessions.length - maxSessions);
+  const sample = sessions.slice(startIndex);
   const trs: number[] = [];
-  for (let i = 0; i < recent.length; i++) {
-    const cur = recent[i];
-    const prev = i > 0 ? recent[i - 1] : null;
+  for (let i = startIndex; i < sessions.length; i++) {
+    const cur = sessions[i];
+    const prev = i > 0 ? sessions[i - 1] : null;
     const hl = cur.high - cur.low;
     if (!prev) {
       trs.push(hl);
@@ -99,11 +100,11 @@ export function calculateDailyAtr(bars: Bar[], maxSessions = 14): DailyAtrResult
 
   const sum = trs.reduce((a, b) => a + b, 0);
   const atr = trs.length > 0 ? sum / trs.length : 0;
-  const lastSessionRange = recent[recent.length - 1].high - recent[recent.length - 1].low;
+  const lastSessionRange = sample[sample.length - 1].high - sample[sample.length - 1].low;
 
   return {
     atr: Number(atr.toFixed(2)),
-    sessionsCount: recent.length,
+    sessionsCount: sample.length,
     lastSessionRange: Number(lastSessionRange.toFixed(2)),
   };
 }
@@ -141,7 +142,7 @@ export function calculateAutoBlockSize(opts: {
   const blocks = Math.max(1, Math.round(sessionHours * (60 / targetMinutes)));
   const tick = boxTick && boxTick > 0 ? boxTick : (sessionHours === 14 ? 1.0 : 0.05);
 
-  const atrRes = bars && bars.length >= 60 ? calculateDailyAtr(bars, 14) : null;
+  const atrRes = bars && bars.length >= 60 ? calculateDailyAtr(bars, 5) : null;
   if (atrRes && atrRes.atr > 0 && atrRes.sessionsCount >= 2) {
     const rawBox = atrRes.atr / blocks;
     const boxPts = Math.max(tick, snapToTick(rawBox, tick));
@@ -150,7 +151,7 @@ export function calculateAutoBlockSize(opts: {
       source: 'atr',
       dailyAtr: atrRes.atr,
       blocks,
-      formula: `${atrRes.atr} ATR (${atrRes.sessionsCount}d) / ${blocks} blocks = ${boxPts} pts`,
+      formula: `${atrRes.atr} ATR (5d 6h) / ${blocks} blocks = ${boxPts} pts`,
     };
   }
 

@@ -87,7 +87,7 @@ test('calculateAutoBlockSize: uses live ATR when >= 2 sessions available', () =>
   // 100 ATR / 12 blocks = 8.33 -> 8.35
   assert.equal(res.boxPts, 8.35);
   assert.equal(res.blocks, 12);
-  assert.ok(res.formula.includes('100 ATR (2d) / 12 blocks = 8.35 pts'));
+  assert.ok(res.formula.includes('100 ATR (5d 6h) / 12 blocks = 8.35 pts'));
 
   // Test with realistic higher ATR (e.g. 360 pt ATR -> 30.0 pt box)
   const highAtrBars: Bar[] = [];
