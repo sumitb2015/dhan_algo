@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { dowDrawings, dowKeyLevel, dowStructure } from './dowStructure.ts';
+import { readFileSync } from 'node:fs';
 import { computeIndicator, newIndicator, type Bar } from './indexScalperIndicators.ts';
 
 // Hand-traced through the Pine script's rules with L = R = 1 (swing: left strictly lower / higher, right lower-or-equal /
@@ -82,4 +83,49 @@ test('chart output: a fixed set of series, labels as markers, BOS dashed, the tr
   const lvl = out.series.at(-1)!;
   assert.equal(lvl.axisLabel, 'Down · Rally high');
   assert.equal(lvl.lineWidth, 2);
+});
+
+// Parity with the user's copy of the script on the tradingcharts.co terminal, NIFTY 30-minute (dowStructure.parity.json
+// `_source`): trend and key level on 195 consecutive bars.
+const px = JSON.parse(readFileSync(new URL('./dowStructure.parity.json', import.meta.url), 'utf8')) as {
+  bars: [number, number, number, number, number][]; hashes: number[];
+  rows: { sample: number; o: number; h: number; l: number; c: number; keyLevel: number; trend: 'up' | 'down' | 'range' }[];
+};
+const NIFTY: Bar[] = px.bars.map(([t, o, h, l, c]) => ({ t, o, h, l, c }));
+
+/** What the terminal's legend shows for the key level: the plotted value, or on the plot's na bar (the level moved) the
+ *  previous bar's value while the trend is unchanged. */
+function legendLevels(): { key: (number | null)[]; dir: number[] } {
+  const d = dowStructure(NIFTY, { left: 3, right: 3 });
+  const kl = dowKeyLevel(d);
+  return { key: kl.map((v, i) => (v === null && i > 0 && kl[i - 1] !== null && d[i].dir === d[i - 1].dir ? kl[i - 1] : v)), dir: d.map(x => x.dir) };
+}
+
+test('Dow Structure matches the terminal on NIFTY 30-minute: the 18 printed readings', () => {
+  const { key, dir } = legendLevels();
+  let i = NIFTY.length - 1;
+  for (let k = px.rows.length - 1; k >= 0; k--) {
+    const r = px.rows[k];
+    while (i >= 0 && !(NIFTY[i].o === r.o && NIFTY[i].h === r.h && NIFTY[i].l === r.l && NIFTY[i].c === r.c)) i--;
+    assert.ok(i >= 0, `sample ${r.sample} not found`);
+    assert.equal(key[i], r.keyLevel, `sample ${r.sample} key level`);
+    assert.equal(dir[i] === 1 ? 'up' : dir[i] === -1 ? 'down' : 'range', r.trend, `sample ${r.sample} trend`);
+    i--;
+  }
+});
+
+test('Dow Structure matches the terminal on NIFTY 30-minute: all 195 bars (hashed readings, in order)', () => {
+  const { key, dir } = legendLevels();
+  const h = (s: string) => { let x = 5381; for (const ch of s) x = ((x * 33) ^ ch.charCodeAt(0)) >>> 0; return x % 100000; };
+  const ours = NIFTY.map((b, i) => h([b.o, b.h, b.l, b.c].map(v => Math.round(v * 100)).join(',') + ','
+    + (key[i] === null ? 'na,-' : `${Math.round((key[i] as number) * 100)},${dir[i] === 1 ? 'u' : dir[i] === -1 ? 'd' : 'r'}`)));
+  // the sweep may skip a bar, never reorder: each terminal reading must appear after the previous one
+  let j = 0;
+  px.hashes.forEach((t, k) => {
+    const f = ours.indexOf(t, j);
+    assert.ok(f >= 0, `terminal bar ${k} has no matching bar of ours`);
+    j = f + 1;
+  });
+  // the BOS bars, where the script itself plots nothing (the one-bar gap in the line)
+  assert.equal(dowKeyLevel(dowStructure(NIFTY, { left: 3, right: 3 })).filter((v, i, a) => v === null && i > 0 && a[i - 1] !== null).length > 0, true);
 });
