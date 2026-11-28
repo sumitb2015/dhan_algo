@@ -338,6 +338,15 @@ function ChartPane(p: Props) {
         {quickOn && p.quick && (
           <QuickStrikeOverlay viewportRef={viewportRef} underlying={underlying} feed={feed} settings={p.quick} real={p.real} onTrade={p.onQuickTrade} />
         )}
+        {bars.length === 0 && loading && (
+          // First load / instrument switch: the pane is empty until the candles arrive (a few seconds; the route runs
+          // its fetches one at a time). A refresh over bars already drawn keeps only the header's small spinner.
+          <div role="status" aria-live="polite" data-testid="chart-loading"
+            className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-sm text-zinc-400 pointer-events-none">
+            <Loader2 className="w-6 h-6 animate-spin text-zinc-500" aria-hidden="true" />
+            <span>Loading {isOption ? 'option' : isFuture ? 'future' : underlying} candles…</span>
+          </div>
+        )}
         {bars.length === 0 && !loading && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500 pointer-events-none">
             {isOption && resolved.strike === null && pickList.length > 0
@@ -348,15 +357,6 @@ function ChartPane(p: Props) {
         )}
       </div>
     </div>
-        {bars.length === 0 && loading && (
-          // First load / instrument switch: the pane is empty until the candles arrive (a few seconds; the route runs
-          // its fetches one at a time). A refresh over bars already drawn keeps only the header's small spinner.
-          <div role="status" aria-live="polite" data-testid="chart-loading"
-            className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-sm text-zinc-400 pointer-events-none">
-            <Loader2 className="w-6 h-6 animate-spin text-zinc-500" aria-hidden="true" />
-            <span>Loading {isOption ? 'option' : isFuture ? 'future' : underlying} candles…</span>
-          </div>
-        )}
   );
 }
 

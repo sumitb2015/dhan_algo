@@ -99,8 +99,8 @@ export async function GET(req: NextRequest) {
     }
     cache.set(key, { data, ts: Date.now() });
     return NextResponse.json({ success: true, ...data }, { headers: { 'Cache-Control': 'no-store' } });
-    if (err instanceof Abandoned) return NextResponse.json({ success: false, error: 'abandoned' }, { status: 499 });
   } catch (err) {
+    if (err instanceof Abandoned) return NextResponse.json({ success: false, error: 'abandoned' }, { status: 499 });
     if (hit) return NextResponse.json({ success: true, stale: true, ...hit.data }, { headers: { 'Cache-Control': 'no-store' } });
     return NextResponse.json({ success: false, error: String((err as Error).message ?? err) }, { status: 500 });
   }
