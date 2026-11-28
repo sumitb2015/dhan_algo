@@ -93,7 +93,6 @@ export function NiftyBreadthWindow({ data, error, history, initial, onClose }: {
 }) {
   const b = useMemo(() => niftyBreadth(data?.result), [data]);
   const [list, setList] = useState(false);
-  const priced = b.advances + b.declines + b.unchanged;
   const movers = useMemo(() => [...(data?.result.rows ?? [])].sort((a, c) => c.changePct - a.changePct), [data]);
   return (
     <Shell testId="nifty-breadth" title="Nifty 50 Advance / Decline" data={data} error={error} initial={initial} onClose={onClose}>
@@ -102,16 +101,18 @@ export function NiftyBreadthWindow({ data, error, history, initial, onClose }: {
           <Stat label="Adv" value={b.advances} cls="text-emerald-400" testId="nifty-breadth-adv" />
           <Stat label="Dec" value={b.declines} cls="text-red-400" testId="nifty-breadth-dec" />
           <Stat label="Unch" value={b.unchanged} cls="text-zinc-300" testId="nifty-breadth-unch" />
+          {b.missing > 0 && <Stat label="N/A" value={b.missing} cls="text-amber-300" testId="nifty-breadth-na" />}
           <Stat label="A/D" testId="nifty-breadth-ratio"
             value={b.ratio === null ? (b.advances > 0 ? 'All up' : DASH) : b.ratio.toFixed(2)}
             cls={b.ratio === null ? 'text-zinc-300' : b.ratio >= 1 ? 'text-emerald-400' : 'text-red-400'} />
         </div>
-        {priced > 0 && (
-          <div title={`${b.advances} up, ${b.unchanged} unchanged, ${b.declines} down of ${priced} priced`}>
+        {b.total > 0 && (
+          <div title={`${b.advances} up, ${b.unchanged} unchanged, ${b.declines} down${b.missing ? `, ${b.missing} not priced` : ''} of ${b.total}`}>
+            {/* the unpriced slot stays empty (track colour), so the bar is always out of every constituent */}
             <div className="flex h-2 rounded overflow-hidden bg-zinc-800">
-              <div className="bg-emerald-500" style={{ width: `${(b.advances / priced) * 100}%` }} />
-              <div className="bg-zinc-600" style={{ width: `${(b.unchanged / priced) * 100}%` }} />
-              <div className="bg-red-500" style={{ width: `${(b.declines / priced) * 100}%` }} />
+              <div className="bg-emerald-500" style={{ width: `${(b.advances / b.total) * 100}%` }} />
+              <div className="bg-zinc-600" style={{ width: `${(b.unchanged / b.total) * 100}%` }} />
+              <div className="bg-red-500" style={{ width: `${(b.declines / b.total) * 100}%` }} />
             </div>
           </div>
         )}
@@ -126,7 +127,11 @@ export function NiftyBreadthWindow({ data, error, history, initial, onClose }: {
           <AdLine history={history} />
         </div>
         <div className="flex items-center justify-between text-[11px]">
-          <span className="text-zinc-500">{b.missing > 0 ? `${b.missing} stock${b.missing > 1 ? 's' : ''} not priced (not counted)` : `${priced} stocks priced`}</span>
+          <span data-testid="nifty-breadth-total"
+            title={b.missing > 0 ? 'N/A = no live quote yet: not counted as up, down or unchanged' : 'Every Nifty 50 constituent is priced'}
+            className="text-zinc-400 tabular-nums">
+            {b.advances} + {b.declines} + {b.unchanged}{b.missing > 0 ? ` + ${b.missing} N/A` : ''} = <span className="text-zinc-200 font-bold">{b.total}</span> stocks
+          </span>
           <button type="button" onClick={() => setList(v => !v)} aria-expanded={list}
             className="text-sky-400 hover:text-sky-300 font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60 rounded px-1">
             {list ? 'Hide stocks' : 'Show stocks'}

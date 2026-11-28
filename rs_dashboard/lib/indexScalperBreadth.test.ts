@@ -15,10 +15,17 @@ test('niftyBreadth counts advances, declines and unchanged; missing apart', () =
   assert.equal(b.declines, 1);
   assert.equal(b.unchanged, 2);
   assert.equal(b.missing, 2);
+  assert.equal(b.total, 7); // every constituent is in exactly one bucket
   assert.equal(b.ratio, 2);
   assert.equal(b.advPct, 40);
   assert.equal(b.advWeightPct, 50);
   assert.equal(b.decWeightPct, 25);
+});
+
+test('niftyBreadth: a row with no usable move counts as unpriced, never vanishes from the total', () => {
+  const b = niftyBreadth({ rows: [row('A', 1), row('B', NaN)], missing: [] });
+  assert.equal(b.missing, 1);
+  assert.equal(b.total, 2);
 });
 
 test('niftyBreadth: no decliners gives a null ratio, nothing priced a null share', () => {

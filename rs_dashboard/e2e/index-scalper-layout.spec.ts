@@ -1665,7 +1665,9 @@ test.describe('Index Scalper layout + option charts', () => {
     await expect(page.getByTestId('nifty-breadth-dec')).toHaveText('1');
     await expect(page.getByTestId('nifty-breadth-unch')).toHaveText('1');
     await expect(page.getByTestId('nifty-breadth-ratio')).toHaveText('3.00');
-    await expect(ad).toContainText('1 stock not priced'); // the unpriced stock is not counted as unchanged
+    // the unpriced stock is its own bucket, not counted as unchanged, and every constituent is accounted for
+    await expect(page.getByTestId('nifty-breadth-na')).toHaveText('1');
+    await expect(page.getByTestId('nifty-breadth-total')).toHaveText('3 + 1 + 1 + 1 N/A = 6 stocks');
     await ad.getByRole('button', { name: 'Show stocks' }).click();
     await expect(ad.locator('tbody tr')).toHaveCount(5);
     await expect(ad.locator('tbody tr').first()).toContainText('HDFCBANK');

@@ -17,6 +17,8 @@ export interface NiftyBreadth {
   unchanged: number;
   /** Stocks with no usable quote (not counted on either side). */
   missing: number;
+  /** Every constituent: advances + declines + unchanged + missing (50 for Nifty 50 with a current weight file). */
+  total: number;
   /** advances / declines; null when there are no decliners (shown as a dash, never as a huge number). */
   ratio: number | null;
   /** Share of PRICED stocks that are up, percent; null when nothing is priced. */
@@ -27,9 +29,10 @@ export interface NiftyBreadth {
 }
 
 export function niftyBreadth(result: Pick<ContributionResult, 'rows' | 'missing'> | null | undefined): NiftyBreadth {
-  let advances = 0, declines = 0, unchanged = 0, advWeightPct = 0, decWeightPct = 0;
+  let advances = 0, declines = 0, unchanged = 0, unusable = 0, advWeightPct = 0, decWeightPct = 0;
   for (const r of result?.rows ?? []) {
-    if (!Number.isFinite(r.changePct)) continue;
+    // a row with no usable move is unpriced, not dropped: every constituent lands in exactly one bucket
+    if (!Number.isFinite(r.changePct)) { unusable += 1; continue; }
     if (r.changePct >= UNCHANGED_PCT) { advances += 1; advWeightPct += r.weightPct; }
     else if (r.changePct <= -UNCHANGED_PCT) { declines += 1; decWeightPct += r.weightPct; }
     else unchanged += 1;
@@ -37,7 +40,8 @@ export function niftyBreadth(result: Pick<ContributionResult, 'rows' | 'missing'
   const priced = advances + declines + unchanged;
   return {
     advances, declines, unchanged,
-    missing: result?.missing?.length ?? 0,
+    missing: (result?.missing?.length ?? 0) + unusable,
+    total: priced + (result?.missing?.length ?? 0) + unusable,
     ratio: declines > 0 ? advances / declines : null,
     advPct: priced > 0 ? (advances / priced) * 100 : null,
     advWeightPct, decWeightPct,
