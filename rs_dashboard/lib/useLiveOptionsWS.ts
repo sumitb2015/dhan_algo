@@ -16,9 +16,12 @@
  * the instant a market tick arrives — no polling delay, no file hop, no
  * Next.js in the hot path.
  *
- * Fallback transport per channel: a 100ms HTTP poll of /api/options/live,
- * used when the WS can't connect (bridge older version, port blocked, etc.).
- * WS reconnection keeps retrying in the background and flips back when up.
+ * Fallback transport per channel: an HTTP poll of /api/options/live, used when
+ * the WS can't connect (bridge older version, port blocked, etc.): every 100ms
+ * while it returns fresh quotes, every 2s while it returns none (bridge still
+ * starting, stopped or dead: those answers are stale and rejected anyway, and a
+ * dead bridge used to cost 10 requests/s per channel per tab forever). WS
+ * reconnection keeps retrying in the background and flips back when up.
  *
  * Render pacing: pushes can arrive at 20-40Hz; snapshots are stashed in a ref
  * and flushed to React state via requestAnimationFrame, so we render at most
@@ -29,7 +32,8 @@ import { useEffect, useState } from 'react';
 import type { LiveQuotes, BridgeStatus } from '@/components/Scalper';
 
 const STATUS_POLL_MS   = 5000;   // bridge status + ws_port discovery
-const FALLBACK_POLL_MS = 100;    // HTTP polling cadence when WS is down
+const FALLBACK_POLL_MS = 100;    // HTTP polling cadence when WS is down and the poll returns fresh quotes
+const FALLBACK_IDLE_MS = 2000;   // ... and when it returns none (bridge starting / stopped / dead)
 const WS_RETRY_BASE_MS = 500;    // reconnect backoff: 0.5s → 1s → 2s → 5s cap
 const WS_RETRY_MAX_MS  = 5000;
 const WS_FAILS_TO_POLL = 3;      // consecutive WS failures before HTTP fallback
@@ -82,7 +86,7 @@ const EMPTY_STATE: ChannelState = {
  * instances run side by side (one per broker) so both feeds stay warm at
  * all times regardless of which one is currently displayed.
  */
-function runChannel(
+export function runChannel(
   broker: Broker,
   expiry: string,
   underlying: string,
@@ -105,7 +109,10 @@ function runChannel(
   const latestRef = { quotes: null as LiveQuotes | null };
   const timers: ReturnType<typeof setTimeout>[] = [];
   let statusInterval: ReturnType<typeof setInterval> | null = null;
-  let pollInterval: ReturnType<typeof setInterval> | null = null;
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  // Bumped by every start / stop: a poll still in flight from an earlier run must not schedule a second chain.
+  let pollGen = 0;
+  let polling = false;
   let watchdogInterval: ReturnType<typeof setInterval> | null = null;
   let lastStatusKey = '';
 
@@ -140,28 +147,40 @@ function runChannel(
   };
 
   // ── HTTP fallback poll ──
-  const httpPoll = () => {
+  // Chained (the next poll is scheduled when this one settles, so slow answers never pile up): fast while it brings
+  // fresh quotes, slow while it brings none.
+  const httpPoll = (gen: number) => {
+    pollTimer = null;
+    let fresh = false;
     fetch(`/api/options/live?broker=${broker}&underlying=${underlying}`)
       .then(r => r.json())
       .then((j: { success: boolean; status: StatusWithPort; quotes: LiveQuotes }) => {
-        if (disposed || !j.success) return;
+        if (disposed || !j.success || gen !== pollGen) return;
         if (acceptQuotes(j.quotes, false)) {
+          fresh = true;
           latestRef.quotes = j.quotes;
           scheduleFlush();
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (disposed || !polling || gen !== pollGen) return;
+        pollTimer = setTimeout(() => httpPoll(gen), fresh ? FALLBACK_POLL_MS : FALLBACK_IDLE_MS);
+      });
   };
 
   const startFallbackPolling = () => {
-    if (pollInterval || disposed) return;
+    if (polling || disposed) return;
+    polling = true;
+    pollGen += 1;
     onUpdate({ transport: 'poll' });
-    httpPoll();
-    pollInterval = setInterval(httpPoll, FALLBACK_POLL_MS);
+    httpPoll(pollGen);
   };
 
   const stopFallbackPolling = () => {
-    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+    polling = false;
+    pollGen += 1;
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   };
 
   // ── WebSocket transport ──
