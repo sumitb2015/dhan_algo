@@ -14,10 +14,11 @@
 import { activeFloorPct, evaluateRisk, nextPeakPct, straddlePnl, straddlePnlPct, type TsLeg, type TsPosition, type TsTrail } from './tripleStraddle.ts';
 import { istMinuteOfDay } from './istTime.ts';
 import { sessionVwap, type Bar } from './indexScalperIndicators.ts';
+import { emaSmaSeeded } from './indicators.ts';
 
 export const STRADDLE_STORE_KEY = 'indexScalper.straddles.v1';
 
-export type StraddleExitReason = 'SL' | 'TARGET' | 'TRAIL' | 'LOCK' | 'COST' | 'VWAP' | 'TIME' | 'MANUAL';
+export type StraddleExitReason = 'SL' | 'TARGET' | 'TRAIL' | 'LOCK' | 'COST' | 'VWAP' | 'EMA' | 'TIME' | 'MANUAL';
 
 export interface StraddleRules {
   /** % of the entry combined premium (Triple Straddle's basis). 0 / absent = off. */
@@ -30,6 +31,9 @@ export interface StraddleRules {
   /** Exit when a FINISHED candle of the pane closes beyond the straddle's session VWAP by `bufferPts` (premium points):
    *  above it for a short straddle, below it for a long one. A live tick past VWAP never fires it. */
   vwap: { on: boolean; bufferPts: number };
+  /** Same, against an EMA of the straddle's closes (TradingView ta.ema, `len` bars). VWAP and EMA are switched on
+   *  separately: with both on, each is its own exit and the first line a finished candle closes beyond exits. */
+  ema: { on: boolean; len: number; bufferPts: number };
   /** Once peak profit reached `triggerPct`, the stop moves to cost: exit if P&L falls back to 0. */
   slToCost: { on: boolean; triggerPct: number };
   /** Square off at this IST time, 'HH:MM'. */
@@ -39,6 +43,7 @@ export interface StraddleRules {
 export const DEFAULT_STRADDLE_RULES: StraddleRules = {
   targetPct: 30, slPct: 20,
   vwap: { on: true, bufferPts: 0 },
+  ema: { on: false, len: 20, bufferPts: 0 },
   slToCost: { on: false, triggerPct: 15 },
   timeExit: { on: true, hhmm: '15:17' },
 };
@@ -127,6 +132,7 @@ export interface StraddleTickInput {
   /** The pane's last FINISHED candle (its end time and close) and the straddle VWAP at that candle. */
   closedBar?: { endMs: number; close: number } | null;
   vwapAtClosed?: number | null;
+  emaAtClosed?: number | null;
 }
 
 export interface StraddleDecision {
@@ -152,14 +158,18 @@ export function evaluateStraddle(p: IsxStraddle, inp: StraddleTickInput): Stradd
   if (risk) return { reason: risk, peakPct: peak };
   const c = p.rules.slToCost;
   if (c.on && c.triggerPct > 0 && peak >= c.triggerPct && pct <= 1e-6) return { reason: 'COST', peakPct: peak };
-  const v = p.rules.vwap;
-  const bar = inp.closedBar, vw = inp.vwapAtClosed;
-  // Only a candle that closed after the straddle was opened: the bar it was entered on may have closed beyond VWAP
-  // before the entry, which is not a signal against this position.
-  if (v.on && bar && vw != null && Number.isFinite(vw) && bar.endMs > p.openedAt) {
-    const buf = Math.max(0, v.bufferPts || 0);
-    if (p.side === 'S' ? bar.close > vw + buf : bar.close < vw - buf) return { reason: 'VWAP', peakPct: peak };
-  }
+  // Line rules: only a candle that closed after the straddle was opened (the bar it was entered on may have closed
+  // beyond the line before the entry, which is not a signal against this position). Short: close above the line +
+  // buffer; long: below it - buffer. VWAP and EMA are independent: whichever is on and crossed exits.
+  const bar = inp.closedBar;
+  const beyond = (line: number | null | undefined, bufferPts: number) => {
+    if (!bar || line == null || !Number.isFinite(line) || !(bar.endMs > p.openedAt)) return false;
+    const buf = Math.max(0, bufferPts || 0);
+    return p.side === 'S' ? bar.close > line + buf : bar.close < line - buf;
+  };
+  if (p.rules.vwap.on && beyond(inp.vwapAtClosed, p.rules.vwap.bufferPts)) return { reason: 'VWAP', peakPct: peak };
+  const e = p.rules.ema;
+  if (e?.on && beyond(inp.emaAtClosed, e.bufferPts)) return { reason: 'EMA', peakPct: peak };
   return { reason: null, peakPct: peak };
 }
 
@@ -173,6 +183,11 @@ export function exitQtyFor(own: number, side: 'B' | 'S', brokerNet: number): num
 }
 
 /** Today's straddles from storage; another day's and malformed records are dropped. */
+/** Rules saved before a field existed get its default (records from before the EMA rule have no `ema`). */
+export function withRuleDefaults(r: Partial<StraddleRules>): StraddleRules {
+  return { ...DEFAULT_STRADDLE_RULES, ...r, ema: { ...DEFAULT_STRADDLE_RULES.ema, ...(r.ema ?? {}), ...(r.ema ? {} : { on: false }) } };
+}
+
 export function parseStraddleStore(raw: string | null, today: string): IsxStraddle[] {
   if (!raw) return [];
   let v: unknown;
@@ -183,7 +198,7 @@ export function parseStraddleStore(raw: string | null, today: string): IsxStradd
     return !!s && s.day === today && typeof s.id === 'string' && Array.isArray(s.legs) && s.legs.length === 2
       && (s.side === 'S' || s.side === 'B') && (s.mode === 'SIM' || s.mode === 'REAL') && typeof s.strike === 'number'
       && !!s.rules && typeof s.rules === 'object';
-  });
+  }).map(b => ({ ...b, rules: withRuleDefaults(b.rules) }));
 }
 
 export function serializeStraddleStore(books: IsxStraddle[]): string {
@@ -196,6 +211,7 @@ export function rulesError(r: StraddleRules): string | null {
   if (neg(r.targetPct) || neg(r.slPct) || neg(r.targetRs) || neg(r.slRs)) return 'Levels must be 0 or more';
   if (r.slPct != null && r.slPct >= 1000) return 'Stop % is too large';
   if (neg(r.vwap.bufferPts)) return 'VWAP buffer must be 0 or more';
+  if (r.ema && (neg(r.ema.bufferPts) || !Number.isInteger(r.ema.len) || r.ema.len < 2 || r.ema.len > 200)) return 'EMA length must be a whole number from 2 to 200, buffer 0 or more';
   if (r.slToCost.on && !(r.slToCost.triggerPct > 0)) return 'SL to cost needs a trigger above 0%';
   if (r.timeExit.on && hhmmMinutes(r.timeExit.hhmm) === null) return 'Time exit must be HH:MM';
   const t = r.trail;
@@ -204,11 +220,13 @@ export function rulesError(r: StraddleRules): string | null {
   return null;
 }
 
-/** The last FINISHED candle (its end time and close) and the session VWAP at it. `lastClosed`: the newest bar's
+/** The last FINISHED candle (its end time and close) with the session VWAP and the EMA (`emaLen` bars of closes,
+ *  TradingView ta.ema like the chart's EMA indicator; null before enough bars) at it. `lastClosed`: the newest bar's
  *  interval has ended (lastBarClosed); otherwise the newest bar is still forming and the one before it is used. */
-export function lastClosedVwap(bars: Bar[], intervalMin: number, lastClosed: boolean): { endMs: number; close: number; vwap: number | null } | null {
+export function lastClosedVwap(bars: Bar[], intervalMin: number, lastClosed: boolean, emaLen = 20): { endMs: number; close: number; vwap: number | null; ema: number | null } | null {
   const i = lastClosed ? bars.length - 1 : bars.length - 2;
   if (i < 0) return null;
   const vw = sessionVwap(bars)[i];
-  return { endMs: (bars[i].t + intervalMin * 60) * 1000, close: bars[i].c, vwap: vw ?? null };
+  const em = emaSmaSeeded(bars.slice(0, i + 1).map(b => b.c), emaLen)[i];
+  return { endMs: (bars[i].t + intervalMin * 60) * 1000, close: bars[i].c, vwap: vw ?? null, ema: em ?? null };
 }

@@ -10,20 +10,12 @@ import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
 import { readPref, savePref } from '@/lib/localPref';
-import { DEFAULT_STRADDLE_RULES, rulesError, type StraddleRules } from '@/lib/indexScalperStraddle';
+import { rulesError, type StraddleRules } from '@/lib/indexScalperStraddle';
 import type { TsTrailKind } from '@/lib/tripleStraddle';
 import type { StraddleLegIds, StraddleView } from './useStraddleBooks';
 
-const RULES_KEY = 'indexScalper.straddleRules.v1';
 const LOTS_KEY = 'indexScalper.straddleLots';
 const FOCUS = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60';
-
-function loadRules(): StraddleRules {
-  try {
-    const r = JSON.parse(readPref(RULES_KEY) ?? 'null') as StraddleRules | null;
-    return r && !rulesError(r) ? { ...DEFAULT_STRADDLE_RULES, ...r } : DEFAULT_STRADDLE_RULES;
-  } catch { return DEFAULT_STRADDLE_RULES; }
-}
 
 /** A number box that commits on blur / Enter; a refused value puts the box back. Empty = 0 (off). */
 function NumBox({ label, value, onCommit, width = 'w-12', step }: { label: string; value: number | undefined; onCommit: (n: number) => boolean; width?: string; step?: string }) {
@@ -58,18 +50,19 @@ export interface StraddleControlsProps {
   onExit: (id: string) => void;
   onForget: (id: string) => void;
   onSetRules: (id: string, r: StraddleRules) => string | null;
+  /** The rules a new straddle starts with (owned by useStraddleBooks, so the chart can draw their VWAP / EMA). */
+  draftRules: StraddleRules;
+  onSetDraftRules: (r: StraddleRules) => string | null;
   onError: (text: string) => void;
 }
 
 export default function StraddleControls(p: StraddleControlsProps) {
   const [open, setOpen] = useState(true);
-  const [draftRules, setDraftRules] = useState<StraddleRules>(DEFAULT_STRADDLE_RULES);
+  const draftRules = p.draftRules;
   const [lots, setLots] = useState(1);
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setDraftRules(loadRules());
     const l = Number(readPref(LOTS_KEY));
-    if (Number.isInteger(l) && l >= 1) setLots(l);
+    if (Number.isInteger(l) && l >= 1) setLots(l); // eslint-disable-line react-hooks/set-state-in-effect
   }, []);
 
   const book = p.view?.book ?? null;
@@ -78,9 +71,8 @@ export default function StraddleControls(p: StraddleControlsProps) {
   const setRules = (r: StraddleRules): boolean => {
     const err = rulesError(r);
     if (err) { p.onError(err); return false; }
-    if (book) { const e = p.onSetRules(book.id, r); if (e) { p.onError(e); return false; } return true; }
-    setDraftRules(r);
-    savePref(RULES_KEY, JSON.stringify(r));
+    const e = book ? p.onSetRules(book.id, r) : p.onSetDraftRules(r);
+    if (e) { p.onError(e); return false; }
     return true;
   };
   const trailKind: TsTrailKind | 'none' = rules.trail?.kind ?? 'none';
@@ -116,6 +108,7 @@ export default function StraddleControls(p: StraddleControlsProps) {
               </Row>
               <Row>
                 <span className={lab}>VWAP</span><span className="text-[11px] font-mono">{fmt(v.vwapNow)}</span>
+                {book.rules.ema.on && <><span className={lab}>EMA {book.rules.ema.len}</span><span data-testid="straddle-ema" className="text-[11px] font-mono">{fmt(v.emaNow)}</span></>}
                 <span className={lab}>peak</span><span className="text-[11px] font-mono">{fmt(book.peakPct ?? 0, 1)}%</span>
                 <span className={lab}>{v.floor ? (v.floor.kind === 'SL' ? 'stop' : v.floor.kind === 'COST' ? 'stop at cost' : v.floor.kind === 'TRAIL' ? 'trail' : 'lock') : 'no stop'}</span>
                 {v.floor && <span className="text-[11px] font-mono">{v.floor.floorPct.toFixed(1)}%</span>}
@@ -169,6 +162,13 @@ export default function StraddleControls(p: StraddleControlsProps) {
               <NumBox label="VWAP buffer points" value={rules.vwap.bufferPts} width="w-10" onCommit={n => setRules({ ...rules, vwap: { ...rules.vwap, bufferPts: n } })} />
             </Row>
             <Row>
+              <Switch aria-label="Exit on EMA close" checked={rules.ema.on} onCheckedChange={on => setRules({ ...rules, ema: { ...rules.ema, on } })} />
+              <span className={lab} title="Short: a finished candle closes above the EMA + buffer. Long: below the EMA - buffer. With VWAP also on, the first line crossed exits.">Exit on close beyond EMA</span>
+              <NumBox label="EMA length" value={rules.ema.len} width="w-10" onCommit={n => setRules({ ...rules, ema: { ...rules.ema, len: n } })} />
+              <span className={lab}>buffer</span>
+              <NumBox label="EMA buffer points" value={rules.ema.bufferPts} width="w-10" onCommit={n => setRules({ ...rules, ema: { ...rules.ema, bufferPts: n } })} />
+            </Row>
+            <Row>
               <span className={cn(lab, 'w-12')}>Trail</span>
               <select aria-label="Trail kind" value={trailKind}
                 onChange={e => {
@@ -210,7 +210,7 @@ export default function StraddleControls(p: StraddleControlsProps) {
             </Row>
           </div>
           <p className="text-[10px] text-zinc-500 leading-snug">
-            Rules run in this tab only{p.real ? ' while REAL is armed' : ''}: closing the tab stops them. % is of the entry premium; with both % and ₹ the nearer level applies.
+            Rules run in this tab only{p.real ? ' while REAL is armed' : ''}: closing the tab stops them. % is of the entry premium; with both % and ₹ the nearer level applies. VWAP and EMA are separate exits: with both on, the first line a {p.intervalMin}m candle closes beyond exits.
           </p>
         </div>
       )}

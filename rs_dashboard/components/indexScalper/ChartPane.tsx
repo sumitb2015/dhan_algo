@@ -24,7 +24,7 @@ import StraddleControls from './StraddleControls';
 import type { useStraddleBooks } from './useStraddleBooks';
 type StraddleApi = ReturnType<typeof useStraddleBooks>;
 import { buildOiProfile, oiProfileKey, type OiMode } from '@/lib/indexScalperOiProfile';
-import { lastBarClosed, type IndicatorInstance } from '@/lib/indexScalperIndicators';
+import { lastBarClosed, newIndicator, type IndicatorInstance } from '@/lib/indexScalperIndicators';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { INSTRUMENTS, isMcx, type Underlying } from '@/lib/indexScalperInstrument';
 import { toIsoDate } from '@/components/DataChip';
@@ -289,6 +289,20 @@ function ChartPane(p: Props) {
   // The open straddle's entry / target / stop lines, on a straddle pane of its own strike only.
   const openStr = p.straddle?.api.open?.book;
   const straddleLevels = isStraddle && openStr && openStr.strike === resolved.strike ? p.straddle!.api.levelLines : NO_LEVELS;
+  // A straddle pane always draws the lines its exit rules watch: VWAP and / or the EMA of the rule's length, when that
+  // rule is on (the open straddle's own rules on its strike, else the rules a new straddle would start with). Added only
+  // when the chart's own indicator list does not already show the same line.
+  const shownRules = !isStraddle || !p.straddle ? null : openStr && openStr.strike === resolved.strike ? openStr.rules : p.straddle.api.draftRules;
+  const ruleVwap = !!shownRules?.vwap.on, ruleEma = shownRules?.ema.on ? shownRules.ema.len : null;
+  const paneIndicators = useMemo(() => {
+    if (!ruleVwap && ruleEma === null) return p.indicators;
+    const extra: IndicatorInstance[] = [];
+    if (ruleVwap && !p.indicators.some(i => i.visible && i.kind === 'vwap')) extra.push({ ...newIndicator('vwap', 'straddle-rule-vwap') });
+    if (ruleEma !== null && !p.indicators.some(i => i.visible && i.kind === 'ema' && i.params.period === ruleEma)) {
+      extra.push({ ...newIndicator('ema', 'straddle-rule-ema'), params: { period: ruleEma }, color: '#f59e0b' });
+    }
+    return extra.length ? [...p.indicators, ...extra] : p.indicators;
+  }, [p.indicators, ruleVwap, ruleEma]);
 
   return (
     <div data-testid={`chart-pane-${index}`} className="flex flex-col flex-1 min-w-0 min-h-0">
@@ -400,7 +414,7 @@ function ChartPane(p: Props) {
         <ScalperChart
           key={`${drawKey}:${cfg.chartType ?? 'candlestick'}`}
           chartType={cfg.chartType ?? 'candlestick'}
-          bars={bars} indicators={p.indicators} tool={p.tool} onToolDone={p.onToolDone} clearToken={p.clearToken}
+          bars={bars} indicators={paneIndicators} tool={p.tool} onToolDone={p.onToolDone} clearToken={p.clearToken}
           logScale={p.logScale} pctScale={p.pctScale} autoScale={p.autoScale} showGrid={p.showGrid} candleColorRule={p.candleColorRule} showVolume={p.showVolume} volumeMaLen={p.volumeMaLen}
           legs={isStraddle ? EMPTY_LEGS : paneLegs} entrySpots={p.entrySpots} onExitLeg={p.onExitLeg} onAdjustLeg={quickOn || isOption ? p.onAdjustLeg : undefined} adjustLots={p.stepLots} exitingId={p.exitingId}
           onToggleIndicator={p.onToggleIndicator} onRemoveIndicator={p.onRemoveIndicator} onEditIndicator={p.onEditIndicator}
@@ -444,6 +458,7 @@ function ChartPane(p: Props) {
             view={p.straddle.api.open} busy={p.straddle.api.busy} maxLots={INSTRUMENTS[underlying].maxLots}
             onEnter={p.straddle.api.enter} onExit={id => void p.straddle!.api.exitBook(id, 'MANUAL')} onForget={p.straddle.api.forget}
             onSetRules={p.straddle.api.setRules} onError={p.straddle.onError}
+            draftRules={p.straddle.api.draftRules} onSetDraftRules={p.straddle.api.setDraftRules}
           />
         )}
         {quickOn && p.quick && (

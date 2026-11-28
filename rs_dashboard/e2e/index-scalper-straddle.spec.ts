@@ -13,11 +13,12 @@ const STRIKES = Array.from({ length: 21 }, (_, i) => 24850 + i * 50);
 const idsOf = (k: number): [string, string] => [`1${k}`, `2${k}`];
 const CE = 210.5, PE = 229.95; // ATM 25350: straddle 440.45
 
-// 5-minute straddle bars from 09:15 IST to the session clock's 10:30 (the last one ends exactly at "now"), around 400
+// 5-minute straddle bars up to the session clock's 10:30 (the last one ends exactly at "now"), around 400
 // with volume, so the VWAP sits near 400 and the live 440.45 is far above it.
 function straddleBars() {
-  const start = SESSION_START_MS / 1000 - 75 * 60;
-  return Array.from({ length: 15 }, (_, i) => {
+  // 30 bars: enough for EMA 20 (the first ones fall on the previous session, as a real 10-day backfill would)
+  const start = SESSION_START_MS / 1000 - 150 * 60;
+  return Array.from({ length: 30 }, (_, i) => {
     const c = 400 + (i % 2 ? 3 : -3);
     return { t: start + i * 300, o: 400, h: c + 4, l: c - 4, c, v: 5000 };
   });
@@ -76,12 +77,17 @@ async function mockApi(page: Page, state: State) {
 
 const newState = (): State => ({ calls: [], blocked: [], candleReqs: [], positions: [] });
 // Default per-leg target / stop off; the straddle's VWAP exit on, its time exit off (the session clock is 10:30).
-const seed = (page: Page) => page.addInitScript(() => {
+const seed = (page: Page, lines: { vwap: boolean; ema: boolean } = { vwap: true, ema: false }) => page.addInitScript(l => {
   try {
     localStorage.setItem('indexScalper.defaultBrackets.v1', JSON.stringify({ on: false, tpPct: 30, slPct: 20 }));
-    localStorage.setItem('indexScalper.straddleRules.v1', JSON.stringify({ targetPct: 30, slPct: 20, vwap: { on: true, bufferPts: 0 }, slToCost: { on: false, triggerPct: 15 }, timeExit: { on: false, hhmm: '15:17' } }));
+    // no indicators of the viewer's own: the straddle pane's VWAP / EMA lines come from its exit rules
+    localStorage.setItem('indexScalper.indicators.v2', '[]');
+    localStorage.setItem('indexScalper.structureIndicatorAdded', '1');
+    localStorage.setItem('indexScalper.dayLevelsIndicatorAdded', '1');
+    localStorage.setItem('indexScalper.volumeIndicatorAdded', '1');
+    localStorage.setItem('indexScalper.straddleRules.v1', JSON.stringify({ targetPct: 30, slPct: 20, vwap: { on: l.vwap, bufferPts: 0 }, ema: { on: l.ema, len: 20, bufferPts: 0 }, slToCost: { on: false, triggerPct: 15 }, timeExit: { on: false, hhmm: '15:17' } }));
   } catch { /* private mode */ }
-});
+}, lines);
 
 async function openStraddlePane(page: Page) {
   await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
@@ -171,6 +177,36 @@ test.describe('Index Scalper Straddle pane', () => {
     // no retry of the rejected leg, and the rules do not exit a half straddle on their own
     await page.waitForTimeout(3000);
     expect(orders()).toHaveLength(2);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('the straddle chart draws the VWAP and EMA its exit rules use; EMA only: a close above the EMA exits', async ({ page, context }) => {
+    const state = newState();
+    await seed(page, { vwap: false, ema: true });
+    await signIn(context);
+    await mockApi(page, state);
+    const right = await openStraddlePane(page);
+    const ctl = right.getByTestId('straddle-controls');
+    // EMA rule on, VWAP off: the chart shows EMA (20) and no VWAP
+    await right.getByTestId('indicator-list-toggle').click();
+    await expect(right.getByTestId('indicator-list')).toContainText('EMA (20)');
+    await expect(right.getByTestId('indicator-list')).not.toContainText('VWAP');
+    // switching VWAP on draws it too
+    await ctl.getByRole('switch', { name: 'Exit on VWAP close' }).click();
+    await expect(right.getByTestId('indicator-list')).toContainText('VWAP');
+    await ctl.getByRole('switch', { name: 'Exit on VWAP close' }).click();
+    await expect(right.getByTestId('indicator-list')).not.toContainText('VWAP');
+    if (process.env.ISX_SHOT2) await right.screenshot({ path: process.env.ISX_SHOT2 });
+
+    await expect(ctl.getByTestId('straddle-sell')).toBeEnabled({ timeout: 30_000 });
+    await ctl.getByTestId('straddle-sell').click();
+    await expect(ctl.getByTestId('straddle-open')).toContainText('SHORT 1L', { timeout: 15_000 });
+    await expect(ctl.getByTestId('straddle-ema')).not.toHaveText('—');
+    await moveSessionClock(page, SESSION_START_MS + 6 * 60_000);
+    await expect(ctl.getByTestId('straddle-open')).toHaveCount(0, { timeout: 20_000 });
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('indexScalper.straddles.v1') ?? '[]'));
+    expect(stored[0]).toMatchObject({ status: 'CLOSED', closeReason: 'EMA' });
+    expect(state.calls).toEqual([]);
     expect(state.blocked).toEqual([]);
   });
 });

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_STRADDLE_RULES, currentFloor, effectiveLevels, evaluateStraddle, exitQtyFor, parseStraddleStore, premiumAtPct,
-  lastClosedVwap, rulesError, serializeStraddleStore, straddleHealth, straddleMtm, type IsxStraddle, type StraddleRules,
+  lastClosedVwap, parseStraddleStore as parseStore, rulesError, withRuleDefaults, serializeStraddleStore, straddleHealth, straddleMtm, type IsxStraddle, type StraddleRules,
 } from './indexScalperStraddle.ts';
 
 // 10:00 IST on 2026-11-30 (04:30 UTC)
@@ -155,4 +155,40 @@ test('last finished candle and its VWAP: the forming bar is skipped', () => {
   assert.ok(Math.abs(forming.vwap! - 11.8333) < 1e-3);
   assert.equal(lastClosedVwap(bars, 5, true)!.close, 13);
   assert.equal(lastClosedVwap(bars.slice(0, 1), 5, false), null);
+});
+
+test('EMA exit: its own switch, candle close beyond EMA (+ buffer); VWAP and EMA each exit on their own', () => {
+  const bar = { endMs: T10, close: 210 };
+  const emaOnly = book({}, { vwap: { on: false, bufferPts: 0 }, ema: { on: true, len: 20, bufferPts: 2 } });
+  assert.equal(look(emaOnly, 101, 100, { closedBar: bar, vwapAtClosed: 150, emaAtClosed: 207 }).reason, 'EMA');
+  assert.equal(look(emaOnly, 101, 100, { closedBar: bar, vwapAtClosed: 150, emaAtClosed: 209 }).reason, null); // inside the buffer
+  // VWAP crossed but only EMA is on: no exit
+  assert.equal(look(emaOnly, 101, 100, { closedBar: bar, vwapAtClosed: 150, emaAtClosed: 230 }).reason, null);
+  // both on: whichever line the close is beyond exits
+  const both = book({}, { vwap: { on: true, bufferPts: 0 }, ema: { on: true, len: 20, bufferPts: 0 } });
+  assert.equal(look(both, 101, 100, { closedBar: bar, vwapAtClosed: 230, emaAtClosed: 205 }).reason, 'EMA');
+  assert.equal(look(both, 101, 100, { closedBar: bar, vwapAtClosed: 205, emaAtClosed: 230 }).reason, 'VWAP');
+  assert.equal(look(both, 101, 100, { closedBar: bar, vwapAtClosed: 230, emaAtClosed: 230 }).reason, null);
+  // long: below the EMA
+  const long = book({ side: 'B' }, { vwap: { on: false, bufferPts: 0 }, ema: { on: true, len: 20, bufferPts: 0 } });
+  assert.equal(look(long, 99, 100, { closedBar: { endMs: T10, close: 195 }, emaAtClosed: 200 }).reason, 'EMA');
+  // EMA not available yet (too few bars): no exit
+  assert.equal(look(emaOnly, 101, 100, { closedBar: bar, emaAtClosed: null }).reason, null);
+});
+
+test('EMA at the last finished candle matches TradingView ta.ema (SMA seed)', () => {
+  const bars = Array.from({ length: 4 }, (_, i) => ({ t: 1000 + i * 300, o: 10, h: 12, l: 8, c: 10 + i }));
+  // len 2 over closes 10, 11, 12 (last finished; the 4th is forming): seed (10+11)/2 = 10.5, then 12*2/3 + 10.5/3 = 11.5
+  assert.ok(Math.abs(lastClosedVwap(bars, 5, false, 2)!.ema! - 11.5) < 1e-9);
+  assert.equal(lastClosedVwap(bars, 5, false, 20)!.ema, null);
+});
+
+test('rules saved before the EMA rule get it switched off; EMA length validated', () => {
+  const old = { ...DEFAULT_STRADDLE_RULES } as Partial<StraddleRules>;
+  delete old.ema;
+  assert.deepEqual(withRuleDefaults(old).ema, { on: false, len: 20, bufferPts: 0 });
+  const raw = serializeStraddleStore([{ ...book(), rules: old as StraddleRules }]);
+  assert.equal(parseStore(raw, '2026-11-30')[0].rules.ema.on, false);
+  assert.match(rulesError({ ...DEFAULT_STRADDLE_RULES, ema: { on: true, len: 1, bufferPts: 0 } })!, /EMA length/);
+  assert.equal(rulesError({ ...DEFAULT_STRADDLE_RULES, ema: { on: true, len: 20, bufferPts: 1 } }), null);
 });

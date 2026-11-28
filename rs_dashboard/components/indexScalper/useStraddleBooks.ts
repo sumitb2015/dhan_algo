@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { settleLegPrice, type TsLeg } from '@/lib/tripleStraddle';
 import {
-  STRADDLE_STORE_KEY, currentFloor, effectiveLevels, evaluateStraddle, exitQtyFor, lastClosedVwap, parseStraddleStore, premiumAtPct,
+  DEFAULT_STRADDLE_RULES, STRADDLE_STORE_KEY, currentFloor, effectiveLevels, evaluateStraddle, withRuleDefaults, exitQtyFor, lastClosedVwap, parseStraddleStore, premiumAtPct,
   rulesError, serializeStraddleStore, straddleHealth, straddleMtm, type IsxStraddle, type StraddleExitReason, type StraddleRules,
 } from '@/lib/indexScalperStraddle';
 import { INSTRUMENTS, lotUnits, openingProduct, pnlMultiplier, type Underlying } from '@/lib/indexScalperInstrument';
@@ -48,6 +48,17 @@ export interface StraddleView {
   health: ReturnType<typeof straddleHealth>;
   floor: ReturnType<typeof currentFloor>;
   vwapNow: number | null;
+  /** EMA of the straddle (the rule's length) at the last finished candle. */
+  emaNow: number | null;
+}
+
+const RULES_KEY = 'indexScalper.straddleRules.v1';
+function loadDraftRules(): StraddleRules {
+  try {
+    const r = JSON.parse(localStorage.getItem(RULES_KEY) ?? 'null') as Partial<StraddleRules> | null;
+    const w = r ? withRuleDefaults(r) : null;
+    return w && !rulesError(w) ? w : DEFAULT_STRADDLE_RULES;
+  } catch { return DEFAULT_STRADDLE_RULES; }
 }
 
 const TODAY = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -89,6 +100,17 @@ export function useStraddleBooks(a: UseStraddleArgs) {
     saveBooks(next);
   }, []);
   const patch = useCallback((id: string, f: (b: PaneStraddle) => PaneStraddle) => setBooks(prev => prev.map(b => (b.id === id ? f(b) : b))), [setBooks]);
+
+  // The rules a NEW straddle starts with (saved per browser); an open straddle carries its own copy.
+  const [draftRules, setDraftState] = useState<StraddleRules>(DEFAULT_STRADDLE_RULES);
+  useEffect(() => { setDraftState(loadDraftRules()); }, []); // eslint-disable-line react-hooks/set-state-in-effect
+  const setDraftRules = useCallback((r: StraddleRules): string | null => {
+    const err = rulesError(r);
+    if (err) return err;
+    setDraftState(r);
+    try { localStorage.setItem(RULES_KEY, JSON.stringify(r)); } catch { /* memory only */ }
+    return null;
+  }, []);
 
   // Load once, and follow another tab's writes (it may have exited a straddle: never fire on a stale copy).
   useEffect(() => {
@@ -266,17 +288,14 @@ export function useStraddleBooks(a: UseStraddleArgs) {
     legs: open ? { ceId: open.dhanIds.CE, peId: open.dhanIds.PE, ceSymbol: null, peSymbol: null } : { ceId: null, peId: null, ceSymbol: null, peSymbol: null },
   }), [open?.strike, open?.dhanIds.CE, open?.dhanIds.PE, underlying]); // eslint-disable-line react-hooks/exhaustive-deps
   const iv = String(open?.intervalMin ?? 5) as Interval;
-  const { bars } = useChartBars(underlying, resolved, iv, 3, a.refreshTick, feed);
+  // 10 days: enough finished bars for the EMA on every interval (60-minute bars: ~60).
+  const { bars } = useChartBars(underlying, resolved, iv, 10, a.refreshTick, feed);
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => { const t = setInterval(() => setNowMs(Date.now()), 5_000); return () => clearInterval(t); }, []);
   const closed = useMemo(() => {
     if (!open || !bars.length) return null;
-    return lastClosedVwap(bars, open.intervalMin, lastBarClosed(bars, open.intervalMin, underlying, true, nowMs));
+    return lastClosedVwap(bars, open.intervalMin, lastBarClosed(bars, open.intervalMin, underlying, true, nowMs), open.rules.ema.len);
   }, [bars, open, underlying, nowMs]);
-  const vwapNow = useMemo(() => {
-    if (!open || !bars.length) return null;
-    return lastClosedVwap(bars, open.intervalMin, true)?.vwap ?? null;
-  }, [bars, open]);
 
   // ── rule watcher: on every price push (and the 5 s clock for the time exit) ──
   const ltpOf = useCallback((b: PaneStraddle) => ({ CE: feed.ltpById.get(b.dhanIds.CE), PE: feed.ltpById.get(b.dhanIds.PE) }), [feed.ltpById]);
@@ -285,7 +304,7 @@ export function useStraddleBooks(a: UseStraddleArgs) {
     if ((retryAt.current.get(open.id) ?? 0) > Date.now()) return;
     const d = evaluateStraddle(open, {
       ltp: ltpOf(open), nowMs: Date.now(), stale: feed.stale || !feed.marketOpen || feed.feedAgeSec === null,
-      closedBar: closed ? { endMs: closed.endMs, close: closed.close } : null, vwapAtClosed: closed?.vwap ?? null,
+      closedBar: closed ? { endMs: closed.endMs, close: closed.close } : null, vwapAtClosed: closed?.vwap ?? null, emaAtClosed: closed?.ema ?? null,
     });
     // The peak only ever rises (trail / lock run off it): saved so a reload does not forget how far it ran.
     if (d.peakPct != null && d.peakPct > (open.peakPct ?? 0) + 0.05) patch(open.id, b => ({ ...b, peakPct: d.peakPct! }));
@@ -305,8 +324,8 @@ export function useStraddleBooks(a: UseStraddleArgs) {
 
   const view = useMemo<StraddleView | null>(() => {
     if (!open) return null;
-    return { book: open, mtm: straddleMtm(open, ltpOf(open)), health: straddleHealth(open), floor: currentFloor(open), vwapNow };
-  }, [open, ltpOf, vwapNow]);
+    return { book: open, mtm: straddleMtm(open, ltpOf(open)), health: straddleHealth(open), floor: currentFloor(open), vwapNow: closed?.vwap ?? null, emaNow: closed?.ema ?? null };
+  }, [open, ltpOf, closed]);
 
   const closedToday = useMemo(() => books.filter(b => b.status === 'CLOSED' && mine(b)), [books, mine]);
 
@@ -323,9 +342,9 @@ export function useStraddleBooks(a: UseStraddleArgs) {
     return out;
   }, [open]);
 
-  return { open: view, closedToday, busy, enter, exitBook, forget, setRules, levelLines };
+  return { open: view, closedToday, busy, enter, exitBook, forget, setRules, levelLines, draftRules, setDraftRules };
 }
 
 const REASON_TEXT: Record<StraddleExitReason, string> = {
-  SL: 'stop loss', TARGET: 'target', TRAIL: 'trailing stop', LOCK: 'profit lock', COST: 'stop at cost', VWAP: 'closed beyond VWAP', TIME: 'time exit', MANUAL: 'manual',
+  SL: 'stop loss', TARGET: 'target', TRAIL: 'trailing stop', LOCK: 'profit lock', COST: 'stop at cost', VWAP: 'closed beyond VWAP', EMA: 'closed beyond the EMA', TIME: 'time exit', MANUAL: 'manual',
 };
