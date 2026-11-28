@@ -580,3 +580,15 @@ test('orderLevel: a stop is drawn at its trigger, a limit at its price', async (
   assert.equal(orderLevel({ orderType: 'SL (triggered)', rawType: 'LIMIT', price: 86.1, trigger: 82 }), 86.1);
   assert.equal(orderLevel({ orderType: 'Stop Limit', rawType: 'STOP_LOSS', price: 86.1, trigger: 82 }), 82);
 });
+
+test('chartType: PaneCfg supports candlestick, bar, line, and linemarkers chart types', async () => {
+  type ChartType = 'candlestick' | 'bar' | 'line' | 'linemarkers';
+  const cfg1: { interval: string; chartType?: ChartType } = { interval: '5', chartType: 'candlestick' };
+  const cfg2: { interval: string; chartType?: ChartType } = { interval: '5', chartType: 'bar' };
+  const cfg3: { interval: string; chartType?: ChartType } = { interval: '1', chartType: 'line' };
+  const cfg4: { interval: string; chartType?: ChartType } = { interval: '1', chartType: 'linemarkers' };
+  assert.equal(cfg1.chartType, 'candlestick');
+  assert.equal(cfg2.chartType, 'bar');
+  assert.equal(cfg3.chartType, 'line');
+  assert.equal(cfg4.chartType, 'linemarkers');
+});

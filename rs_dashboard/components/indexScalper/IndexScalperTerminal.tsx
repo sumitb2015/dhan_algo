@@ -104,12 +104,13 @@ function validPane(x: unknown, fallback: PaneCfg): PaneCfg {
   const c = x as Partial<PaneCfg> | null;
   const iv = c?.interval;
   const interval = iv === '1' || iv === '3' || iv === '5' || iv === '15' || iv === '30' || iv === '60' ? iv : fallback.interval;
+  const chartType = c?.chartType === 'line' || c?.chartType === 'linemarkers' || c?.chartType === 'bar' || c?.chartType === 'candlestick' ? c.chartType : fallback.chartType;
   const src = c?.source as PaneCfg['source'] | undefined;
-  if (src?.kind === 'underlying' || src?.kind === 'future') return { source: { kind: src.kind }, interval };
+  if (src?.kind === 'underlying' || src?.kind === 'future') return { source: { kind: src.kind }, interval, ...(chartType ? { chartType } : {}) };
   if (src?.kind === 'option' && (src.type === 'CE' || src.type === 'PE') && Number.isFinite(src.strike)) {
-    return { source: { kind: 'option', type: src.type, strike: src.auto ? 0 : src.strike }, interval };
+    return { source: { kind: 'option', type: src.type, strike: src.auto ? 0 : src.strike }, interval, ...(chartType ? { chartType } : {}) };
   }
-  return { ...fallback, interval };
+  return { ...fallback, interval, ...(chartType ? { chartType } : {}) };
 }
 const RANGES: { label: string; days: number; focus: number }[] = [
   { label: '2M', days: 60, focus: 60 * 86400 }, { label: '1M', days: 30, focus: 30 * 86400 }, { label: '2W', days: 15, focus: 14 * 86400 },

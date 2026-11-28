@@ -6,7 +6,7 @@
 
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import {
-  createChart, createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, ColorType, CrosshairMode, LineStyle, PriceScaleMode,
+  createChart, createSeriesMarkers, BarSeries, CandlestickSeries, LineSeries, HistogramSeries, ColorType, CrosshairMode, LineStyle, PriceScaleMode,
   type IChartApi, type ISeriesApi, type IPriceLine, type UTCTimestamp, type SeriesType, type MouseEventParams, type Time,
   type ISeriesMarkersPluginApi, type SeriesMarker,
   type AutoscaleInfo,
@@ -137,6 +137,8 @@ interface Props {
   onArmAlerts?: () => void;
   /** The last bar's interval has ended (or the session is closed): market structure may confirm a swing on it. */
   lastBarClosed?: boolean;
+  /** Chart rendering style: candlesticks with OHLC wicks, OHLC bars, line of the close, or line with interval markers. Default: 'candlestick'. */
+  chartType?: 'candlestick' | 'bar' | 'line' | 'linemarkers';
   simBrackets?: Record<string, { tp?: number; sl?: number }>;
   onSetBracket?: (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }) => void;
   onCancelBracket?: (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => void;
@@ -225,6 +227,7 @@ function ScalperChart(props: Props) {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, showGrid = true, candleColorRule = 'off', showVolume = true, volumeMaLen = 20, legs, entrySpots,
     onExitLeg, onAdjustLeg, adjustLots = 1, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, ordersEnabled = true, onPlaceLimitOrder, onOpenTicket, onAlert, alertLines = NO_ALERT_LINES, onMoveAlert, onArmAlerts, lastBarClosed = false,
+    chartType = 'candlestick',
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, trails, onSetTrail, onCancelTrail, underlying = 'NIFTY', feedLotSize, lotSizes, orderQtyMult = 1,
     premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, resetSeq = 0, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false, premiumOrders,
   } = props;
@@ -234,7 +237,7 @@ function ScalperChart(props: Props) {
   const chrome = useChromeStable();
   const boxRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const candleRef = useRef<ISeriesApi<'Candlestick'> | ISeriesApi<'Bar'> | ISeriesApi<'Line'> | null>(null);
   const indSeriesRef = useRef<ISeriesApi<SeriesType>[]>([]);
   /** Last value sent per flat day-level series (index into indSeriesRef): a change repaints the whole series. */
   const flatLastRef = useRef(new Map<number, number | null>());
@@ -356,22 +359,38 @@ function ScalperChart(props: Props) {
       timeScale: { borderColor: chrome.baseline, timeVisible: true, secondsVisible: false, rightOffset: 6, barSpacing: 6 },
       autoSize: true,
     });
-    const candles = chart.addSeries(CandlestickSeries, {
-      upColor: UP, downColor: DOWN, borderUpColor: UP, borderDownColor: DOWN, wickUpColor: UP, wickDownColor: DOWN,
-      // The axis label carries the symbol name next to the last price, as on Dhan's chart.
-      priceLineVisible: true, lastValueVisible: true, title: symbolLabel.split(' · ')[0],
-      // Keep the position, TP / SL and working-order lines inside the price scale (as TradingView does), so a target
-      // or stop above / below the candles stays visible and draggable instead of sitting off-screen.
-      autoscaleInfoProvider: (original: () => AutoscaleInfo | null) => {
-        const base = original();
-        const extra = scaleLevelsRef.current;
-        if (!base || !base.priceRange || extra.length === 0) return base;
-        return { ...base, priceRange: {
-          minValue: Math.min(base.priceRange.minValue, ...extra),
-          maxValue: Math.max(base.priceRange.maxValue, ...extra),
-        } };
-      },
-    });
+    const autoscaleInfoProvider = (original: () => AutoscaleInfo | null) => {
+      const base = original();
+      const extra = scaleLevelsRef.current;
+      if (!base || !base.priceRange || extra.length === 0) return base;
+      return { ...base, priceRange: {
+        minValue: Math.min(base.priceRange.minValue, ...extra),
+        maxValue: Math.max(base.priceRange.maxValue, ...extra),
+      } };
+    };
+    const isLineType = chartType === 'line' || chartType === 'linemarkers';
+    const candles = isLineType
+      ? chart.addSeries(LineSeries, {
+          // The theme's brightest text colour (re-applied on a theme flip): a blue line was lost among the blue EMA /
+          // VWAP indicator lines.
+          color: chrome.textSecondary,
+          lineWidth: 2,
+          pointMarkersVisible: chartType === 'linemarkers',
+          pointMarkersRadius: 3,
+          priceLineVisible: true, lastValueVisible: true, title: symbolLabel.split(' · ')[0],
+          autoscaleInfoProvider,
+        })
+      : chartType === 'bar'
+      ? chart.addSeries(BarSeries, {
+          upColor: UP, downColor: DOWN, openVisible: true, thinBars: true,
+          priceLineVisible: true, lastValueVisible: true, title: symbolLabel.split(' · ')[0],
+          autoscaleInfoProvider,
+        })
+      : chart.addSeries(CandlestickSeries, {
+          upColor: UP, downColor: DOWN, borderUpColor: UP, borderDownColor: DOWN, wickUpColor: UP, wickDownColor: DOWN,
+          priceLineVisible: true, lastValueVisible: true, title: symbolLabel.split(' · ')[0],
+          autoscaleInfoProvider,
+        });
     // Volume: its own hidden scale on the price pane, in the bottom 20 % (TradingView's layout).
     const vol = chart.addSeries(HistogramSeries, { priceScaleId: 'vol', priceFormat: { type: 'volume' }, priceLineVisible: false, lastValueVisible: false }, 0);
     chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
@@ -385,9 +404,18 @@ function ScalperChart(props: Props) {
     const markerSigs = markerSigRef.current;
 
     chart.subscribeCrosshairMove((p: MouseEventParams<Time>) => {
-      const d = p.seriesData.get(candles) as { open: number; high: number; low: number; close: number } | undefined;
+      const d = p.seriesData.get(candles) as { open?: number; high?: number; low?: number; close?: number; value?: number } | undefined;
       if (!p.time || !d) { setHover(null); return; }
-      setHover({ o: d.open, h: d.high, l: d.low, c: d.close, t: Number(p.time) });
+      if (typeof d.open === 'number') {
+        setHover({ o: d.open, h: d.high!, l: d.low!, c: d.close!, t: Number(p.time) });
+      } else if (typeof d.value === 'number') {
+        // A line series carries only the close: the legend still shows the bar's OHLC. The series holds one point per
+        // bar, so the crosshair's logical index is the bar's index (checked by time; no scan of 13k bars per move).
+        const bs = barsRef.current, li = p.logical === undefined ? -1 : Math.round(p.logical);
+        const b = li >= 0 && bs[li]?.t + IST_SHIFT === Number(p.time) ? bs[li] : bs.find(x => x.t + IST_SHIFT === Number(p.time));
+        if (b) setHover({ o: b.o, h: b.h, l: b.l, c: b.c, t: Number(p.time) });
+        else setHover({ o: d.value, h: d.value, l: d.value, c: d.value, t: Number(p.time) });
+      }
     });
 
     chart.subscribeClick((p: MouseEventParams<Time>) => {
@@ -498,6 +526,7 @@ function ScalperChart(props: Props) {
       rightPriceScale: { borderColor: chrome.baseline },
       timeScale: { borderColor: chrome.baseline },
     });
+    if (chartType === 'line' || chartType === 'linemarkers') candleRef.current?.applyOptions({ color: chrome.textSecondary });
     paintDrawings();
   }, [chrome]);
 
@@ -596,7 +625,11 @@ function ScalperChart(props: Props) {
 
     if (tail) {
       try {
-        candles.update({ time: toTime(lastBar.t), open: lastBar.o, high: lastBar.h, low: lastBar.l, close: lastBar.c, ...candleColor(barColor, trend, bars.length - 1) });
+        if (chartType === 'line' || chartType === 'linemarkers') {
+          candles.update({ time: toTime(lastBar.t), value: lastBar.c } as never);
+        } else {
+          candles.update({ time: toTime(lastBar.t), open: lastBar.o, high: lastBar.h, low: lastBar.l, close: lastBar.c, ...candleColor(barColor, trend, bars.length - 1) });
+        }
         let k = 0;
         for (const { out } of outputs) {
           for (const s of out.series) {
@@ -624,7 +657,11 @@ function ScalperChart(props: Props) {
       return;
     }
 
-    candles.setData(bars.map((b, i) => ({ time: toTime(b.t), open: b.o, high: b.h, low: b.l, close: b.c, ...candleColor(barColor, trend, i) })));
+    if (chartType === 'line' || chartType === 'linemarkers') {
+      candles.setData(bars.map(b => ({ time: toTime(b.t), value: b.c })));
+    } else {
+      candles.setData(bars.map((b, i) => ({ time: toTime(b.t), open: b.o, high: b.h, low: b.l, close: b.c, ...candleColor(barColor, trend, i) })));
+    }
 
     if (sig !== sigRef.current) {
       for (const s of indSeriesRef.current) { try { chart.removeSeries(s); } catch { /* gone */ } }

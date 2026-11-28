@@ -1850,4 +1850,36 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(sends()).toHaveLength(1);
     expect(state.blocked).toEqual([]);
   });
+
+  test('chart type: candlestick / bar / line / line with markers, per pane, remembered; the line legend still shows the bar OHLC', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    const pane = page.getByTestId('chart-pane-0');
+    await expect(pane).toBeVisible({ timeout: 60_000 });
+    const types = pane.getByRole('group', { name: 'Chart 1 type' });
+    await expect(types.getByRole('button', { name: 'Candlestick chart' })).toHaveAttribute('aria-pressed', 'true');
+    const legend = pane.locator('div.font-mono').first();
+    await expect(legend).toContainText('C', { timeout: 30_000 });
+    for (const [name, saved] of [['Bar chart', 'bar'], ['Line chart', 'line'], ['Line with markers', 'linemarkers']] as const) {
+      await types.getByRole('button', { name }).click();
+      await expect(types.getByRole('button', { name })).toHaveAttribute('aria-pressed', 'true');
+      await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('indexScalper.layout.v2') ?? '{}').panes?.[0]?.chartType)).toBe(saved);
+      await expect(pane.locator('canvas').first()).toBeVisible();
+      if (process.env.CHART_TYPE_SHOTS) await pane.screenshot({ path: `${process.env.CHART_TYPE_SHOTS}/${saved}.png` });
+    }
+    // crosshair on a bar of the line chart: the legend reads that bar's open, high, low and close (not the close four times)
+    const box = (await pane.locator('canvas').first().boundingBox())!;
+    // a history bar (the bars fill the right part of the pane; the mock's live ticks build a flat bar at the far right)
+    await page.mouse.move(box.x + box.width * 0.78, box.y + box.height * 0.5);
+    await expect.poll(async () => {
+      const nums = ((await legend.innerText()).match(/[\d,]+\.\d+/g) ?? []).slice(0, 4);
+      return nums.length === 4 && new Set(nums).size > 1;
+    }).toBe(true);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByTestId('chart-pane-0').getByRole('group', { name: 'Chart 1 type' }).getByRole('button', { name: 'Line with markers' }))
+      .toHaveAttribute('aria-pressed', 'true', { timeout: 60_000 });
+    expect(state.blocked).toEqual([]);
+  });
 });

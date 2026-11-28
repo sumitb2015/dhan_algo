@@ -8,7 +8,7 @@
 
 import type { CandleColorRule } from '@/lib/indexScalperCandleColor';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Loader2 } from 'lucide-react';
+import { CandlestickChart, Loader2, TrendingUp } from 'lucide-react';
 import ScalperChart, { DRAW_KEY, type ChartViewport, type DrawTool } from './ScalperChart';
 import QuickStrikeOverlay from './QuickStrikeOverlay';
 import type { QuickSettings } from '@/lib/indexScalperQuickTrade';
@@ -30,7 +30,31 @@ import { CONDITIONS, alertBroker, type InstrumentSpec } from '@/lib/priceAlerts'
 import { toast } from 'sonner';
 import type { TrailState } from '@/lib/indexScalperTrail';
 
-export interface PaneCfg { source: ChartSource; interval: Interval }
+export type ChartType = 'candlestick' | 'bar' | 'line' | 'linemarkers';
+
+function OhlcBarIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <line x1="8" y1="2" x2="8" y2="14" />
+      <line x1="4.5" y1="9" x2="8" y2="9" />
+      <line x1="8" y1="5" x2="11.5" y2="5" />
+    </svg>
+  );
+}
+
+function LineMarkersIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <polyline points="2,12 6,8 10,10 14,4" />
+      <circle cx="2" cy="12" r="1.5" fill="currentColor" stroke="none" />
+      <circle cx="6" cy="8" r="1.5" fill="currentColor" stroke="none" />
+      <circle cx="10" cy="10" r="1.5" fill="currentColor" stroke="none" />
+      <circle cx="14" cy="4" r="1.5" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export interface PaneCfg { source: ChartSource; interval: Interval; chartType?: ChartType }
 
 export const INTERVALS: Interval[] = ['1', '3', '5', '15', '30', '60'];
 const intervalLabel = (i: Interval) => (i === '60' ? '1h' : `${i}m`);
@@ -281,6 +305,53 @@ function ChartPane(p: Props) {
           </select>
         )}
         <span className="w-px h-4 bg-zinc-800 shrink-0" />
+        <div role="group" aria-label={`Chart ${index + 1} type`} className="flex rounded border border-zinc-700 overflow-hidden">
+          <button
+            type="button"
+            aria-pressed={(cfg.chartType ?? 'candlestick') === 'candlestick'}
+            aria-label="Candlestick chart"
+            title="Candlestick chart"
+            onClick={() => onCfgChange(index, { ...cfg, chartType: 'candlestick' })}
+            className={cn('h-6 px-1.5 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
+              (cfg.chartType ?? 'candlestick') === 'candlestick' ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}
+          >
+            <CandlestickChart className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            aria-pressed={cfg.chartType === 'bar'}
+            aria-label="Bar chart"
+            title="Bar chart"
+            onClick={() => onCfgChange(index, { ...cfg, chartType: 'bar' })}
+            className={cn('h-6 px-1.5 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
+              cfg.chartType === 'bar' ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}
+          >
+            <OhlcBarIcon className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            aria-pressed={cfg.chartType === 'line'}
+            aria-label="Line chart"
+            title="Line chart"
+            onClick={() => onCfgChange(index, { ...cfg, chartType: 'line' })}
+            className={cn('h-6 px-1.5 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
+              cfg.chartType === 'line' ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}
+          >
+            <TrendingUp className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            aria-pressed={cfg.chartType === 'linemarkers'}
+            aria-label="Line with markers"
+            title="Line with markers"
+            onClick={() => onCfgChange(index, { ...cfg, chartType: 'linemarkers' })}
+            className={cn('h-6 px-1.5 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
+              cfg.chartType === 'linemarkers' ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}
+          >
+            <LineMarkersIcon className="w-3.5 h-3.5" />
+          </button>
+        </div>
+        <span className="w-px h-4 bg-zinc-800 shrink-0" />
         <div role="group" aria-label={`Chart ${index + 1} timeframe`} className="flex items-center">
           {INTERVALS.map(i => (
             <button key={i} type="button" aria-pressed={interval === i} onClick={() => onCfgChange(index, { ...cfg, interval: i })}
@@ -308,7 +379,8 @@ function ChartPane(p: Props) {
       </div>
       <div className="relative flex-1 min-w-0 min-h-0">
         <ScalperChart
-          key={drawKey}
+          key={`${drawKey}:${cfg.chartType ?? 'candlestick'}`}
+          chartType={cfg.chartType ?? 'candlestick'}
           bars={bars} indicators={p.indicators} tool={p.tool} onToolDone={p.onToolDone} clearToken={p.clearToken}
           logScale={p.logScale} pctScale={p.pctScale} autoScale={p.autoScale} showGrid={p.showGrid} candleColorRule={p.candleColorRule} showVolume={p.showVolume} volumeMaLen={p.volumeMaLen}
           legs={paneLegs} entrySpots={p.entrySpots} onExitLeg={p.onExitLeg} onAdjustLeg={quickOn || isOption ? p.onAdjustLeg : undefined} adjustLots={p.stepLots} exitingId={p.exitingId}
