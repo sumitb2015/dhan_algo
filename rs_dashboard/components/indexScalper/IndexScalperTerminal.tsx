@@ -47,7 +47,21 @@ import { guardScopeIds, mtmGuardTrip, readMtmGuard, MTM_GUARD_DEFAULTS, type Mtm
 import IndicatorPicker from './IndicatorPicker';
 import dynamic from 'next/dynamic';
 
-const CumulativeOIModal = dynamic(() => import('@/components/CumulativeOIModal'), { ssr: false });
+// Loaded on first use. Until the code arrives, a layer says so at once: with no fallback a cold first click showed
+// nothing for seconds (the button lit, no window), which read as "Cum OI does not open". It ignores the pointer, so the
+// button still toggles it off. Hovering / focusing the button fetches the code early (preloadCumOi).
+const preloadCumOi = (crude: boolean) => {
+  void import('@/components/CumulativeOIModal');
+  void (crude ? import('@/components/CrudeOilCumulativeOITab') : import('@/components/OptionsCumulativeOITab'));
+};
+const CumulativeOIModal = dynamic(() => import('@/components/CumulativeOIModal'), {
+  ssr: false,
+  loading: () => (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-oncolor-dark/60 pointer-events-none" role="status">
+      <p className="rounded-lg border border-zinc-800 bg-zinc-950 px-4 py-3 text-xs text-zinc-300">Loading cumulative OI…</p>
+    </div>
+  ),
+});
 import { useIndexScalperFeed } from './useIndexScalperFeed';
 import {
   migrateIndicatorsV1, newIndicator, withStructure, withStructureLine, withVolume, type IndicatorInstance, type IndicatorKind,
@@ -2328,6 +2342,7 @@ export default function IndexScalperTerminal() {
           <button type="button" aria-pressed={cumOiOpen} aria-label="Cumulative OI"
             disabled={underlying === 'SENSEX'}
             title={underlying === 'SENSEX' ? 'Cumulative OI has no SENSEX view yet (NIFTY and MCX crude only); the chart\'s OI profile works for SENSEX' : 'Cumulative OI: call and put open interest across strikes'}
+            onPointerEnter={() => preloadCumOi(isMcx(underlying))} onFocus={() => preloadCumOi(isMcx(underlying))}
             onClick={() => setCumOiOpen(v => !v)} className={cn(btn, 'flex items-center gap-1', cumOiOpen && 'bg-zinc-800 text-white')}>
             <AreaChart className="w-4 h-4" aria-hidden /><span className="hidden min-[2200px]:inline">Cum OI</span>
           </button>

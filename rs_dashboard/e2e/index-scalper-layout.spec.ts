@@ -1882,4 +1882,28 @@ test.describe('Index Scalper layout + option charts', () => {
       .toHaveAttribute('aria-pressed', 'true', { timeout: 60_000 });
     expect(state.blocked).toEqual([]);
   });
+
+  test('Cum OI: a click shows something at once (a loading layer while the window\'s code loads), then the window; a second click closes it', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    const btn = page.getByRole('button', { name: 'Cumulative OI', exact: true });
+    await expect(btn).toBeEnabled({ timeout: 60_000 });
+    // a slow first load: every script fetched after the click arrives 4 s late (the window's code is fetched on first use)
+    let slow = false;
+    await page.route('**/_next/static/**', async route => { if (slow) await new Promise(r => setTimeout(r, 4_000)); await route.fallback(); });
+    slow = true;
+    await btn.click();
+    await expect(btn).toHaveAttribute('aria-pressed', 'true');
+    const dialog = page.getByRole('dialog', { name: 'Cumulative OI' });
+    // never a lit button over an unchanged page: the loading layer or the window within a second of the click
+    await expect(page.getByText('Loading cumulative OI…').first().or(dialog)).toBeVisible({ timeout: 1_000 });
+    await expect(dialog).toBeVisible({ timeout: 30_000 });
+    slow = false;
+    await expect(dialog.getByRole('heading')).toHaveText('Cumulative OI · NIFTY');
+    await btn.click({ force: true }); // the modal's backdrop covers the header: the toggle still closes it
+    await expect(dialog).toBeHidden();
+    expect(state.blocked).toEqual([]);
+  });
 });
