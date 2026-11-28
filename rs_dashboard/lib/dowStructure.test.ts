@@ -129,3 +129,14 @@ test('Dow Structure matches the terminal on NIFTY 30-minute: all 195 bars (hashe
   // the BOS bars, where the script itself plots nothing (the one-bar gap in the line)
   assert.equal(dowKeyLevel(dowStructure(NIFTY, { left: 3, right: 3 })).filter((v, i, a) => v === null && i > 0 && a[i - 1] !== null).length > 0, true);
 });
+
+test('chart: the last bar counts once its interval has ended (lastClosed), never while it is forming', () => {
+  const ind = { ...newIndicator('dow', 'd'), params: { left: 1, right: 1, hhhl: 0, wick: 0, swings: 1, events: 1, level: 1 } };
+  const keyLevel = (o: ReturnType<typeof computeIndicator>) => o.series.at(-1)!.values;
+  // bar 7 (the last) breaks the pullback low 11 -> CHoCH down; the forming read leaves it out, the closed read has it
+  const forming = computeIndicator(BARS, ind);
+  const closed = computeIndicator(BARS, ind, { lastClosed: true });
+  const all = dowKeyLevel(dowStructure(BARS, { left: 1, right: 1 }));
+  assert.deepEqual(keyLevel(closed), all);
+  assert.notDeepEqual(keyLevel(forming), all);
+});

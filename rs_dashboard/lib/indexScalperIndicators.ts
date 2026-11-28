@@ -468,7 +468,7 @@ export function lastBarClosed(bars: Bar[], intervalMin: number, underlying: Unde
 
 /** The indicator's series, with its user-chosen line width (if any) applied to every line (never to a histogram).
  *  `lastClosed`: the last bar's interval has ended (lastBarClosed); default false = it may still be forming. Only market
- *  structure reads it (a forming bar never confirms a swing). */
+ *  structure and Dow Structure read it (a forming bar never confirms a swing). */
 export function computeIndicator(bars: Bar[], ind: IndicatorInstance, opts: { lastClosed?: boolean } = {}): IndicatorOutput {
   let out = computeSeries(bars, ind, !!opts.lastClosed);
   const w = validWidth(ind.width);
@@ -509,11 +509,13 @@ export function shadowOf(s: OutSeries): OutSeries {
 /** Dow Structure drawn with line series: two hidden series carry the swing labels (markers above highs / below lows), BOS
  *  (dashed) and CHoCH (solid) segments are packed into DOW_LANES lanes each (a lane holds segments that do not overlap,
  *  each ending in a break; the label is a marker at the segment's middle bar), and the key level is one line coloured by
- *  the trend with a gap where it moves. The forming (last) bar is never processed: the script runs on closed bars only. */
-function dowSeries(bars: Bar[], ind: IndicatorInstance, label: string, p: (k: string) => number): IndicatorOutput {
+ *  the trend with a gap where it moves. A forming (last) bar is not processed: the script runs on closed bars only. Once
+ *  its interval has ended (`lastClosed`, also all day after the close) it counts, as on the terminal and as Market
+ *  structure does. */
+function dowSeries(bars: Bar[], ind: IndicatorInstance, label: string, p: (k: string) => number, lastClosed: boolean): IndicatorOutput {
   const right = p('right');
   const hhhl = p('hhhl') === 1;
-  const d = dowStructure(bars, { left: p('left'), right, method: hhhl ? 'hhhl' : 'pullback', breakBy: p('wick') === 1 ? 'wick' : 'close', lastClosedIndex: bars.length - 2 });
+  const d = dowStructure(bars, { left: p('left'), right, method: hhhl ? 'hhhl' : 'pullback', breakBy: p('wick') === 1 ? 'wick' : 'close', lastClosedIndex: lastClosed ? bars.length - 1 : bars.length - 2 });
   const { swings, events } = dowDrawings(bars, d, right);
   const n = bars.length;
   const nulls = () => bars.map(() => null as number | null);
@@ -778,7 +780,7 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance, lastClosed: boolean)
       return { pane: 'price', series };
     }
     case 'dow':
-      return dowSeries(bars, ind, label, p);
+      return dowSeries(bars, ind, label, p, lastClosed);
     case 'donchian': {
       const dc = donchian(bars, p('period'));
       return {
