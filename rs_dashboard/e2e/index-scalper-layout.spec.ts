@@ -99,7 +99,19 @@ async function mockApi(page: Page, state: State) {
     if (p === '/api/index-scalper/lots') return json(route, { success: true, lots: Object.fromEntries((u.searchParams.get('ids') ?? '').split(',').filter(Boolean).map(id => [id, 65])) });
     if (p === '/api/index-scalper/holdings') return json(route, { success: true, data: [] });
     if (p === '/api/scalper/fast-order') { state.calls.push({ path: p, body }); return json(route, { success: true, order_id: '7001' }); }
-    if (method === 'POST' && (p === '/api/live-indices' || p === '/api/live-equity')) { state.bridgeStarts.push(p); return json(route, { success: true }); }
+    if (method === 'POST' && (p === '/api/live-indices' || p === '/api/live-equity' || p === '/api/daily-market')) { state.bridgeStarts.push(p); return json(route, { success: true }); }
+    if (p === '/api/nifty-contribution' && method === 'GET') {
+      // 3 up, 1 down, 1 flat, 1 unpriced: points already sorted the way the route sorts them
+      const row = (symbol: string, changePct: number, weightPct: number, points: number) =>
+        ({ symbol, name: symbol, ltp: 1000, prevClose: 1000, changePct, weightPct, points });
+      const rows = [row('HDFCBANK', 1.5, 12, 45.2), row('ICICIBANK', 0.8, 9, 18.1), row('TCS', 0.2, 4, 2.3), row('ITC', 0, 3, 0), row('RELIANCE', -1.2, 9, -27.5)];
+      const live = { state: 'live', updatedAt: Date.now(), ageMs: 500 };
+      return json(route, { success: true, serverTime: Date.now(), weightsAsOf: '2026-11-01',
+        feeds: { stocks: live, indices: live },
+        nifty: { ltp: 25038, prevClose: 25000, change: 38, changePct: 0.152 },
+        result: { rows, pullers: rows.slice(0, 3), draggers: [rows[4]], net: 38.1, positiveSum: 65.6, negativeSum: -27.5,
+          residual: 0.1, residualFlag: false, missing: ['SBIN'], effectiveContributors: 2.5, concentration: 'moderate' } });
+    }
     if (p === '/api/index-scalper/market-watch/stream') {
       // one SSE frame per connection (EventSource reconnects on its own); stamped with the page's session clock
       const want = (u.searchParams.get('want') ?? '').split(',');
@@ -1636,6 +1648,43 @@ test.describe('Index Scalper layout + option charts', () => {
     await expect(stk).toHaveCount(0);
     await page.getByRole('button', { name: 'Top indices', exact: true }).click();
     await expect(idx).toHaveCount(0);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('Nifty A/D and Contribution: header buttons open watch windows from /api/nifty-contribution, start its bridges, place nothing', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+
+    await page.getByRole('button', { name: 'Nifty advance decline', exact: true }).click();
+    const ad = page.getByTestId('nifty-breadth');
+    await expect(ad).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId('nifty-breadth-state')).toHaveText('LIVE');
+    await expect(page.getByTestId('nifty-breadth-adv')).toHaveText('3');
+    await expect(page.getByTestId('nifty-breadth-dec')).toHaveText('1');
+    await expect(page.getByTestId('nifty-breadth-unch')).toHaveText('1');
+    await expect(page.getByTestId('nifty-breadth-ratio')).toHaveText('3.00');
+    await expect(ad).toContainText('1 stock not priced'); // the unpriced stock is not counted as unchanged
+    await ad.getByRole('button', { name: 'Show stocks' }).click();
+    await expect(ad.locator('tbody tr')).toHaveCount(5);
+    await expect(ad.locator('tbody tr').first()).toContainText('HDFCBANK');
+
+    await page.getByRole('button', { name: 'Nifty contribution', exact: true }).click();
+    const c = page.getByTestId('nifty-contrib');
+    await expect(page.getByTestId('nifty-contrib-net')).toHaveText('+38.1');
+    await expect(page.getByTestId('nifty-contrib-pullers')).toContainText('HDFCBANK');
+    await expect(page.getByTestId('nifty-contrib-pullers')).toContainText('+45.2');
+    await expect(page.getByTestId('nifty-contrib-draggers')).toContainText('RELIANCE');
+    await expect(page.getByTestId('nifty-contrib-draggers')).toContainText('-27.5');
+    await expect(c.getByRole('link', { name: /Full view/ })).toHaveAttribute('href', '/nifty-contribution');
+
+    expect([...new Set(state.bridgeStarts)].sort()).toEqual(['/api/daily-market', '/api/live-indices']);
+    expect(state.calls).toEqual([]); // watch-only
+    await c.getByRole('button', { name: 'Close Nifty 50 Contribution' }).click();
+    await expect(c).toHaveCount(0);
+    await page.getByRole('button', { name: 'Nifty advance decline', exact: true }).click();
+    await expect(ad).toHaveCount(0);
     expect(state.blocked).toEqual([]);
   });
   test('default TP / SL (on, 30 % / 20 %): a SIM buy at market gets its paper target and stop from the entry premium', async ({ page, context }) => {

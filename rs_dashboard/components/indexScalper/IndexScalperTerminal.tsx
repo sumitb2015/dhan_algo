@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AreaChart, OctagonX, BarChart3, Building2, CandlestickChart, Columns2, Gauge, LayoutList, Square, AlignRight, Crosshair, Settings2, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Scaling, Target, Trash2, TrendingUp, Volume2, VolumeX, Zap,
-  Compass,
+  Compass, Scale, ChartBarDecreasing,
 } from 'lucide-react';
 import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { useTabLeader } from '@/hooks/useTabLeader';
@@ -24,6 +24,8 @@ import NavBar from '@/components/NavBar';
 import DataChip from '@/components/DataChip';
 import MarketWatchWindow from './MarketWatchWindow';
 import { useMarketWatch } from './useMarketWatch';
+import { useNiftyContribution } from './useNiftyContribution';
+import { NiftyBreadthWindow, NiftyContributionWindow } from './NiftyBreadthWindows';
 import { indexRows, stockRows } from '@/lib/indexScalperMarketWatch';
 import IstClock from './IstClock';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
@@ -231,6 +233,10 @@ export default function IndexScalperTerminal() {
   const watchStkRows = useMemo(() => stockRows(watch.data.stocks?.quotes), [watch.data.stocks]);
   const watchIdxFlash = useMemo(() => prefixFlash(watch.flash, 'i:'), [watch.flash]);
   const watchStkFlash = useMemo(() => prefixFlash(watch.flash, 's:'), [watch.flash]);
+  // Nifty 50 Advance / Decline and Contribution windows: one poll of /api/nifty-contribution while either is open.
+  const [watchAd, setWatchAd] = useState(false);
+  const [watchContrib, setWatchContrib] = useState(false);
+  const niftyContrib = useNiftyContribution(watchAd || watchContrib);
   // One switch: the Scalper widget is open <=> one-click is armed (Buy CE / Buy PE and the chain's B / S trade at once).
   // Two flags drifted apart: closing the widget with its X left one-click armed with nothing on screen saying so.
   const [scalperOn, setScalperOn] = useState(false);
@@ -2310,6 +2316,14 @@ export default function IndexScalperTerminal() {
             onClick={() => setWatchStk(v => !v)} className={cn(btn, 'flex items-center gap-1', watchStk && 'bg-zinc-800 text-white')}>
             <Building2 className="w-4 h-4" aria-hidden /><span className="hidden min-[2200px]:inline">Top 10</span>
           </button>
+          <button type="button" aria-pressed={watchAd} aria-label="Nifty advance decline" title="Advance / Decline: how many Nifty 50 stocks are up vs down, live, with today's A/D line (watch only)"
+            onClick={() => setWatchAd(v => !v)} className={cn(btn, 'flex items-center gap-1', watchAd && 'bg-zinc-800 text-white')}>
+            <Scale className="w-4 h-4" aria-hidden /><span className="hidden min-[2200px]:inline">A/D</span>
+          </button>
+          <button type="button" aria-pressed={watchContrib} aria-label="Nifty contribution" title="Nifty contribution: index points each Nifty 50 stock is adding or taking away, live (watch only)"
+            onClick={() => setWatchContrib(v => !v)} className={cn(btn, 'flex items-center gap-1', watchContrib && 'bg-zinc-800 text-white')}>
+            <ChartBarDecreasing className="w-4 h-4" aria-hidden /><span className="hidden min-[2200px]:inline">Contrib</span>
+          </button>
           <button type="button" aria-pressed={cumOiOpen} aria-label="Cumulative OI"
             disabled={underlying === 'SENSEX'}
             title={underlying === 'SENSEX' ? 'Cumulative OI has no SENSEX view yet (NIFTY and MCX crude only); the chart\'s OI profile works for SENSEX' : 'Cumulative OI: call and put open interest across strikes'}
@@ -2482,6 +2496,14 @@ export default function IndexScalperTerminal() {
       {watchStk && (
         <MarketWatchWindow kind="stocks" rows={watchStkRows} updatedAt={watch.data.stocks?.updated_at ?? null}
           flash={watchStkFlash} now={watch.now} initial={{ x: topMiddleX('right'), y: belowHeaderY() }} onClose={() => setWatchStk(false)} />
+      )}
+      {watchAd && (
+        <NiftyBreadthWindow data={niftyContrib.data} error={niftyContrib.error} history={niftyContrib.history}
+          initial={{ x: Math.max(64, topMiddleX('left') - 372), y: belowHeaderY() }} onClose={() => setWatchAd(false)} />
+      )}
+      {watchContrib && (
+        <NiftyContributionWindow data={niftyContrib.data} error={niftyContrib.error}
+          initial={{ x: Math.max(64, Math.min(topMiddleX('right') + 372, window.innerWidth - 368)), y: belowHeaderY() }} onClose={() => setWatchContrib(false)} />
       )}
       {chainOpen && (
         <OptionChainPanel feed={feed} onClose={() => setChainOpen(false)} onPick={c => { setTicket(c); setTicketMsg(null); }}
