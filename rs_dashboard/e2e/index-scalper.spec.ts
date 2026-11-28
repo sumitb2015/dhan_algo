@@ -176,7 +176,21 @@ test.describe('Index Scalper', () => {
     await expect(page.getByRole('dialog', { name: 'Indicators' }).getByRole('button', { name: 'Line width 3' })).toHaveAttribute('aria-pressed', 'true');
     await page.getByRole('button', { name: 'Done' }).click();
 
-    await page.getByRole('button', { name: 'Remove indicator' }).last().click({ force: true });
+    // hidden with the legend's eye: the picker lists it under Hidden, not On chart; Show puts it back
+    await rsiRow.hover();
+    await rsiRow.getByRole('button', { name: 'Hide indicator' }).click({ force: true });
+    await page.getByRole('button', { name: /Indicators/ }).click();
+    const picker = page.getByRole('dialog', { name: 'Indicators' });
+    await expect(picker.getByTestId('picker-hidden').getByText('RSI (9)')).toBeVisible();
+    await expect(picker.getByTestId('picker-on-chart').getByText('RSI (9)')).toHaveCount(0);
+    if (process.env.ISX_SHOT2) await picker.screenshot({ path: process.env.ISX_SHOT2 });
+    await picker.getByRole('button', { name: 'Show RSI (9)' }).click();
+    await expect(picker.getByTestId('picker-on-chart').getByText('RSI (9)')).toBeVisible();
+    await expect(picker.getByTestId('picker-hidden')).toHaveCount(0);
+    // Remove here deletes it: gone from the picker and the chart legend
+    await picker.getByRole('button', { name: 'Remove RSI (9)' }).click();
+    await expect(picker.getByText('RSI (9)')).toHaveCount(0);
+    await page.keyboard.press('Escape');
     await expect(page.getByText('RSI (9)')).toHaveCount(0);
     expect(state.blocked).toEqual([]);
   });
