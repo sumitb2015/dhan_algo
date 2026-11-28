@@ -44,7 +44,8 @@ async function mockApi(page: Page, state: State) {
     }
     if (p === '/api/options/live') {
       if (method === 'POST') return json(route, { success: true });
-      const strikes = Object.fromEntries(STRIKES.map(k => [String(k), {
+      // 25450: listed in the expiry but outside the bridge's live window (no ticks)
+      const strikes = Object.fromEntries(STRIKES.filter(k => k !== 25450).map(k => [String(k), {
         strike: k,
         ce: { ltp: k === SPOT ? CE : 100 + (SPOT - k) / 2, volume: 100_000, oi: 1_000_000, prev_oi: 900_000, oi_chg_pct: 11 },
         pe: { ltp: k === SPOT ? PE : 100 + (k - SPOT) / 2, volume: 120_000, oi: 1_000_000, prev_oi: 900_000, oi_chg_pct: 11 },
@@ -107,6 +108,14 @@ test.describe('Index Scalper Straddle pane', () => {
     await right.getByLabel('Chart 2 strike').selectOption('25400');
     await expect(right).toContainText('NIFTY 25400 STRADDLE');
     await expect.poll(() => state.candleReqs.some(q => q.includes('ceId=125400&peId=225400'))).toBe(true);
+    await expect(right.getByTestId('straddle-sell')).toBeEnabled();
+    // a strike with no live ticks: Sell / Buy are greyed out (not a click that is then refused)
+    await right.getByLabel('Chart 2 strike').selectOption('25450');
+    await expect(right).toContainText('NIFTY 25450 STRADDLE');
+    await expect(right.getByTestId('straddle-sell')).toBeDisabled();
+    await expect(right.getByTestId('straddle-buy')).toBeDisabled();
+    await expect(right.getByTestId('straddle-sell')).toHaveAttribute('title', /No live price/);
+    await right.getByLabel('Chart 2 strike').selectOption('25400');
     // a reload keeps the straddle pane (a picked strike is kept)
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(page.getByTestId('chart-pane-1')).toContainText('NIFTY 25400 STRADDLE', { timeout: 60_000 });

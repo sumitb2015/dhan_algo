@@ -84,7 +84,11 @@ export default function StraddleControls(p: StraddleControlsProps) {
     return true;
   };
   const trailKind: TsTrailKind | 'none' = rules.trail?.kind ?? 'none';
-  const canTrade = !book && p.strike !== null && !!p.ids?.ceId && !!p.ids?.peId && !p.busy;
+  // Both legs need a live price (the bridge's, never a snapshot): with the market closed or a strike outside the bridge
+  // window the buttons are greyed out instead of refusing on click.
+  const noLive = p.livePremium === null;
+  const canTrade = !book && p.strike !== null && !!p.ids?.ceId && !!p.ids?.peId && !p.busy && !noLive;
+  const tradeTitle = noLive ? 'No live price on both legs (market closed, or this strike is outside the live window)' : undefined;
   const v = p.view;
   const fmt = (n: number | null | undefined, d = 2) => (n == null || !Number.isFinite(n) ? '—' : n.toFixed(d));
 
@@ -140,9 +144,9 @@ export default function StraddleControls(p: StraddleControlsProps) {
                 if (!Number.isInteger(n) || n < 1 || n > p.maxLots) { p.onError(`Lots must be 1 to ${p.maxLots}`); return false; }
                 setLots(n); savePref(LOTS_KEY, String(n)); return true;
               }} />
-              <button type="button" disabled={!canTrade} data-testid="straddle-sell" onClick={() => p.strike !== null && p.ids && p.onEnter('S', p.strike, p.ids, lots, draftRules, p.intervalMin)}
+              <button type="button" disabled={!canTrade} title={tradeTitle} data-testid="straddle-sell" onClick={() => p.strike !== null && p.ids && p.onEnter('S', p.strike, p.ids, lots, draftRules, p.intervalMin)}
                 className={cn('flex-1 h-7 rounded bg-rose-600 hover:bg-rose-500 text-oncolor text-xs font-bold disabled:opacity-40', p.real && 'ring-1 ring-rose-300', FOCUS)}>Sell straddle</button>
-              <button type="button" disabled={!canTrade} data-testid="straddle-buy" onClick={() => p.strike !== null && p.ids && p.onEnter('B', p.strike, p.ids, lots, draftRules, p.intervalMin)}
+              <button type="button" disabled={!canTrade} title={tradeTitle} data-testid="straddle-buy" onClick={() => p.strike !== null && p.ids && p.onEnter('B', p.strike, p.ids, lots, draftRules, p.intervalMin)}
                 className={cn('flex-1 h-7 rounded bg-emerald-600 hover:bg-emerald-500 text-oncolor text-xs font-bold disabled:opacity-40', p.real && 'ring-1 ring-rose-300', FOCUS)}>Buy straddle</button>
               {p.busy && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-400" aria-label="Placing" />}
             </div>
