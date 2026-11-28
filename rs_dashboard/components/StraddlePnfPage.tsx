@@ -1,12 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, Bot, Boxes, ChartScatter, Crosshair, Eye, Rewind, EyeOff, Flag, LocateFixed, XCircle, Volume2, VolumeX, Zap, ChevronDown, ChevronUp, SlidersHorizontal, type LucideIcon } from 'lucide-react';
+import { Bell, Bot, Boxes, FlaskConical, ChartScatter, Crosshair, Eye, Rewind, EyeOff, Flag, LocateFixed, XCircle, Volume2, VolumeX, Zap, ChevronDown, ChevronUp, SlidersHorizontal, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from './NavBar';
 import DataChip from './DataChip';
 import PnfPanel from './straddlePnf/PnfPanel';
 import AlertLog, { type LogEntry } from './straddlePnf/AlertLog';
+import RenkoBacktestPanel from './straddlePnf/RenkoBacktestPanel';
 import InstrumentBar from './straddlePnf/InstrumentBar';
 import { effectiveInterval, hasLongIntervals, intervalLabel, isTickInterval, tickBucketSec } from '@/lib/straddlePnfInterval';
 import { calculateAutoBlockSize, type AutoBlockResult } from '@/lib/renkoAutoBrick';
@@ -298,6 +299,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const recenterNow = () => { recenterViewRef.current = true; setRecenter(n => n + 1); };
   const [log, setLog] = useState<LogEntry[]>([]);
   const [logOpen, setLogOpen] = useState(false);
+  const [backtestOpen, setBacktestOpen] = useState(false);
   const [tradeOpen, setTradeOpen] = useState(true);
   const [booksOpen, setBooksOpen] = useState(false);
   const [scalperOpen, setScalperOpen] = useState(false);
@@ -1697,6 +1699,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
             <IconButton icon={Rewind} label={replay.active ? 'Close bar replay' : 'Bar replay'} onClick={h.toggleReplay} pressed={replay.active} />
             <IconButton icon={LocateFixed} label="Re-center" onClick={h.recenterNow} />
             <IconButton icon={Bell} label="Alert log" onClick={h.toggleLog} pressed={logOpen} badge={logCount} />
+            {renko && <IconButton icon={FlaskConical} label="Backtest: Renko + Supertrend option selling" onClick={() => setBacktestOpen(true)} pressed={backtestOpen} />}
             <IconButton icon={muted ? VolumeX : Volume2} label={muted ? 'Unmute alert sound' : 'Mute alert sound'} onClick={h.toggleMute} pressed={muted} />
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <IconButton icon={Zap} label={tradeOpen ? 'Hide trade desk' : 'Show trade desk'} onClick={h.toggleTradeOpen} pressed={tradeOpen} />
@@ -1708,7 +1711,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // seg / boxShort are pure helpers rebuilt every render; h is stable
   // eslint-disable-next-line react-hooks/exhaustive-deps
   ), [chartView, renko, dual, active, settings, settings2, label1, label2, activeLocked, activeSettings, longIntervals, overlayShown, shownOverlay,
-      vwapAllowed, indexNoVwap, coverShown, stLocked, supertrendShown, workingCount, replay.active, logOpen, logCount, muted, tradeOpen,
+      vwapAllowed, indexNoVwap, coverShown, stLocked, supertrendShown, workingCount, replay.active, logOpen, backtestOpen, logCount, muted, tradeOpen,
       scalperOpen, activeTarget.kind, autoBlock]);
 
   return (
@@ -1807,6 +1810,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
 
       <div className="relative flex-1 min-h-0 flex flex-col gap-3 px-4 pt-2 pb-2">
         {loadErrors.map(e => <p key={e as string} role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{e}</p>)}
+        {backtestOpen && <RenkoBacktestPanel onClose={() => setBacktestOpen(false)} />}
         {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind), renko)} renko={renko} /></div>}
         {!tradeBarShown && <div className="shrink-0 self-center px-2 py-1 rounded-lg border border-zinc-800 bg-zinc-900">{styleBar}</div>}
         <div
