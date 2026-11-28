@@ -56,7 +56,7 @@ export type DailyAtrResult = {
  * Calculates Daily ATR from 1-minute bars by grouping bars into trading sessions.
  * Returns null if fewer than 1 session can be constructed.
  */
-export function calculateDailyAtr(bars: Bar[], maxSessions = 5): DailyAtrResult | null {
+export function calculateDailyAtr(bars: Bar[], maxSessions = 14): DailyAtrResult | null {
   if (bars.length === 0) return null;
   // Group into sessions
   const sessions: { high: number; low: number; close: number }[] = [];
@@ -141,7 +141,7 @@ export function calculateAutoBlockSize(opts: {
   const blocks = Math.max(1, Math.round(sessionHours * (60 / targetMinutes)));
   const tick = boxTick && boxTick > 0 ? boxTick : (sessionHours === 14 ? 1.0 : 0.05);
 
-  const atrRes = bars && bars.length >= 60 ? calculateDailyAtr(bars, 5) : null;
+  const atrRes = bars && bars.length >= 60 ? calculateDailyAtr(bars, 14) : null;
   if (atrRes && atrRes.atr > 0 && atrRes.sessionsCount >= 2) {
     const rawBox = atrRes.atr / blocks;
     const boxPts = Math.max(tick, snapToTick(rawBox, tick));
@@ -150,7 +150,7 @@ export function calculateAutoBlockSize(opts: {
       source: 'atr',
       dailyAtr: atrRes.atr,
       blocks,
-      formula: `${atrRes.atr} ATR / ${blocks} blocks = ${boxPts} pts`,
+      formula: `${atrRes.atr} ATR (${atrRes.sessionsCount}d) / ${blocks} blocks = ${boxPts} pts`,
     };
   }
 

@@ -87,4 +87,18 @@ test('calculateAutoBlockSize: uses live ATR when >= 2 sessions available', () =>
   // 100 ATR / 12 blocks = 8.33 -> 8.35
   assert.equal(res.boxPts, 8.35);
   assert.equal(res.blocks, 12);
+  assert.ok(res.formula.includes('100 ATR (2d) / 12 blocks = 8.35 pts'));
+
+  // Test with realistic higher ATR (e.g. 360 pt ATR -> 30.0 pt box)
+  const highAtrBars: Bar[] = [];
+  for (let m = 0; m < 60; m++) {
+    highAtrBars.push({ t: 1700000000 + m * 60, ce: 0, pe: 0, straddle: 25000, vol: 1, h: 25360, l: 25000 });
+  }
+  for (let m = 0; m < 60; m++) {
+    highAtrBars.push({ t: 1700000000 + 86400 + m * 60, ce: 0, pe: 0, straddle: 25000, vol: 1, h: 25360, l: 25000 });
+  }
+  const highRes = calculateAutoBlockSize({ symbol: 'NIFTY', bars: highAtrBars, targetMinutes: 30, boxTick: 0.05 });
+  assert.equal(highRes.source, 'atr');
+  assert.equal(highRes.boxPts, 30.0);
+  assert.equal(highRes.blocks, 12);
 });

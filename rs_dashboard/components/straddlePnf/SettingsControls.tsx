@@ -8,6 +8,7 @@ import {
   type BoxMode, type PnfSettings, type Reversal,
 } from '@/lib/straddlePnfSettings';
 import { calculateAutoBlockSize } from '@/lib/renkoAutoBrick';
+import type { Bar } from '@/lib/straddlePnf';
 
 // Bar interval, box size, reversal and the SMA period: shared by the live page and the simulator so they behave identically.
 
@@ -145,9 +146,9 @@ export function SupertrendControls({ settings, onChange, shown, onToggleShown, l
  * for after a reversal; it is stored in the same `reversal` field (1-5), so the settings parse and persist unchanged.
  */
 export default function SettingsControls({
-  settings, onChange, equity = false, renko = false, targetSymbol,
+  settings, onChange, equity = false, renko = false, targetSymbol, bars, market,
 }: {
-  settings: PnfSettings; onChange: (next: PnfSettings) => void; equity?: boolean; renko?: boolean; targetSymbol?: string;
+  settings: PnfSettings; onChange: (next: PnfSettings) => void; equity?: boolean; renko?: boolean; targetSymbol?: string; bars?: Bar[]; market?: string;
 }) {
   // A Log % box is Renko only. A P&F page given 'log' (settings carried over from elsewhere) is shown, built (straddlePnfModel) and
   // edited as its % box, so one unit button is always pressed and the value shown is the one in use.
@@ -162,6 +163,9 @@ export default function SettingsControls({
     onChange(logMode ? { ...settings, boxLog: n, autoBox: false } : boxMode === 'pts' ? { ...settings, boxPts: n, autoBox: false } : { ...settings, boxPct: n, autoBox: false });
   };
   const modes: BoxMode[] = renko ? ['pct', 'pts', 'log'] : ['pct', 'pts'];
+
+  const autoBlockInfo = renko && settings.autoBox ? calculateAutoBlockSize({ symbol: targetSymbol, bars, market, targetMinutes: 30 }) : null;
+
   return (
     <>
       <label className={LABEL} title={renko ? 'Tick: a brick prints the moment the live price crosses a box; 5 / 10 / 20 / 30 sec: live prices in N-second bars (a spike that reverses inside N seconds prints nothing). Alerts and AUTO act on these bricks at once' : undefined}>
@@ -188,11 +192,13 @@ export default function SettingsControls({
               role="switch"
               aria-checked={Boolean(settings.autoBox)}
               aria-label={settings.autoBox ? 'Auto block size: ON' : 'Auto block size: OFF'}
-              title={settings.autoBox ? 'Auto block size: ON (auto-configures brick size per chosen index/ATR)' : 'Auto block size: OFF (click to auto-configure per chosen index)'}
+              title={settings.autoBox
+                ? `Auto block size: ON (${autoBlockInfo?.formula ?? 'calculating from live ATR'})`
+                : 'Auto block size: OFF (click to automatically calculate from current index ATR)'}
               onClick={() => {
                 const nextAuto = !settings.autoBox;
                 if (nextAuto) {
-                  const autoRes = calculateAutoBlockSize({ symbol: targetSymbol, targetMinutes: 30 });
+                  const autoRes = calculateAutoBlockSize({ symbol: targetSymbol, bars, market, targetMinutes: 30 });
                   onChange({ ...settings, autoBox: true, boxMode: 'pts', boxPts: autoRes.boxPts });
                 } else {
                   onChange({ ...settings, autoBox: false });
