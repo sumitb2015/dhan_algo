@@ -3,6 +3,7 @@
 // indexScalperQuickTrade.test.ts. Orders go through the terminal's placeContract (caps, live price, session, isx tag).
 
 import { MAX_LOTS } from './indexScalperPositions.ts';
+import { classifyBuildup } from './breakdownBacktest.ts';
 
 export interface QuickSettings {
   /** Lots per click on Buy / on Sell (an option buyer and seller often size differently). */
@@ -94,4 +95,45 @@ export function visibleStrikeRows(
     rows.push({ strike: r.strike, y: r.y, atm: r.strike === atm });
   }
   return { rows, step };
+}
+
+/** OI buildup codes -> label and text colour (theme-safe data accents). Shared by the chain panel's Buildup column and
+ *  the Quick Trade chips, so a strike reads the same in both places. */
+export const BUILDUP_STYLE: Record<string, { label: string; text: string; border: string }> = {
+  LB: { label: 'Long Buildup', text: 'text-emerald-400', border: 'border-emerald-500/40' },
+  SB: { label: 'Short Buildup', text: 'text-rose-400', border: 'border-rose-500/40' },
+  SC: { label: 'Short Covering', text: 'text-sky-400', border: 'border-sky-500/40' },
+  LU: { label: 'Long Unwinding', text: 'text-amber-400', border: 'border-amber-500/40' },
+};
+
+/** Compact signed percent for a chip: +12.3% under 100, +250% up to 999, then >999% / <-999%. null -> '—'. */
+export function compactPct(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return '—';
+  const sign = n > 0 ? '+' : n < 0 ? '-' : '';
+  const a = Math.abs(n);
+  if (a > 999) return `${n > 0 ? '>' : '<-'}999%`;
+  return `${sign}${a < 100 ? a.toFixed(1) : Math.round(a).toString()}%`;
+}
+
+export interface ChipSide { prev_close?: number; change_pct?: number; oi_chg_pct?: number; buildup?: string; volume?: number; ltp?: number; prev_oi?: number }
+export interface ChipStats { pricePct: number | null; oiPct: number | null; buildup: string | null }
+
+/**
+ * Price % and OI % (vs the previous day) for one Quick Trade chip, plus its buildup code. The price % follows the price
+ * the chip shows (`shown`, the live tick when there is one) against the previous close, so it never lags a stale chain
+ * value; without a previous close it falls back to the chain's change_pct. A -100% with no volume is "no trade today",
+ * not a crash to zero (null). OI % with no previous-day baseline (prev_oi 0) and a 0 reading is unknown, not flat.
+ */
+export function chipStats(side: ChipSide | undefined | null, shown: number | null): ChipStats {
+  if (!side) return { pricePct: null, oiPct: null, buildup: null };
+  const pc = side.prev_close;
+  let pricePct: number | null = null;
+  if (pc !== undefined && pc > 0 && shown !== null && shown > 0) pricePct = ((shown - pc) / pc) * 100;
+  else if (typeof side.change_pct === 'number' && Number.isFinite(side.change_pct)) {
+    pricePct = side.change_pct === -100 && !(side.volume && side.volume > 0) ? null : side.change_pct;
+  }
+  let oiPct: number | null = typeof side.oi_chg_pct === 'number' && Number.isFinite(side.oi_chg_pct) ? side.oi_chg_pct : null;
+  if (oiPct === 0 && side.prev_oi !== undefined && !(side.prev_oi > 0)) oiPct = null;
+  const buildup = pricePct !== null && oiPct !== null ? classifyBuildup(pricePct, oiPct) ?? null : (side.buildup || null);
+  return { pricePct, oiPct, buildup };
 }

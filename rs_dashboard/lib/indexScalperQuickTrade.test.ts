@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clampQuickSettings, DEFAULT_QUICK, lotsToRemove, strikesAroundAtm, visibleStrikeRows } from './indexScalperQuickTrade.ts';
+import { chipStats, clampQuickSettings, compactPct, DEFAULT_QUICK, lotsToRemove, strikesAroundAtm, visibleStrikeRows } from './indexScalperQuickTrade.ts';
 
 const STRIKES = Array.from({ length: 41 }, (_, i) => 24500 + i * 50); // 24500..26500
 
@@ -62,4 +62,34 @@ test('the chip\'s "-" takes off the step but never the last lot', () => {
   assert.equal(lotsToRemove(3, 1), 0); // one lot: Exit closes it
   assert.equal(lotsToRemove(1, 0), 0);
   assert.equal(lotsToRemove(Number.NaN, 4), 0);
+});
+
+test('compactPct: signed, 1 decimal under 100, whole up to 999, capped beyond; null is a dash', () => {
+  assert.equal(compactPct(12.345), '+12.3%');
+  assert.equal(compactPct(-4.06), '-4.1%');
+  assert.equal(compactPct(0), '0.0%');
+  assert.equal(compactPct(250.4), '+250%');
+  assert.equal(compactPct(-100), '-100%');
+  assert.equal(compactPct(1500), '>999%');
+  assert.equal(compactPct(-1500), '<-999%');
+  assert.equal(compactPct(null), '—');
+  assert.equal(compactPct(NaN), '—');
+});
+
+test('chipStats: price % follows the shown (live) price vs previous close; buildup from price and OI moves', () => {
+  // live tick 120 vs prev close 100 = +20%, OI +10% -> Long Buildup (the stale chain change_pct is ignored)
+  assert.deepEqual(chipStats({ prev_close: 100, change_pct: -5, oi_chg_pct: 10, prev_oi: 1000 }, 120), { pricePct: 20, oiPct: 10, buildup: 'LB' });
+  assert.equal(chipStats({ prev_close: 100, oi_chg_pct: 10, prev_oi: 1 }, 80).buildup, 'SB');
+  assert.equal(chipStats({ prev_close: 100, oi_chg_pct: -10, prev_oi: 1 }, 120).buildup, 'SC');
+  assert.equal(chipStats({ prev_close: 100, oi_chg_pct: -10, prev_oi: 1 }, 80).buildup, 'LU');
+  // no previous close: the chain's own change_pct
+  assert.equal(chipStats({ change_pct: 3.5, oi_chg_pct: 2 }, 50).pricePct, 3.5);
+  // -100% with no volume = no trade today, not a crash
+  assert.equal(chipStats({ change_pct: -100, volume: 0 }, null).pricePct, null);
+  // OI 0% with no previous-day baseline is unknown
+  assert.equal(chipStats({ prev_close: 100, oi_chg_pct: 0, prev_oi: 0 }, 110).oiPct, null);
+  assert.equal(chipStats({ prev_close: 100 }, 110).oiPct, null);
+  // missing OI: fall back to the side's own buildup label (if any)
+  assert.equal(chipStats({ prev_close: 100, buildup: 'SB' }, 110).buildup, 'SB');
+  assert.deepEqual(chipStats(undefined, 100), { pricePct: null, oiPct: null, buildup: null });
 });

@@ -15,7 +15,7 @@ import type { ChartViewport } from './ScalperChart';
 import type { PickedContract } from './OptionChainPanel';
 import type { IndexScalperFeed } from './useIndexScalperFeed';
 import { nearestStrike, resolveSource } from '@/lib/indexScalperChartSource';
-import { strikesAroundAtm, visibleStrikeRows, type QuickSettings, type StrikeRow } from '@/lib/indexScalperQuickTrade';
+import { BUILDUP_STYLE, chipStats, compactPct, strikesAroundAtm, visibleStrikeRows, type QuickSettings, type StrikeRow } from '@/lib/indexScalperQuickTrade';
 import { INSTRUMENTS, isMcx, type Underlying } from '@/lib/indexScalperInstrument';
 import { cn } from '@/lib/utils';
 
@@ -35,6 +35,8 @@ interface Props {
  *  (right-[84px]) and the OI profile's bars + labels. A row whose strike holds a position (Quick Trade anchors it on the
  *  strike line) measures that chip, which grows with its TP / SL badges, and sits just left of it. */
 const CHIPS_RIGHT = 430;
+/** Minimum pixel gap between ladder rows: a chip (22 px) plus its price % / OI % line above it (~11 px). */
+const ROW_GAP_PX = 36;
 /** Width of one row's label + C + P chips (every cell has a fixed width so the ladder lines up in columns): a narrow
  *  pane (two charts on a laptop) pulls the chips right so they never leave the plot on the left. */
 const ROW_W = 210;
@@ -57,7 +59,7 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
     const tick = () => {
       const vp = viewportRef.current;
       if (!vp) return;
-      const { rows, step } = visibleStrikeRows(strikesRef.current, vp.priceToY, vp.plotHeight(), atmRef.current);
+      const { rows, step } = visibleStrikeRows(strikesRef.current, vp.priceToY, vp.plotHeight(), atmRef.current, ROW_GAP_PX);
       const plotW = vp.plotWidth();
       // Position chips on a strike line (the chart draws them; they grow with TP / SL badges): measure where each starts.
       const rights: Record<number, number> = {};
@@ -174,8 +176,19 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
                   : prev ? ` · ${fmt(shown)} is the previous close (no trade today), not live`
                   : ` · ${fmt(shown)} is the last price from Dhan's chain snapshot, not live`;
                 const isOpen = open?.strike === r.strike && open.type === t;
+                const st = chipStats(feed.chain?.strikes?.[String(r.strike)]?.[t === 'CE' ? 'ce' : 'pe'], shown);
+                const bu = st.buildup ? BUILDUP_STYLE[st.buildup] : undefined;
+                const priceCls = st.pricePct === null || st.pricePct === 0 ? 'text-zinc-500' : st.pricePct > 0 ? 'text-emerald-400' : 'text-rose-400';
+                const oiCls = st.oiPct === null ? 'text-zinc-500' : bu ? bu.text : 'text-zinc-400';
                 return (
                   <div key={t} className="relative">
+                    {/* price % and OI % vs the previous day; OI coloured by the buildup it makes with the price move */}
+                    <div data-testid="quick-chip-stats" data-buildup={st.buildup ?? ''}
+                      title={`${r.strike} ${t}: price ${compactPct(st.pricePct)} · OI ${compactPct(st.oiPct)}${bu ? ` · ${bu.label}` : ''} (vs previous day)`}
+                      className="absolute bottom-full left-0 right-0 mb-px flex justify-between gap-1 px-px text-[9px] leading-none font-mono tabular-nums whitespace-nowrap pointer-events-auto cursor-default">
+                      <span className={priceCls}>{compactPct(st.pricePct)}</span>
+                      <span className={cn(oiCls, bu && 'font-bold')}>{compactPct(st.oiPct)}</span>
+                    </div>
                     <button
                       type="button"
                       data-quick-chip

@@ -7,6 +7,7 @@ import { useMemo } from 'react';
 import { X } from 'lucide-react';
 import type { IndexScalperFeed } from './useIndexScalperFeed';
 import { useDraggable } from './useDraggable';
+import { BUILDUP_STYLE } from '@/lib/indexScalperQuickTrade';
 import { cn } from '@/lib/utils';
 import { fmtOI } from '@/lib/indexScalperOiProfile';
 
@@ -17,20 +18,13 @@ export interface PickedContract {
   tradingSymbol?: string | null;
 }
 
-const BUILDUP: Record<string, { label: string; cls: string }> = {
-  LB: { label: 'Long Buildup', cls: 'text-emerald-400 border-emerald-500/40' },
-  SB: { label: 'Short Buildup', cls: 'text-rose-400 border-rose-500/40' },
-  SC: { label: 'Short Covering', cls: 'text-sky-400 border-sky-500/40' },
-  LU: { label: 'Long Unwinding', cls: 'text-amber-400 border-amber-500/40' },
-};
-
 const pct = (n: number | undefined) => (n === undefined || !Number.isFinite(n) ? '—' : `${n > 0 ? '+' : ''}${n.toFixed(2)}%`);
 const pctCls = (n: number | undefined) => (n === undefined || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-rose-400');
 
 function Buildup({ code }: { code?: string }) {
-  const b = code ? BUILDUP[code] : undefined;
+  const b = code ? BUILDUP_STYLE[code] : undefined;
   if (!b) return <span className="text-zinc-600">—</span>;
-  return <span className={cn('px-1 py-px rounded border text-[9px] font-bold whitespace-nowrap', b.cls)}>{b.label}</span>;
+  return <span className={cn('px-1 py-px rounded border text-[9px] font-bold whitespace-nowrap', b.text, b.border)}>{b.label}</span>;
 }
 
 export default function OptionChainPanel({ feed, onPick, onTrade, oneClick, onClose, wings = 8 }: {

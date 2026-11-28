@@ -193,6 +193,21 @@ test.describe('Index Scalper - SENSEX (BSE)', () => {
     await expect(overlay.getByRole('button', { name: 'Quick 85000 CE' })).toContainText('310.50', { timeout: 15_000 });
     await expect(overlay.getByRole('button', { name: 'Quick 85000 PE' })).toContainText('280.00');
     await expect(overlay.locator('[data-strike="85000"]')).toContainText('ATM');
+    // price % and OI % above each chip, OI coloured by its buildup: CE price down + OI up = Short Buildup (rose),
+    // PE price up + OI up = Long Buildup (emerald)
+    const stats = overlay.locator('[data-strike="85000"]').getByTestId('quick-chip-stats');
+    await expect(stats.nth(0)).toHaveText(/-2\.1%\s*\+30\.0%/);
+    await expect(stats.nth(0)).toHaveAttribute('data-buildup', 'SB');
+    await expect(stats.nth(0).locator('span').nth(1)).toHaveClass(/text-rose-400/);
+    await expect(stats.nth(1)).toHaveText(/\+1\.5%\s*\+22\.0%/);
+    await expect(stats.nth(1)).toHaveAttribute('data-buildup', 'LB');
+    await expect(stats.nth(1).locator('span').nth(1)).toHaveClass(/text-emerald-400/);
+    // the stats line sits above its chip without touching the row above
+    const ceBox = (await overlay.getByRole('button', { name: 'Quick 85000 CE' }).boundingBox())!;
+    const stBox = (await stats.nth(0).boundingBox())!;
+    expect(stBox.y + stBox.height).toBeLessThanOrEqual(ceBox.y + 0.5);
+    expect(stBox.width).toBeLessThanOrEqual(ceBox.width + 0.5);
+    if (process.env.ISX_SHOT) await page.screenshot({ path: process.env.ISX_SHOT, clip: { x: ceBox.x - 120, y: ceBox.y - 120, width: 320, height: 260 } });
     await overlay.getByRole('button', { name: 'Quick 85000 CE' }).click();
     await overlay.getByRole('button', { name: 'Quick buy 85000 CE 1 lot' }).click();
     const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
