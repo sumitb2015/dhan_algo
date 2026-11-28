@@ -176,7 +176,7 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
                   : prev ? ` · ${fmt(shown)} is the previous close (no trade today), not live`
                   : ` · ${fmt(shown)} is the last price from Dhan's chain snapshot, not live`;
                 const isOpen = open?.strike === r.strike && open.type === t;
-                const st = chipStats(feed.chain?.strikes?.[String(r.strike)]?.[t === 'CE' ? 'ce' : 'pe'], shown);
+                const st = chipStats(feed.chain?.strikes?.[String(r.strike)]?.[t === 'CE' ? 'ce' : 'pe'], shown, prev);
                 const bu = st.buildup ? BUILDUP_STYLE[st.buildup] : undefined;
                 const priceCls = st.pricePct === null || st.pricePct === 0 ? 'text-zinc-500' : st.pricePct > 0 ? 'text-emerald-400' : 'text-rose-400';
                 const oiCls = st.oiPct === null ? 'text-zinc-500' : bu ? bu.text : 'text-zinc-400';
@@ -185,7 +185,7 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
                     {/* price % and OI % vs the previous day; OI coloured by the buildup it makes with the price move */}
                     <div data-testid="quick-chip-stats" data-buildup={st.buildup ?? ''}
                       title={`${r.strike} ${t}: price ${compactPct(st.pricePct)} · OI ${compactPct(st.oiPct)}${bu ? ` · ${bu.label}` : ''} (vs previous day)`}
-                      className="absolute bottom-full left-0 right-0 mb-px flex justify-between gap-1 px-px text-[9px] leading-none font-mono tabular-nums whitespace-nowrap pointer-events-auto cursor-default">
+                      className="absolute bottom-full left-0 right-0 mb-px flex justify-between gap-0.5 text-[9px] leading-none font-mono tabular-nums whitespace-nowrap pointer-events-auto cursor-default">
                       <span className={priceCls}>{compactPct(st.pricePct)}</span>
                       <span className={cn(oiCls, bu && 'font-bold')}>{compactPct(st.oiPct)}</span>
                     </div>

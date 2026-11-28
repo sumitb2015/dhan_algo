@@ -77,19 +77,34 @@ test('compactPct: signed, 1 decimal under 100, whole up to 999, capped beyond; n
 });
 
 test('chipStats: price % follows the shown (live) price vs previous close; buildup from price and OI moves', () => {
+  const oi = { oi: 1000, prev_oi: 900 };
   // live tick 120 vs prev close 100 = +20%, OI +10% -> Long Buildup (the stale chain change_pct is ignored)
-  assert.deepEqual(chipStats({ prev_close: 100, change_pct: -5, oi_chg_pct: 10, prev_oi: 1000 }, 120), { pricePct: 20, oiPct: 10, buildup: 'LB' });
-  assert.equal(chipStats({ prev_close: 100, oi_chg_pct: 10, prev_oi: 1 }, 80).buildup, 'SB');
-  assert.equal(chipStats({ prev_close: 100, oi_chg_pct: -10, prev_oi: 1 }, 120).buildup, 'SC');
-  assert.equal(chipStats({ prev_close: 100, oi_chg_pct: -10, prev_oi: 1 }, 80).buildup, 'LU');
+  assert.deepEqual(chipStats({ ...oi, prev_close: 100, change_pct: -5, oi_chg_pct: 10 }, 120), { pricePct: 20, oiPct: 10, buildup: 'LB' });
+  assert.equal(chipStats({ ...oi, prev_close: 100, oi_chg_pct: 10 }, 80).buildup, 'SB');
+  assert.equal(chipStats({ ...oi, prev_close: 100, oi_chg_pct: -10 }, 120).buildup, 'SC');
+  assert.equal(chipStats({ ...oi, prev_close: 100, oi_chg_pct: -10 }, 80).buildup, 'LU');
+  // inside the dead-band: no buildup
+  assert.equal(chipStats({ ...oi, prev_close: 100, oi_chg_pct: 0.1 }, 100.1).buildup, null);
   // no previous close: the chain's own change_pct
-  assert.equal(chipStats({ change_pct: 3.5, oi_chg_pct: 2 }, 50).pricePct, 3.5);
+  assert.equal(chipStats({ ...oi, change_pct: 3.5, oi_chg_pct: 2 }, 50).pricePct, 3.5);
+});
+
+test('chipStats: unknown values are null, never a fake 0% or a buildup made from them', () => {
+  // the chip shows the previous close (no trade today): no price %, so no buildup either
+  assert.deepEqual(chipStats({ oi: 1000, prev_oi: 900, prev_close: 100, oi_chg_pct: 11.1 }, 100, true), { pricePct: null, oiPct: 11.1, buildup: null });
   // -100% with no volume = no trade today, not a crash
   assert.equal(chipStats({ change_pct: -100, volume: 0 }, null).pricePct, null);
-  // OI 0% with no previous-day baseline is unknown
-  assert.equal(chipStats({ prev_close: 100, oi_chg_pct: 0, prev_oi: 0 }, 110).oiPct, null);
+  assert.equal(chipStats({ change_pct: -100, volume: 5 }, null).pricePct, -100);
+  // OI 0% with no previous-day OI (bridge's "no baseline") is unknown; with a baseline it is flat
+  assert.equal(chipStats({ oi: 1000, oi_chg_pct: 0 }, 110).oiPct, null);
+  assert.equal(chipStats({ oi: 1000, prev_oi: 0, oi_chg_pct: 0 }, 110).oiPct, null);
+  assert.equal(chipStats({ oi: 1000, prev_oi: 1000, oi_chg_pct: 0 }, 110).oiPct, 0);
+  // a non-zero % without prev_oi (older bridge) is still a real reading
+  assert.equal(chipStats({ oi: 1000, oi_chg_pct: 5 }, 110).oiPct, 5);
+  // side not received yet (oi 0) or no OI field
+  assert.equal(chipStats({ oi: 0, prev_oi: 900, oi_chg_pct: -100 }, 110).oiPct, null);
   assert.equal(chipStats({ prev_close: 100 }, 110).oiPct, null);
-  // missing OI: fall back to the side's own buildup label (if any)
-  assert.equal(chipStats({ prev_close: 100, buildup: 'SB' }, 110).buildup, 'SB');
+  // price known, OI unknown: no buildup
+  assert.equal(chipStats({ prev_close: 100 }, 130).buildup, null);
   assert.deepEqual(chipStats(undefined, 100), { pricePct: null, oiPct: null, buildup: null });
 });

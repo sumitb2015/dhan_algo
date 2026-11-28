@@ -115,25 +115,31 @@ export function compactPct(n: number | null): string {
   return `${sign}${a < 100 ? a.toFixed(1) : Math.round(a).toString()}%`;
 }
 
-export interface ChipSide { prev_close?: number; change_pct?: number; oi_chg_pct?: number; buildup?: string; volume?: number; ltp?: number; prev_oi?: number }
+export interface ChipSide { oi?: number; prev_oi?: number; oi_chg_pct?: number; prev_close?: number; change_pct?: number; volume?: number }
 export interface ChipStats { pricePct: number | null; oiPct: number | null; buildup: string | null }
 
 /**
- * Price % and OI % (vs the previous day) for one Quick Trade chip, plus its buildup code. The price % follows the price
- * the chip shows (`shown`, the live tick when there is one) against the previous close, so it never lags a stale chain
- * value; without a previous close it falls back to the chain's change_pct. A -100% with no volume is "no trade today",
- * not a crash to zero (null). OI % with no previous-day baseline (prev_oi 0) and a 0 reading is unknown, not flat.
+ * Price % and OI % (vs the previous day) for one Quick Trade chip, plus its buildup code. null = unknown, shown as a dash.
+ * - Price %: the price the chip shows (`shown`, the live tick when there is one) against the previous close, so it never
+ *   lags a stale chain value; without a previous close, the chain's change_pct. `noTradeToday` (the chip shows the
+ *   previous close itself) and a -100% with no volume are unknown, not a 0% or a crash.
+ * - OI %: unknown while the side's OI is 0 (the bridge fills a side only when its own tick arrives) or when it reads 0%
+ *   with no previous-day OI (the bridge writes 0.0 for "no baseline" too; same rule as oiChange in indexScalperOiProfile).
+ * - Buildup: only when both are known (the same dead-bands as the bridge and the chain snapshot).
  */
-export function chipStats(side: ChipSide | undefined | null, shown: number | null): ChipStats {
+export function chipStats(side: ChipSide | undefined | null, shown: number | null, noTradeToday = false): ChipStats {
   if (!side) return { pricePct: null, oiPct: null, buildup: null };
   const pc = side.prev_close;
   let pricePct: number | null = null;
-  if (pc !== undefined && pc > 0 && shown !== null && shown > 0) pricePct = ((shown - pc) / pc) * 100;
+  if (noTradeToday) pricePct = null;
+  else if (pc !== undefined && pc > 0 && shown !== null && shown > 0) pricePct = ((shown - pc) / pc) * 100;
   else if (typeof side.change_pct === 'number' && Number.isFinite(side.change_pct)) {
     pricePct = side.change_pct === -100 && !(side.volume && side.volume > 0) ? null : side.change_pct;
   }
-  let oiPct: number | null = typeof side.oi_chg_pct === 'number' && Number.isFinite(side.oi_chg_pct) ? side.oi_chg_pct : null;
-  if (oiPct === 0 && side.prev_oi !== undefined && !(side.prev_oi > 0)) oiPct = null;
-  const buildup = pricePct !== null && oiPct !== null ? classifyBuildup(pricePct, oiPct) ?? null : (side.buildup || null);
+  const raw = side.oi_chg_pct;
+  const hasBaseline = typeof side.prev_oi === 'number' && side.prev_oi > 0;
+  const oiPct = !(typeof side.oi === 'number' && side.oi > 0) || typeof raw !== 'number' || !Number.isFinite(raw) || (raw === 0 && !hasBaseline)
+    ? null : raw;
+  const buildup = pricePct !== null && oiPct !== null ? classifyBuildup(pricePct, oiPct) ?? null : null;
   return { pricePct, oiPct, buildup };
 }
