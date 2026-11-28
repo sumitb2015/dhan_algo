@@ -183,3 +183,19 @@ test('gateStep: Kotak positions reads are throttled, joined and reused, never ac
   // past the gap: send
   assert.deepStrictEqual(gateStep(g, 2600, 0, cfg), { kind: 'send' });
 });
+
+test('parseKotakResponse parses valid JSON and wraps HTML/502 errors clearly', async () => {
+  const { parseKotakResponse } = await import('./kotakToken.ts');
+  const validRes = new Response('{"stat":"Ok","data":{"limit":100}}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  const parsed = await parseKotakResponse(validRes, '/quick/user/limits');
+  assert.deepStrictEqual(parsed, { stat: 'Ok', data: { limit: 100 } });
+
+  const html502Res = new Response('<html><head><title>502 Bad Gateway</title></head><body><h1>502 Bad Gateway</h1></body></html>', {
+    status: 502,
+    headers: { 'Content-Type': 'text/html' },
+  });
+  await assert.rejects(
+    () => parseKotakResponse(html502Res, '/quick/user/limits'),
+    /Kotak \/quick\/user\/limits: HTTP 502, not a JSON reply \(Kotak down or in maintenance\?\): 502 Bad Gateway 502 Bad Gateway/,
+  );
+});
