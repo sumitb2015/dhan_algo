@@ -196,20 +196,20 @@ test.describe('Index Scalper - SENSEX (BSE)', () => {
     // price % and OI % above each chip, OI coloured by its buildup: CE price down + OI up = Short Buildup (rose),
     // PE price up + OI up = Long Buildup (emerald)
     const stats = overlay.locator('[data-strike="85000"]').getByTestId('quick-chip-stats');
-    await expect(stats.nth(0)).toHaveText(/-2\.1%\s*\+30\.0%/);
+    await expect(stats.nth(0)).toHaveText(/-2\.1%\s*\|\s*\+30\.0%/);
     await expect(stats.nth(0)).toHaveAttribute('data-buildup', 'SB');
-    await expect(stats.nth(0).locator('span').nth(1)).toHaveClass(/text-rose-400/);
-    await expect(stats.nth(1)).toHaveText(/\+1\.5%\s*\+22\.0%/);
+    await expect(stats.nth(0).locator('span').nth(2)).toHaveClass(/text-rose-400/);
+    await expect(stats.nth(1)).toHaveText(/\+1\.5%\s*\|\s*\+22\.0%/);
     await expect(stats.nth(1)).toHaveAttribute('data-buildup', 'LB');
-    await expect(stats.nth(1).locator('span').nth(1)).toHaveClass(/text-emerald-400/);
+    await expect(stats.nth(1).locator('span').nth(2)).toHaveClass(/text-emerald-400/);
     // the stats line sits above its chip without touching the row above
     const ceBox = (await overlay.getByRole('button', { name: 'Quick 85000 CE' }).boundingBox())!;
     const stBox = (await stats.nth(0).boundingBox())!;
     expect(stBox.y + stBox.height).toBeLessThanOrEqual(ceBox.y + 0.5);
     expect(stBox.width).toBeLessThanOrEqual(ceBox.width + 0.5);
-    // the widest values it can show (two 6-character percents) still fit inside the chip's width
+    // the widest values it can show (two 6-character percents and the | separator) still fit inside the chip's width
     const worst = await stats.nth(0).evaluate(el => {
-      const [a, b] = Array.from(el.querySelectorAll('span'));
+      const [a, , b] = Array.from(el.querySelectorAll('span'));
       const keep = [a.textContent, b.textContent];
       a.textContent = '-99.9%'; b.textContent = '+99.9%';
       const w = el.scrollWidth;

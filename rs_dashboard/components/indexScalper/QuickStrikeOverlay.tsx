@@ -185,8 +185,10 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
                     {/* price % and OI % vs the previous day; OI coloured by the buildup it makes with the price move */}
                     {settings.showStats && <div data-testid="quick-chip-stats" data-buildup={st.buildup ?? ''}
                       title={`${r.strike} ${t}: price ${compactPct(st.pricePct)} · OI ${compactPct(st.oiPct)}${bu ? ` · ${bu.label}` : ''} (vs previous day)`}
-                      className="absolute bottom-full left-0 right-0 mb-0.5 px-0.5 flex justify-between gap-0.5 rounded-sm bg-zinc-900 text-[10px] leading-[11px] font-mono font-semibold tabular-nums whitespace-nowrap pointer-events-auto cursor-default">
+                      className="absolute bottom-full left-0 right-0 mb-0.5 px-0.5 flex justify-between gap-px rounded-sm bg-zinc-900 text-[10px] leading-[11px] font-mono font-semibold tabular-nums whitespace-nowrap pointer-events-auto cursor-default">
                       <span className={priceCls}>{compactPct(st.pricePct)}</span>
+                      {/* 1px box: the bar's thin stroke sits in the gaps, so the worst-case values still fit the chip width */}
+                      <span aria-hidden className="w-px flex justify-center overflow-visible text-zinc-500">|</span>
                       <span className={cn(oiCls, bu && 'font-bold')}>{compactPct(st.oiPct)}</span>
                     </div>}
                     <button
