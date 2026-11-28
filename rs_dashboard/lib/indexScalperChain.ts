@@ -59,3 +59,12 @@ export function chainSnapshot(resp: RestChain, underlying: string, expiry: strin
     strikes,
   };
 }
+
+/** True when a live chain holds at least one option tick. A bridge started after the close (a weekend, or BSE after
+ *  15:30) writes every strike with ltp 0 / oi 0 and only the previous close / OI: for display that is no better than no
+ *  chain at all, so the page shows Dhan's REST snapshot instead (it never prices an order from either). */
+export function chainHasTicks(q: Pick<LiveQuotes, 'strikes'> | null | undefined): boolean {
+  if (!q?.strikes) return false;
+  for (const sd of Object.values(q.strikes)) if ((sd.ce?.ltp ?? 0) > 0 || (sd.pe?.ltp ?? 0) > 0) return true;
+  return false;
+}

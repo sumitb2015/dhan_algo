@@ -357,7 +357,15 @@ export async function kotakGet(apiPath: string, timeoutMs = 10_000): Promise<Rec
       headers: authHeaders(),
       signal: AbortSignal.timeout(timeoutMs),
     });
-    return await res.json() as Record<string, unknown>;
+    // Kotak's gateway answers an outage / maintenance window with an HTML page: say so, instead of a bare JSON
+    // SyntaxError ("Unexpected token '<'") that hides the HTTP status.
+    const text = await res.text();
+    try {
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      const snippet = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+      throw new Error(`Kotak ${apiPath}: HTTP ${res.status}, not a JSON reply (Kotak down or in maintenance?)${snippet ? `: ${snippet}` : ''}`);
+    }
   };
   const read = () => laneRead(`GET ${apiPath}`, async () => {
     let json = await doRequest();

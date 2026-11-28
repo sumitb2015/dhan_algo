@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chainSnapshot } from './indexScalperChain.ts';
+import { chainHasTicks, chainSnapshot } from './indexScalperChain.ts';
 
 test('REST chain becomes the bridge shape: numeric strike keys, prev-close change, prev-OI change, bridge buildup rule', () => {
   const snap = chainSnapshot({
@@ -51,4 +51,12 @@ test('CRUDEOILM snapshot centers ATM on nearest strike to crude spot', () => {
   assert.equal(snap.atm, 6100);
   assert.equal(snap.spot, 6123.45);
   assert.equal(snap.straddle_premium, 160);
+});
+
+test('chainHasTicks: a bridge with only previous close / OI (started after the close) is not live for display', () => {
+  const side = (ltp: number) => ({ ltp, oi: 0, volume: 0, prev_close: 100 });
+  assert.equal(chainHasTicks({ strikes: { '83300': { strike: 83300, ce: side(0), pe: side(0) } } }), false);
+  assert.equal(chainHasTicks({ strikes: { '83300': { strike: 83300, ce: side(0), pe: side(0) }, '83400': { strike: 83400, ce: side(0), pe: side(12.5) } } }), true);
+  assert.equal(chainHasTicks({ strikes: {} }), false);
+  assert.equal(chainHasTicks(null), false);
 });

@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import type { LiveQuotes } from '@/components/Scalper';
-import { chainSnapshot, type RestChain } from '@/lib/indexScalperChain';
+import { chainHasTicks, chainSnapshot, type RestChain } from '@/lib/indexScalperChain';
 import { inOrderSession } from '@/lib/indexScalperSession';
 import type { KotakSymbolInfo } from '@/lib/indexScalperKotak';
 import { isMcx, type Underlying } from '@/lib/indexScalperInstrument';
@@ -300,7 +300,8 @@ export function useIndexScalperFeed(
     };
   }, [underlying, dhanFuture, quotes?.future]);
 
-  const hasLive = !!quotes;
+  // A live chain with no option ticks yet (bridge started after the close) is not "live" for display: fetch the snapshot.
+  const hasLive = useMemo(() => chainHasTicks(quotes), [quotes]);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSnapshot(prev => (prev && prev.expiry === expiry ? prev : null));
@@ -320,7 +321,8 @@ export function useIndexScalperFeed(
     const every = setInterval(load, SNAPSHOT_EVERY_MS);
     return () => { dead = true; clearTimeout(first); clearInterval(every); };
   }, [underlying, expiry, expiryOwner, hasLive]);
-  const chain = quotes ?? (snapshot && snapshot.expiry === expiry ? snapshot : null);
+  const snapshotHere = snapshot && snapshot.expiry === expiry ? snapshot : null;
+  const chain = hasLive ? quotes : snapshotHere ?? quotes;
 
   const feedMs = feedAt ? Date.parse(feedAt) : NaN;
   const changeMs = quotes?.updated_at ? Date.parse(quotes.updated_at) : 0;
@@ -347,7 +349,7 @@ export function useIndexScalperFeed(
 
   return {
     underlying,
-    expiries, expiry, setExpiry, quotes, chain, chainSource: quotes ? 'live' : chain ? 'snapshot' : null, snapshotError,
+    expiries, expiry, setExpiry, quotes, chain, chainSource: chain && chain === quotes ? 'live' : chain ? 'snapshot' : null, snapshotError,
     spot, feedAgeSec,
     stale: feedAgeSec !== null && feedAgeSec > STALE_FEED_MS / 1000,
     marketOpen: nowMs > 0 && inOrderSession(underlying, nowMs),
