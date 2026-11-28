@@ -12,14 +12,16 @@ import type { ScalperLeg } from './indexScalperPositions.ts';
 
 /** `strike: 0` means "ATM, not resolved yet". `auto` marks a strike the pane pinned itself from ATM (saved as 0, so a
  *  reload resolves ATM again); a strike the user picked has no `auto` and is kept. */
-export type ChartSource = { kind: 'underlying' } | { kind: 'future' } | { kind: 'option'; type: 'CE' | 'PE'; strike: number; auto?: boolean };
+export type ChartSource = { kind: 'underlying' } | { kind: 'future' } | { kind: 'option'; type: 'CE' | 'PE'; strike: number; auto?: boolean }
+  /** CE + PE premium of one strike, summed (same strike / `auto` rules as an option pane). */
+  | { kind: 'straddle'; strike: number; auto?: boolean };
 
 export interface StrikeIdsLike { ceId?: string; peId?: string }
 export interface KotakStrikeLike { ceSymbol?: string; peSymbol?: string }
 
 export interface ResolvedSource {
   /** 'future' = the NIFTY future (CRUDEOILM's underlying pane already is its future, so there it resolves to that). */
-  kind: 'underlying' | 'future' | 'option';
+  kind: 'underlying' | 'future' | 'option' | 'straddle';
   /** The option actually shown (a strike missing from this expiry falls back to the nearest one); null for underlying. */
   type: 'CE' | 'PE' | null;
   strike: number | null;
@@ -28,6 +30,8 @@ export interface ResolvedSource {
   /** Kotak trading symbol of the option, when Kotak's contracts are loaded. */
   kotakSymbol: string | null;
   tick: number;
+  /** Straddle pane: both legs' contracts (a leg missing from the expiry stays null and the pane draws nothing). */
+  legs?: { ceId: string | null; peId: string | null; ceSymbol: string | null; peSymbol: string | null };
 }
 
 /** Nearest listed strike to `spot`; null without strikes or without a spot. Never a guess: the middle of an expiry's
@@ -60,6 +64,12 @@ export function resolveSource(
   const strike = strikeIds.has(src.strike) ? src.strike : nearestStrike(listed, spot);
   const ids = strike === null ? undefined : strikeIds.get(strike);
   const k = strike === null ? undefined : kotakStrikes?.get(strike);
+  if (src.kind === 'straddle') {
+    return {
+      kind: 'straddle', type: null, strike, dhanId: null, kotakSymbol: null, tick: spec.optTick,
+      legs: { ceId: ids?.ceId ?? null, peId: ids?.peId ?? null, ceSymbol: k?.ceSymbol ?? null, peSymbol: k?.peSymbol ?? null },
+    };
+  }
   return {
     kind: 'option',
     type: src.type,
@@ -76,12 +86,17 @@ export function legOnChart(leg: ScalperLeg, r: ResolvedSource): boolean {
   if (r.kind === 'underlying') return true;
   if (r.kind === 'future') return false; // chart only
   if (leg.type === 'FUT') return false;
+  if (r.kind === 'straddle') {
+    const l = r.legs;
+    return !!l && [l.ceId, l.peId, l.ceSymbol, l.peSymbol].some(id => id !== null && id === leg.securityId);
+  }
   return (r.dhanId !== null && leg.securityId === r.dhanId) || (r.kotakSymbol !== null && leg.securityId === r.kotakSymbol);
 }
 
 /** TP / SL handles for a leg on this pane: option legs only on their own premium chart, futures only on the underlying. */
 export function bracketsOnChart(leg: ScalperLeg, r: ResolvedSource): boolean {
-  if (r.kind === 'future') return false;
+  // A straddle pane draws the straddle's own combined levels, never a single leg's premium TP / SL on a CE + PE axis.
+  if (r.kind === 'future' || r.kind === 'straddle') return false;
   return r.kind === 'underlying' ? leg.type === 'FUT' : leg.type !== 'FUT' && legOnChart(leg, r);
 }
 
@@ -90,7 +105,7 @@ export interface OrderLike { securityId: string; isOption: boolean }
 /** Does this working order belong on the pane? Option pane: exactly that contract. Underlying pane: non-option orders
  *  only (an option order is priced in premium and would sit at a meaningless index level). */
 export function orderOnChart(o: OrderLike, r: ResolvedSource): boolean {
-  if (r.kind === 'future') return false;
+  if (r.kind === 'future' || r.kind === 'straddle') return false; // a leg's order is priced on its own premium
   if (r.kind === 'underlying') return !o.isOption;
   if (!o.securityId) return false;
   return o.securityId === r.dhanId || o.securityId === r.kotakSymbol;
@@ -100,5 +115,6 @@ export function orderOnChart(o: OrderLike, r: ResolvedSource): boolean {
 export function sourceLabel(underlying: Underlying, r: ResolvedSource): string {
   if (r.kind === 'underlying') return isMcx(underlying) ? `${underlying} FUT` : `${underlying} IDX`;
   if (r.kind === 'future') return `${underlying} FUT`;
+  if (r.kind === 'straddle') return `${underlying} ${r.strike ?? '—'} STRADDLE`;
   return `${underlying} ${r.strike ?? '—'} ${r.type}`;
 }

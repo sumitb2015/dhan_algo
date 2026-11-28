@@ -9,7 +9,7 @@
 import type { CandleColorRule } from '@/lib/indexScalperCandleColor';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CandlestickChart, Loader2, TrendingUp } from 'lucide-react';
-import ScalperChart, { DRAW_KEY, type ChartViewport, type DrawTool } from './ScalperChart';
+import ScalperChart, { DRAW_KEY, type ChartViewport, type DrawTool, type LevelLine } from './ScalperChart';
 import QuickStrikeOverlay from './QuickStrikeOverlay';
 import type { QuickSettings } from '@/lib/indexScalperQuickTrade';
 import type { PickedContract } from './OptionChainPanel';
@@ -19,6 +19,10 @@ import {
   legOnChart, nearestStrike, orderOnChart, resolveSource, sourceLabel, type ChartSource,
 } from '@/lib/indexScalperChartSource';
 import { legsKey, type ScalperLeg } from '@/lib/indexScalperPositions';
+import { straddleLive } from '@/lib/indexScalperStraddleBars';
+import StraddleControls from './StraddleControls';
+import type { useStraddleBooks } from './useStraddleBooks';
+type StraddleApi = ReturnType<typeof useStraddleBooks>;
 import { buildOiProfile, oiProfileKey, type OiMode } from '@/lib/indexScalperOiProfile';
 import { lastBarClosed, type IndicatorInstance } from '@/lib/indexScalperIndicators';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
@@ -59,6 +63,8 @@ export interface PaneCfg { source: ChartSource; interval: Interval; chartType?: 
 export const INTERVALS: Interval[] = ['1', '3', '5', '15', '30', '60'];
 const intervalLabel = (i: Interval) => (i === '60' ? '1h' : `${i}m`);
 const EMPTY_ORDERS: OrderRowView[] = [];
+const EMPTY_LEGS: ScalperLeg[] = [];
+const NO_LEVELS: LevelLine[] = [];
 
 type ChartOrderReq = { side: 'BUY' | 'SELL'; price: number; lots: number; orderType?: 'LIMIT' | 'STOP_LOSS' };
 
@@ -112,6 +118,8 @@ interface Props {
   onSetBracket: (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }) => void;
   onCancelBracket: (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => void;
   onReversePosition: (leg: ScalperLeg) => void;
+  /** The Straddle pane's straddles (one-click entry, rules, exits): shown only when this pane plots a straddle. */
+  straddle?: { api: StraddleApi; real: boolean; onError: (text: string) => void };
   trails: Record<string, TrailState>;
   onSetTrail: (leg: ScalperLeg, pts: number, tick: number) => void;
   onCancelTrail: (legId: string) => void;
@@ -137,7 +145,7 @@ function ChartPane(p: Props) {
   // ATM reference: the live spot, else the chain snapshot's (market closed / bridge not up yet). With neither, an ATM
   // pane waits: it never pins a guessed strike.
   const spot = feed.spot ?? feed.chain?.spot ?? null;
-  const needsSpot = source.kind === 'option' && !feed.strikeIds.has(source.strike);
+  const needsSpot = (source.kind === 'option' || source.kind === 'straddle') && !feed.strikeIds.has(source.strike);
   const resolved = useMemo(
     () => resolveSource(source, underlying, feed.strikeIds, spot, feed.kotak?.strikes ?? null, feed.indexFuture?.dhanId ?? null),
     // Spot only matters until the strike is pinned (below); a strike already listed ignores it.
@@ -149,8 +157,8 @@ function ChartPane(p: Props) {
   // so the chart does not hop to a new contract as spot moves. `auto` = pinned by the pane, so a reload resolves ATM
   // again instead of reopening yesterday's ATM.
   useEffect(() => {
-    if (source.kind !== 'option' || resolved.strike === null || resolved.strike === source.strike) return;
-    onCfgChange(index, { ...cfg, source: { kind: 'option', type: source.type, strike: resolved.strike, auto: true } });
+    if ((source.kind !== 'option' && source.kind !== 'straddle') || resolved.strike === null || resolved.strike === source.strike) return;
+    onCfgChange(index, { ...cfg, source: { ...source, strike: resolved.strike, auto: true } });
   }, [resolved.strike, source, cfg, index, onCfgChange]);
 
   const { bars, loading, error, noLiveTicks, tag: viewKey } = useChartBars(underlying, resolved, interval, p.days, p.refreshTick, feed);
@@ -171,7 +179,10 @@ function ChartPane(p: Props) {
   const isOption = resolved.kind === 'option';
   // The NIFTY future: chart only (no orders, positions, brackets, Quick Trade or OI profile on it).
   const isFuture = resolved.kind === 'future';
-  const isIndex = !isOption && !isFuture;
+  // Straddle: CE + PE premium of one strike. Chart only for single-contract features (no "+" menu orders, alerts,
+  // leg lines or single-leg TP / SL: a leg's premium is not a level on the straddle's axis).
+  const isStraddle = resolved.kind === 'straddle';
+  const isIndex = !isOption && !isFuture && !isStraddle;
   const viewportRef = useRef<ChartViewport | null>(null);
   const quickOn = !!p.quick && isIndex;
   const label = sourceLabel(underlying, resolved);
@@ -183,7 +194,7 @@ function ChartPane(p: Props) {
     if (!securityId) return null;
     return { strike: resolved.strike, type: resolved.type, securityId, ltp: null, expiry: feed.expiry, tradingSymbol: resolved.kotakSymbol };
   }, [isOption, resolved.strike, resolved.type, resolved.dhanId, resolved.kotakSymbol, feed.expiry]);
-  const contract = isOption ? optContract : p.futureContract;
+  const contract = isOption ? optContract : isStraddle ? null : p.futureContract;
 
   const { onPlaceChartOrder, onOpenTicket } = p;
   const placeOrder = useCallback((req: ChartOrderReq) => onPlaceChartOrder(contract, req), [onPlaceChartOrder, contract]);
@@ -197,6 +208,7 @@ function ChartPane(p: Props) {
       if (resolved.strike === null || resolved.type === null || !feed.expiry) return null;
       return { spec: { kind: 'option', underlying, expiry: feed.expiry, strike: resolved.strike, optType: resolved.type }, segment: INSTRUMENTS[underlying].dhanSegment, securityId: resolved.dhanId };
     }
+    if (isStraddle) return null; // a sum of two contracts: nothing to alert on
     if (isFuture) {
       const f = feed.indexFuture;
       return f ? { spec: { kind: 'future', underlying, expiry: f.expiry }, segment: INSTRUMENTS[underlying].dhanSegment, securityId: f.dhanId } : null;
@@ -206,7 +218,7 @@ function ChartPane(p: Props) {
       return f?.expiry ? { spec: { kind: 'future', underlying, expiry: f.expiry }, segment: 'MCX_COMM', securityId: f.dhanId } : null;
     }
     return { spec: { kind: 'index', symbol: underlying }, segment: 'IDX_I', securityId: INSTRUMENTS[underlying].indexSecurityId };
-  }, [underlying, isOption, isFuture, resolved.strike, resolved.type, resolved.dhanId, feed.expiry, feed.indexFuture, feed.future]);
+  }, [underlying, isOption, isFuture, isStraddle, resolved.strike, resolved.type, resolved.dhanId, feed.expiry, feed.indexFuture, feed.future]);
   const alertsView = usePriceAlertsView();
   const alertLines = useMemo(() => {
     if (!alertTarget?.securityId) return [];
@@ -269,10 +281,14 @@ function ChartPane(p: Props) {
 
   // Drawings belong to the price axis they were made on: an option's premium, the NIFTY future (~100 pts off the index),
   // each crude contract; the NIFTY index keeps the original key (existing drawings stay).
-  const drawKey = isOption ? `${DRAW_KEY}:${resolved.dhanId ?? resolved.kotakSymbol ?? 'none'}`
+  const drawKey = isStraddle ? `${DRAW_KEY}:str:${resolved.legs?.ceId ?? 'none'}+${resolved.legs?.peId ?? 'none'}`
+    : isOption ? `${DRAW_KEY}:${resolved.dhanId ?? resolved.kotakSymbol ?? 'none'}`
     : isFuture ? `${DRAW_KEY}:fut:${underlying}`
     : underlying === 'NIFTY' ? DRAW_KEY : `${DRAW_KEY}:${underlying}`;
   const tfLabel = `${interval}`;
+  // The open straddle's entry / target / stop lines, on a straddle pane of its own strike only.
+  const openStr = p.straddle?.api.open?.book;
+  const straddleLevels = isStraddle && openStr && openStr.strike === resolved.strike ? p.straddle!.api.levelLines : NO_LEVELS;
 
   return (
     <div data-testid={`chart-pane-${index}`} className="flex flex-col flex-1 min-w-0 min-h-0">
@@ -291,13 +307,16 @@ function ChartPane(p: Props) {
             className={cn(seg, isOption && resolved.type === 'CE' ? 'bg-sky-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}>CE</button>
           <button type="button" aria-pressed={isOption && resolved.type === 'PE'} onClick={() => pickType('PE')}
             className={cn(seg, isOption && resolved.type === 'PE' ? 'bg-rose-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}>PE</button>
+          <button type="button" aria-pressed={isStraddle} onClick={() => setSource(source.kind === 'option' ? { kind: 'straddle', strike: source.strike, ...(source.auto ? { auto: true } : {}) } : { kind: 'straddle', strike: 0 })}
+            title="Straddle: CE + PE premium of one strike (ATM by default)"
+            className={cn(seg, isStraddle ? 'bg-violet-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}>STR</button>
         </div>
-        {isOption && (
+        {(isOption || isStraddle) && (
           <select
             aria-label={`Chart ${index + 1} strike`}
             value={resolved.strike ?? ''}
             disabled={pickList.length === 0}
-            onChange={e => setSource({ kind: 'option', type: resolved.type ?? 'CE', strike: Number(e.target.value) })} // a user pick: kept across reloads
+            onChange={e => setSource(isStraddle ? { kind: 'straddle', strike: Number(e.target.value) } : { kind: 'option', type: resolved.type ?? 'CE', strike: Number(e.target.value) })} // a user pick: kept across reloads
             className="h-6 px-1 rounded border border-zinc-700 bg-zinc-900 text-[11px] font-mono text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60"
           >
             {(pickList.length === 0 || resolved.strike === null) && <option value="">{pickList.length === 0 ? 'loading…' : 'ATM…'}</option>}
@@ -359,7 +378,7 @@ function ChartPane(p: Props) {
           ))}
         </div>
         <span className="ml-1 text-[11px] font-mono font-semibold text-zinc-300 truncate">{label}</span>
-        {isOption && feed.expiry && <span className="text-[10px] font-mono text-zinc-500 shrink-0">{feed.expiry}</span>}
+        {(isOption || isStraddle) && feed.expiry && <span className="text-[10px] font-mono text-zinc-500 shrink-0">{feed.expiry}</span>}
         {isFuture && feed.indexFuture && <span className="text-[10px] font-mono text-zinc-500 shrink-0">{feed.indexFuture.expiry} · chart only</span>}
         {loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500 shrink-0" aria-label="Loading candles" />}
         {noLiveTicks && (
@@ -383,12 +402,12 @@ function ChartPane(p: Props) {
           chartType={cfg.chartType ?? 'candlestick'}
           bars={bars} indicators={p.indicators} tool={p.tool} onToolDone={p.onToolDone} clearToken={p.clearToken}
           logScale={p.logScale} pctScale={p.pctScale} autoScale={p.autoScale} showGrid={p.showGrid} candleColorRule={p.candleColorRule} showVolume={p.showVolume} volumeMaLen={p.volumeMaLen}
-          legs={paneLegs} entrySpots={p.entrySpots} onExitLeg={p.onExitLeg} onAdjustLeg={quickOn || isOption ? p.onAdjustLeg : undefined} adjustLots={p.stepLots} exitingId={p.exitingId}
+          legs={isStraddle ? EMPTY_LEGS : paneLegs} entrySpots={p.entrySpots} onExitLeg={p.onExitLeg} onAdjustLeg={quickOn || isOption ? p.onAdjustLeg : undefined} adjustLots={p.stepLots} exitingId={p.exitingId}
           onToggleIndicator={p.onToggleIndicator} onRemoveIndicator={p.onRemoveIndicator} onEditIndicator={p.onEditIndicator}
-          symbolLabel={isOption ? `${label} · ${tfLabel}` : isFuture ? `${underlying} · ${tfLabel} · FUT` : (isMcx(underlying) ? `${underlying} · ${tfLabel} · FUT` : `${underlying} · ${tfLabel} · IDX`)}
+          symbolLabel={isOption || isStraddle ? `${label} · ${tfLabel}` : isFuture ? `${underlying} · ${tfLabel} · FUT` : (isMcx(underlying) ? `${underlying} · ${tfLabel} · FUT` : `${underlying} · ${tfLabel} · IDX`)}
           focus={p.focus} resetSeq={p.resetSeq}
-          contractName={isOption || isFuture ? label : p.futureName}
-          ordersEnabled={!isFuture}
+          contractName={isOption || isFuture || isStraddle ? label : p.futureName}
+          ordersEnabled={!isFuture && !isStraddle}
           lots={p.lots}
           openOrders={paneOrders}
           onCancelOrder={p.onCancelOrder} onModifyOrder={p.onModifyOrder}
@@ -396,6 +415,7 @@ function ChartPane(p: Props) {
           onOpenTicket={openTicket}
           onAlert={addAlert}
           alertLines={alertLines}
+          levelLines={straddleLevels}
           onMoveAlert={moveAlert}
           onArmAlerts={armAlerts}
           lastBarClosed={lastClosed}
@@ -407,7 +427,7 @@ function ChartPane(p: Props) {
           underlying={underlying}
           feedLotSize={p.feedLotSize} lotSizes={p.lotSizes}
           orderQtyMult={p.orderQtyMult}
-          premium={isOption}
+          premium={isOption || isStraddle}
           tickSize={resolved.tick}
           drawKey={drawKey}
           viewKey={viewKey}
@@ -417,6 +437,15 @@ function ChartPane(p: Props) {
           strikeAnchor={quickOn}
           premiumOrders={premiumOrders}
         />
+        {isStraddle && p.straddle && (
+          <StraddleControls
+            strike={resolved.strike} ids={resolved.legs ?? null} intervalMin={Number(interval)} real={p.straddle.real}
+            livePremium={resolved.legs?.ceId && resolved.legs.peId ? straddleLive(feed.ltpById.get(resolved.legs.ceId), feed.ltpById.get(resolved.legs.peId)) : null}
+            view={p.straddle.api.open} busy={p.straddle.api.busy} maxLots={INSTRUMENTS[underlying].maxLots}
+            onEnter={p.straddle.api.enter} onExit={id => void p.straddle!.api.exitBook(id, 'MANUAL')} onForget={p.straddle.api.forget}
+            onSetRules={p.straddle.api.setRules} onError={p.straddle.onError}
+          />
+        )}
         {quickOn && p.quick && (
           <QuickStrikeOverlay viewportRef={viewportRef} underlying={underlying} feed={feed} settings={p.quick} real={p.real} onTrade={p.onQuickTrade} />
         )}
@@ -426,14 +455,15 @@ function ChartPane(p: Props) {
           <div role="status" aria-live="polite" data-testid="chart-loading"
             className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-sm text-zinc-400 pointer-events-none">
             <Loader2 className="w-6 h-6 animate-spin text-zinc-500" aria-hidden="true" />
-            <span>Loading {isOption ? 'option' : isFuture ? 'future' : underlying} candles…</span>
+            <span>Loading {isStraddle ? 'straddle' : isOption ? 'option' : isFuture ? 'future' : underlying} candles…</span>
           </div>
         )}
         {bars.length === 0 && !loading && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500 pointer-events-none">
-            {isOption && resolved.strike === null && pickList.length > 0
+            {(isOption || isStraddle) && resolved.strike === null && pickList.length > 0
               ? `Waiting for the ${underlying} price to pick the ATM strike…`
               : isOption && !resolved.dhanId ? 'Waiting for the option contract…'
+              : isStraddle && !(resolved.legs?.ceId && resolved.legs.peId) ? 'Waiting for both option contracts…'
               : isFuture && !resolved.dhanId ? 'Waiting for the NIFTY future contract…' : `No candles to show${error ? '' : ' yet'}.`}
           </div>
         )}

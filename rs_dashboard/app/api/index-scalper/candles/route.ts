@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import { PROJECT_ROOT, runPythonJson, dedupe, spaced } from '@/lib/pyExec';
+import { combineStraddleBars } from '@/lib/indexScalperStraddleBars';
 
-// Read-only market data: NIFTY / SENSEX index, NIFTY / SENSEX future, CRUDEOILM or CRUDEOIL future candles, or one option's premium candles (kind=option), for /index-scalper. Never places orders.
+// Read-only market data: NIFTY / SENSEX index, NIFTY / SENSEX future, CRUDEOILM or CRUDEOIL future candles, one option's premium candles (kind=option), or a straddle's CE + PE premium (kind=straddle&ceId=&peId=), for /index-scalper. Never places orders.
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'index_scalper_candles.py');
 
 interface Result {
-  candles?: { t: number; o: number; h: number; l: number; c: number }[];
+  candles?: { t: number; o: number; h: number; l: number; c: number; v?: number }[];
   interval?: string;
   error?: string;
 }
@@ -18,6 +19,35 @@ const cache = new Map<string, { data: Result; ts: number }>();
 const waiters = new Map<string, Set<AbortSignal>>();
 class Abandoned extends Error {}
 const TTL_MS = 20_000;
+
+/** One cached, deduped, queued Python fetch. A fresh error with a cached copy serves the copy (`stale`). */
+async function fetchCandles(key: string, args: string[], signal: AbortSignal): Promise<Result & { stale?: boolean }> {
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.ts < TTL_MS) return hit.data;
+  let set = waiters.get(key);
+  if (!set) { set = new Set(); waiters.set(key, set); }
+  set.add(signal);
+  const mine = set;
+  let data: Result;
+  try {
+    data = await dedupe(key, () =>
+      spaced('dhan-spawn:index-scalper-candles', () => {
+        if ([...mine].every(s => s.aborted)) return Promise.reject(new Abandoned('abandoned'));
+        return runPythonJson<Result>(SCRIPT, args, 40_000);
+      }),
+    );
+  } catch (err) {
+    if (err instanceof Abandoned) throw err;
+    if (hit) return { stale: true, ...hit.data };
+    throw err;
+  } finally {
+    mine.delete(signal);
+    if (mine.size === 0 && waiters.get(key) === mine) waiters.delete(key);
+  }
+  if (data.error) return hit ? { stale: true, ...hit.data } : data;
+  cache.set(key, { data, ts: Date.now() });
+  return data;
+}
 
 export async function GET(req: NextRequest) {
   const sp = new URL(req.url).searchParams;
@@ -38,8 +68,8 @@ export async function GET(req: NextRequest) {
   // kind=option: premium candles of one option contract (its Dhan security id). Segment / instrument are fixed per
   // underlying here, never taken from the browser.
   const kind = sp.get('kind') ?? 'underlying';
-  if (kind !== 'underlying' && kind !== 'option' && kind !== 'future') {
-    return NextResponse.json({ success: false, error: 'kind must be underlying, future or option' }, { status: 400 });
+  if (kind !== 'underlying' && kind !== 'option' && kind !== 'future' && kind !== 'straddle') {
+    return NextResponse.json({ success: false, error: 'kind must be underlying, future, option or straddle' }, { status: 400 });
   }
   // kind=future: the NIFTY / SENSEX future (by its Dhan id), for the chart's FUT pane. Crude's future is its underlying pane.
   if (kind === 'future' && ((underlying !== 'NIFTY' && underlying !== 'SENSEX') || !secId)) {
@@ -54,17 +84,28 @@ export async function GET(req: NextRequest) {
   // the index and options. The trend strip's futures OI buildup reads it.
   const mcx = underlying === 'CRUDEOILM' || underlying === 'CRUDEOIL';
   const withOi = sp.get('oi') === '1' && (kind === 'future' || (kind === 'underlying' && mcx));
-  const key = `idx-scalper:${underlying}:${kind}:${secId ?? ''}:${interval}:${days}${withOi ? ':oi' : ''}`;
+  const mcxArgs = (): string[] => ['--segment', mcx ? 'MCX_COMM' : fno, '--instrument', mcx ? 'OPTFUT' : 'OPTIDX'];
+  const base = ['--symbol', underlying, '--interval', interval, '--days', String(days)];
+  const ok = (data: Result & { stale?: boolean }) => NextResponse.json({ success: true, ...data }, { headers: { 'Cache-Control': 'no-store' } });
 
-  const hit = cache.get(key);
-  if (hit && Date.now() - hit.ts < TTL_MS) {
-    return NextResponse.json({ success: true, ...hit.data }, { headers: { 'Cache-Control': 'no-store' } });
-  }
   try {
-    const args = ['--symbol', underlying, '--interval', interval, '--days', String(days)];
+    if (kind === 'straddle') {
+      // Both legs are fetched as ordinary option candles (each cached / queued under its own key, so a CE pane on the
+      // same strike shares the fetch) and combined here; a leg that fails fails the straddle (never one leg alone).
+      const ceId = sp.get('ceId'), peId = sp.get('peId');
+      if (!ceId || !peId || !/^\d+$/.test(ceId) || !/^\d+$/.test(peId)) {
+        return NextResponse.json({ success: false, error: 'kind=straddle needs numeric ceId and peId' }, { status: 400 });
+      }
+      const leg = (id: string) => fetchCandles(`idx-scalper:${underlying}:option:${id}:${interval}:${days}`, [...base, ...mcxArgs(), '--security-id', id], req.signal);
+      const [ce, pe] = await Promise.all([leg(ceId), leg(peId)]);
+      const err = ce.error ?? pe.error;
+      if (err || !ce.candles || !pe.candles) return NextResponse.json({ success: false, error: err ?? 'No candles' }, { status: 502 });
+      return ok({ candles: combineStraddleBars(ce.candles, pe.candles), interval: ce.interval, ...(ce.stale || pe.stale ? { stale: true } : {}) });
+    }
+    const args = [...base];
     if (withOi) args.push('--oi');
     if (kind === 'option') {
-      args.push('--segment', mcx ? 'MCX_COMM' : fno, '--instrument', mcx ? 'OPTFUT' : 'OPTIDX');
+      args.push(...mcxArgs());
     } else if (kind === 'future') {
       args.push('--segment', fno, '--instrument', 'FUTIDX');
     } else if (mcx) {
@@ -76,31 +117,11 @@ export async function GET(req: NextRequest) {
     } else if (secId) {
       args.push('--security-id', secId);
     }
-    let set = waiters.get(key);
-    if (!set) { set = new Set(); waiters.set(key, set); }
-    set.add(req.signal);
-    const mine = set;
-    let data: Result;
-    try {
-      data = await dedupe(key, () =>
-        spaced('dhan-spawn:index-scalper-candles', () => {
-          if ([...mine].every(s => s.aborted)) return Promise.reject(new Abandoned('abandoned'));
-          return runPythonJson<Result>(SCRIPT, args, 40_000);
-        }),
-      );
-    } finally {
-      mine.delete(req.signal);
-      if (mine.size === 0 && waiters.get(key) === mine) waiters.delete(key);
-    }
-    if (data.error) {
-      if (hit) return NextResponse.json({ success: true, stale: true, ...hit.data }, { headers: { 'Cache-Control': 'no-store' } });
-      return NextResponse.json({ success: false, error: data.error }, { status: 502 });
-    }
-    cache.set(key, { data, ts: Date.now() });
-    return NextResponse.json({ success: true, ...data }, { headers: { 'Cache-Control': 'no-store' } });
+    const data = await fetchCandles(`idx-scalper:${underlying}:${kind}:${secId ?? ''}:${interval}:${days}${withOi ? ':oi' : ''}`, args, req.signal);
+    if (data.error) return NextResponse.json({ success: false, error: data.error }, { status: 502 });
+    return ok(data);
   } catch (err) {
     if (err instanceof Abandoned) return NextResponse.json({ success: false, error: 'abandoned' }, { status: 499 });
-    if (hit) return NextResponse.json({ success: true, stale: true, ...hit.data }, { headers: { 'Cache-Control': 'no-store' } });
     return NextResponse.json({ success: false, error: String((err as Error).message ?? err) }, { status: 500 });
   }
 }

@@ -131,6 +131,8 @@ interface Props {
   onAlert?: (symbol: string, price: number) => void;
   /** Price Alerts on this chart's instrument, drawn as bell lines; their chip drags them to a new level (onMoveAlert, on release). */
   alertLines?: AlertLine[];
+  /** Plain levels drawn on the price axis, not draggable (the Straddle pane's entry / target / stop / trail floor). */
+  levelLines?: LevelLine[];
   /** Resolves true once the alert is saved at the new level (the chart shows that level until then, then the store's). */
   onMoveAlert?: (id: string, price: number) => Promise<boolean>;
   /** Arms REAL alert orders for today (confirm first); shown on the chip of a trade alert that is not armed. */
@@ -220,13 +222,17 @@ function seriesData(s: OutSeries, bars: Bar[]) {
 /** `unarmed`: an active trade alert on a day REAL alert orders are not armed: it would only notify and skip its order. */
 export interface AlertLine { id: string; price: number; title: string; paused: boolean; unarmed?: boolean }
 const NO_ALERT_LINES: AlertLine[] = [];
+/** `tone` picks a saturated data colour (target green, stop red, entry sky, floor amber). */
+export interface LevelLine { id: string; price: number; title: string; tone: 'entry' | 'target' | 'stop' | 'floor'; dashed?: boolean }
+const NO_LEVEL_LINES: LevelLine[] = [];
+const LEVEL_COLOR: Record<LevelLine['tone'], string> = { entry: '#38bdf8', target: '#10b981', stop: '#f43f5e', floor: '#f59e0b' };
 const ALERT_COLOR = '#f59e0b';
 
 function ScalperChart(props: Props) {
   const {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, showGrid = true, candleColorRule = 'off', showVolume = true, volumeMaLen = 20, legs, entrySpots,
     onExitLeg, onAdjustLeg, adjustLots = 1, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
-    contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, ordersEnabled = true, onPlaceLimitOrder, onOpenTicket, onAlert, alertLines = NO_ALERT_LINES, onMoveAlert, onArmAlerts, lastBarClosed = false,
+    contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onModifyOrder, ordersEnabled = true, onPlaceLimitOrder, onOpenTicket, onAlert, alertLines = NO_ALERT_LINES, levelLines = NO_LEVEL_LINES, onMoveAlert, onArmAlerts, lastBarClosed = false,
     chartType = 'candlestick',
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, trails, onSetTrail, onCancelTrail, underlying = 'NIFTY', feedLotSize, lotSizes, orderQtyMult = 1,
     premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, resetSeq = 0, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false, premiumOrders,
@@ -280,6 +286,7 @@ function ScalperChart(props: Props) {
   const ordDragPriceRef = useRef(0);
   // Price Alert lines (one price line each) and the alert being dragged by its chip (price kept in a ref, like ordDrag).
   const alertLinesRef = useRef<Map<string, IPriceLine>>(new Map());
+  const levelLinesRef = useRef<Map<string, IPriceLine>>(new Map());
   const [alertDrag, setAlertDrag] = useState<{ id: string; startPrice: number } | null>(null);
   const alertDragPriceRef = useRef(0);
   // A level just dropped, shown while its save is in flight (the alert still carries its old price until the store
@@ -1159,6 +1166,22 @@ function ScalperChart(props: Props) {
     }
     for (const [id, l] of lines) if (!seen.has(id)) { try { candles.removePriceLine(l); } catch { /* gone */ } lines.delete(id); }
   }, [alertLines, alertDrag, alertShown, chrome.textMuted]);
+
+  // ── Plain levels (Straddle pane): repainted when the set changes ──
+  useEffect(() => {
+    const candles = candleRef.current;
+    if (!candles) return;
+    const lines = levelLinesRef.current;
+    const seen = new Set<string>();
+    for (const a of levelLines) {
+      if (!Number.isFinite(a.price)) continue;
+      seen.add(a.id);
+      const opts = { price: a.price, color: LEVEL_COLOR[a.tone], lineWidth: 1 as const, lineStyle: a.dashed ? LineStyle.Dashed : LineStyle.Solid, axisLabelVisible: true, title: a.title };
+      const ex = lines.get(a.id);
+      if (ex) ex.applyOptions(opts); else lines.set(a.id, candles.createPriceLine(opts));
+    }
+    for (const [id, l] of lines) if (!seen.has(id)) { try { candles.removePriceLine(l); } catch { /* gone */ } lines.delete(id); }
+  }, [levelLines]);
 
   // Dragging an alert by its chip: the line follows the mouse (snapped to the tick); release saves the new level, Esc reverts.
   useEffect(() => {

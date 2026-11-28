@@ -32,6 +32,7 @@ import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import { scalperRoute } from '@/hooks/useBrokerSelector';
 import { type DrawTool } from './ScalperChart';
 import ChartPane, { type PaneCfg } from './ChartPane';
+import { useStraddleBooks } from './useStraddleBooks';
 import TrendStrip from './TrendStrip';
 import { clampTrendSettings, DEFAULT_TREND_SETTINGS, TREND_SETTINGS_KEY, type TrendSettings } from '@/lib/indexScalperTrend';
 import OptionChainPanel, { type PickedContract } from './OptionChainPanel';
@@ -124,6 +125,9 @@ function validPane(x: unknown, fallback: PaneCfg): PaneCfg {
   if (src?.kind === 'option' && (src.type === 'CE' || src.type === 'PE') && Number.isFinite(src.strike)) {
     return { source: { kind: 'option', type: src.type, strike: src.auto ? 0 : src.strike }, interval, ...(chartType ? { chartType } : {}) };
   }
+  if (src?.kind === 'straddle' && Number.isFinite(src.strike)) {
+    return { source: { kind: 'straddle', strike: src.auto ? 0 : src.strike }, interval, ...(chartType ? { chartType } : {}) };
+  }
   return { ...fallback, interval, ...(chartType ? { chartType } : {}) };
 }
 const RANGES: { label: string; days: number; focus: number }[] = [
@@ -174,8 +178,8 @@ export default function IndexScalperTerminal() {
   const selectUnderlying = (u: Underlying) => {
     if (real) return;
     if (u !== underlying) {
-      // Option panes go back to ATM: the other underlying's strikes are a different ladder.
-      setPanes(ps => ps.map(c => (c.source.kind === 'option' ? { ...c, source: { ...c.source, strike: 0 } } : c)) as [PaneCfg, PaneCfg]);
+      // Option and straddle panes go back to ATM: the other underlying's strikes are a different ladder.
+      setPanes(ps => ps.map(c => (c.source.kind === 'option' || c.source.kind === 'straddle' ? { ...c, source: { ...c.source, strike: 0 } } : c)) as [PaneCfg, PaneCfg]);
     }
     setUnderlying(u);
     savePref(UNDERLYING_KEY, u);
@@ -461,7 +465,8 @@ export default function IndexScalperTerminal() {
   // An ATM pin the pane made itself is saved as ATM (0), so the next session resolves today's ATM; a picked strike is kept.
   useEffect(() => {
     if (!layoutReady) return;
-    const saved = panes.map(c => (c.source.kind === 'option' && c.source.auto ? { ...c, source: { kind: 'option', type: c.source.type, strike: 0 } } : c));
+    const saved = panes.map(c => (c.source.kind === 'option' && c.source.auto ? { ...c, source: { kind: 'option', type: c.source.type, strike: 0 } }
+      : c.source.kind === 'straddle' && c.source.auto ? { ...c, source: { kind: 'straddle', strike: 0 } } : c));
     savePref(LAYOUT_KEY, JSON.stringify({ layout, panes: saved }));
   }, [layout, panes, layoutReady]);
   const onPaneCfg = useCallback((i: number, cfg: PaneCfg) => {
@@ -846,7 +851,7 @@ export default function IndexScalperTerminal() {
   // at (the live premium; the paper fill), never the broker's day average (lib/indexScalperDefaultBrackets).
   const queueDefaultBrackets = useCallback((key: string, req: TicketRequest, o: { before: number; orderQty: number; entry: number; product: string; isReal: boolean }) => {
     const s = defBracketsRef.current;
-    if (!s.on || req.closesLeg || req.orderType !== 'MARKET' || req.contract.type === 'FUT') return;
+    if (!s.on || req.closesLeg || req.noDefaultBrackets || req.orderType !== 'MARKET' || req.contract.type === 'FUT') return;
     const long = req.side === 'BUY';
     if (!opensPosition(o.before, long, o.orderQty)) return; // adding to or reducing a position: its levels stay as they are
     pendingDefaultsRef.current.set(key, {
@@ -1127,6 +1132,15 @@ export default function IndexScalperTerminal() {
       flash({ ok: out.ok, text: out.text });
     } finally { setExitingId(null); }
   }, [exitingId, real, exitSimLeg, readExitState, exitRealRow, refreshAfterOrder, flash]);
+
+  // ── Straddle pane: one-click straddles, their ledger and exit rules (components/indexScalper/useStraddleBooks.ts) ──
+  const straddle = useStraddleBooks({
+    underlying, real, broker: broker === 'kotak' ? 'kotak' : 'dhan', feed, refreshTick,
+    placeContract, readExitState, exitRealRow,
+    simNet: id => simRef.current.legs[id]?.netQty ?? 0, simClose: simFill,
+    orders: panelOrders, lotOf, flash, refreshAfterOrder, soundOn: () => soundOnRef.current,
+  });
+  const straddlePane = useMemo(() => ({ api: straddle, real, onError: (text: string) => flash({ ok: false, text }) }), [straddle, real, flash]);
 
   // Quantity this page's own orders filled today, per leg id: only to say which legs Exit All would close that were opened
   // elsewhere (exits themselves close any position). Read from the polled order book (at most one poll old).
@@ -2418,6 +2432,7 @@ export default function IndexScalperTerminal() {
               focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder} onModifyOrder={onModifyOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
+              straddle={straddlePane}
               onReversePosition={onReversePosition} trails={trails} onSetTrail={onSetTrail} onCancelTrail={onCancelTrail} feedLotSize={feed.lotSize} lotSizes={lotMap} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
               quick={quickProp} stepLots={quickEff.stepLots} real={real} onQuickTrade={onTradeContract} broker={broker}
             />
@@ -2434,6 +2449,7 @@ export default function IndexScalperTerminal() {
               focus={focus} resetSeq={resetSeq} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder} onModifyOrder={onModifyOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
+              straddle={straddlePane}
               onReversePosition={onReversePosition} trails={trails} onSetTrail={onSetTrail} onCancelTrail={onCancelTrail} feedLotSize={feed.lotSize} lotSizes={lotMap} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
               quick={quickProp} stepLots={quickEff.stepLots} real={real} onQuickTrade={onTradeContract} broker={broker}
             />

@@ -84,3 +84,21 @@ test('NIFTY FUT pane: resolves to the future (its Dhan id, futures tick), chart 
   // CRUDEOILM: its underlying pane already is the future, so a saved 'future' source shows that
   assert.equal(resolveSource({ kind: 'future' }, 'CRUDEOILM', new Map(), 7500).kind, 'underlying');
 });
+
+test('straddle pane: both legs of its strike (ATM by default), no single-leg brackets or orders, its own label', () => {
+  const st = resolveSource({ kind: 'straddle', strike: 0 }, 'NIFTY', ids, 25560, kotak);
+  assert.equal(st.kind, 'straddle');
+  assert.equal(st.strike, 25550);
+  assert.deepEqual(st.legs, { ceId: '102', peId: '202', ceSymbol: 'NIFTY2612025550CE', peSymbol: 'NIFTY2612025550PE' });
+  assert.equal(st.dhanId, null);
+  assert.equal(st.tick, 0.05);
+  assert.equal(resolveSource({ kind: 'straddle', strike: 25600 }, 'NIFTY', ids, 25560).strike, 25600);
+  assert.equal(resolveSource({ kind: 'straddle', strike: 0 }, 'NIFTY', ids, null).strike, null);
+  assert.equal(legOnChart(leg(), st), true);
+  assert.equal(legOnChart(leg({ securityId: '202', type: 'PE' }), st), true);
+  assert.equal(legOnChart(leg({ securityId: 'NIFTY2612025550PE', type: 'PE', sim: false }), st), true);
+  assert.equal(legOnChart(leg({ securityId: '103' }), st), false);
+  assert.equal(bracketsOnChart(leg(), st), false);
+  assert.equal(orderOnChart({ securityId: '102', isOption: true }, st), false);
+  assert.equal(sourceLabel('NIFTY', st), 'NIFTY 25550 STRADDLE');
+});

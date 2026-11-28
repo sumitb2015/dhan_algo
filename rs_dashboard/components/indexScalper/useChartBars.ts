@@ -10,6 +10,7 @@ import { applyTick, mergeHistory, type Bar } from '@/lib/indexScalperIndicators'
 import { inMarketSession, inOrderSession } from '@/lib/indexScalperSession';
 import { isMcx, type Underlying } from '@/lib/indexScalperInstrument';
 import type { ResolvedSource } from '@/lib/indexScalperChartSource';
+import { straddleLive } from '@/lib/indexScalperStraddleBars';
 import type { IndexScalperFeed } from './useIndexScalperFeed';
 
 export type Interval = '1' | '3' | '5' | '15' | '30' | '60';
@@ -41,10 +42,14 @@ export function useChartBars(
   const isOption = resolved.kind === 'option';
   // The NIFTY future (FUT pane): a traded contract like an option (volume, F&O session to 15:40), priced on its own axis.
   const isFuture = resolved.kind === 'future';
-  const traded = isOption || isFuture;
+  // Straddle pane: CE + PE premium of one strike, a traded series like an option (both legs' ids, or nothing).
+  const isStraddle = resolved.kind === 'straddle';
+  const legIds = isStraddle && resolved.legs?.ceId && resolved.legs.peId ? { ce: resolved.legs.ceId, pe: resolved.legs.peId } : null;
+  const traded = isOption || isFuture || isStraddle;
   // The contract whose bars these are. History is tagged with it AND the interval, so a strike / expiry / interval switch
   // never mixes two contracts' or two intervals' bars.
-  const contractId = traded ? resolved.dhanId : (isMcx(underlying) ? feed.future?.dhanId ?? null : 'idx');
+  const contractId = isStraddle ? (legIds ? `${legIds.ce}+${legIds.pe}` : null)
+    : traded ? resolved.dhanId : (isMcx(underlying) ? feed.future?.dhanId ?? null : 'idx');
   const tag = `${underlying}|${contractId ?? ''}|${interval}${wantOi ? '|oi' : ''}`;
 
   const [history, setHistory] = useState<{ tag: string; bars: Bar[] } | null>(null);
@@ -67,7 +72,9 @@ export function useChartBars(
     if (traded && !contractId) { setLoading(false); return; }
     let dead = false;
     setLoading(true);
-    const idParam = isOption
+    const idParam = isStraddle && legIds
+      ? `&kind=straddle&ceId=${legIds.ce}&peId=${legIds.pe}`
+      : isOption
       ? `&kind=option&securityId=${contractId}`
       : isFuture ? `&kind=future&securityId=${contractId}`
       : (isMcx(underlying) && contractId ? `&securityId=${contractId}` : '');
@@ -86,7 +93,9 @@ export function useChartBars(
       .catch(e => { if (!dead) setError(String(e?.message ?? e)); })
       .finally(() => { if (!dead) setLoading(false); });
     return () => { dead = true; ac.abort(); };
-  }, [underlying, interval, days, refreshTick, contractId, isOption, isFuture, traded, tag, wantOi]);
+    // legIds is derived from contractId (same ids), so contractId covers it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [underlying, interval, days, refreshTick, contractId, isOption, isFuture, isStraddle, traded, tag, wantOi]);
 
   const liveTagRef = useRef<string | null>(null);
   useEffect(() => {
@@ -104,10 +113,14 @@ export function useChartBars(
 
   // Live price: spot for the underlying; the option's live bridge LTP (never a snapshot or prev close) for an option.
   const futLive = isFuture && feed.indexFuture && feed.indexFuture.dhanId === contractId ? feed.indexFuture : null;
-  const livePrice = isOption ? (contractId ? feed.ltpById.get(contractId) ?? null : null) : isFuture ? futLive?.ltp ?? null : feed.spot;
+  // Straddle: both legs' live bridge prices summed, or no tick at all (never one live leg plus a stale one).
+  const livePrice = isStraddle ? (legIds ? straddleLive(feed.ltpById.get(legIds.ce), feed.ltpById.get(legIds.pe)) : null)
+    : isOption ? (contractId ? feed.ltpById.get(contractId) ?? null : null) : isFuture ? futLive?.ltp ?? null : feed.spot;
   // The day's cumulative volume of what this pane plots (an option; the CRUDEOILM future); the NIFTY index has none.
   const volId = isOption ? contractId : (isMcx(underlying) ? feed.future?.dhanId ?? null : null);
-  const liveVol = isFuture ? futLive?.volume ?? null : volId ? feed.volumeById.get(volId) ?? null : null;
+  const ceVol = legIds ? feed.volumeById.get(legIds.ce) : undefined, peVol = legIds ? feed.volumeById.get(legIds.pe) : undefined;
+  const liveVol = isStraddle ? (ceVol !== undefined && peVol !== undefined ? ceVol + peVol : null)
+    : isFuture ? futLive?.volume ?? null : volId ? feed.volumeById.get(volId) ?? null : null;
   // Live open interest of what this pane plots, when asked for: the NIFTY / SENSEX future, or crude's (its underlying).
   const liveOi = !wantOi ? null : isFuture ? futLive?.oi ?? null : (!traded && isMcx(underlying) ? feed.future?.oi ?? null : null);
   // Last cumulative volume seen for this pane's contract: each tick adds the increase to its bar (the first tick after a

@@ -28,6 +28,8 @@ export interface TicketRequest {
   /** The contract is an existing position's own (Reverse): send it as is, by its Dhan security id / Kotak trading
    *  symbol, never looked up again by strike in the expiry on screen (that is another contract when they differ). */
   exactContract?: boolean;
+  /** A leg of a Straddle-pane straddle: no default per-leg target / stop is queued (the straddle's own rules exit it). */
+  noDefaultBrackets?: boolean;
 }
 
 const TYPES: { v: TicketOrderType; label: string }[] = [
