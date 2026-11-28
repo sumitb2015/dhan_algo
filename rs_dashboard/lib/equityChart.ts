@@ -16,7 +16,7 @@ export const TIMEFRAMES: { key: Timeframe; label: string; hint: string }[] = [
 
 /** Session-based kinds (VWAP resets each IST day; CPR / pivots / Day H/L step at the day change with a gap after every
  *  day). On one bar per day every point is a "day change", so their lines would be invisible or meaningless. */
-const INTRADAY_ONLY: IndicatorKind[] = ['vwap', 'cpr', 'pivots', 'daylevels'];
+const INTRADAY_ONLY: IndicatorKind[] = ['vwap', 'vwapbands', 'cpr', 'pivots', 'daylevels'];
 export const EQUITY_INDICATOR_KINDS: IndicatorKind[] = INDICATOR_CATALOG.map(c => c.kind).filter(k => !INTRADAY_ONLY.includes(k));
 
 /** Month (UTC) of a YYYY-MM-DD date, as its first day. */

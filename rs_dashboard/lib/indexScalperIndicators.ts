@@ -5,13 +5,15 @@
 import { emaSmaSeeded, smaArray, rsiArray, stochRsiArray, macdSeries, adxDmiArray, supertrendSeries } from './indicators.ts';
 import { barAnchorSec, inMarketSession, inOrderSession } from './indexScalperSession.ts';
 import { marketStructure } from './indexScalperStructure.ts';
+import { cmf, hasVolume, mfi, obv, relativeVolume, vwapWithStdev, vwma } from './volumeIndicators.ts';
 import type { Underlying } from './indexScalperInstrument.ts';
 
 /** `v` = traded volume in the bar, when the instrument has one (a future, an option); an index has none. */
 /** `oi`: open interest at the bar's end (futures, when asked for: the candles route's oi=1 and the live future's OI). */
 export interface Bar { t: number; o: number; h: number; l: number; c: number; v?: number; oi?: number }
 
-export type IndicatorKind = 'volume' | 'ema' | 'emacross' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'daylevels' | 'rsi' | 'stochrsi' | 'macd' | 'adx' | 'structure';
+export type IndicatorKind = 'volume' | 'ema' | 'emacross' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'daylevels' | 'rsi' | 'stochrsi' | 'macd' | 'adx' | 'structure'
+  | 'vwapbands' | 'obv' | 'mfi' | 'cmf' | 'vwma' | 'rvol';
 
 export interface IndicatorInstance {
   id: string;
@@ -71,6 +73,8 @@ export interface CatalogEntry {
   color: string;
   /** Drawn in fixed colours (Volume: green / red bars): its settings offer no colour or line width. */
   fixedStyle?: boolean;
+  /** Built from traded volume: draws nothing on a chart without it (the NSE / BSE index). The picker says so. */
+  needsVolume?: boolean;
 }
 
 export const INDICATOR_CATALOG: CatalogEntry[] = [
@@ -125,6 +129,27 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
       { key: 'len', label: 'Swing length (bars each side)', def: 3, min: 1, max: 20 },
       { key: 'line', label: 'Line joining the swings', def: 1, min: 0, max: 1, toggle: true },
     ],
+  },
+  // ── Volume indicators (lib/volumeIndicators.ts, each as its Pine built-in) ──
+  // Session VWAP with TradingView's standard-deviation bands (± mult × stdev of hlc3 around the VWAP); a multiplier of 0
+  // hides that band. Equal-weighted on the index, like the plain VWAP.
+  {
+    kind: 'vwapbands', label: 'VWAP bands (± std dev)', pane: 'price', color: '#ec4899',
+    params: [
+      { key: 'm1', label: 'Band 1 × std dev (0 = off)', def: 1, min: 0, max: 5 },
+      { key: 'm2', label: 'Band 2 × std dev (0 = off)', def: 2, min: 0, max: 5 },
+      { key: 'm3', label: 'Band 3 × std dev (0 = off)', def: 0, min: 0, max: 5 },
+    ],
+  },
+  { kind: 'vwma', label: 'VWMA (volume-weighted MA)', pane: 'price', color: '#84cc16', needsVolume: true, params: [{ key: 'period', label: 'Length', def: 20, min: 1, max: 500 }] },
+  { kind: 'obv', label: 'On-Balance Volume (OBV)', pane: 'sub', color: '#0ea5e9', needsVolume: true, params: [{ key: 'ma', label: 'SMA length (0 = off)', def: 0, min: 0, max: 200 }] },
+  { kind: 'mfi', label: 'Money Flow Index (MFI)', pane: 'sub', color: '#f97316', needsVolume: true, params: [{ key: 'period', label: 'Length', def: 14, min: 2, max: 100 }] },
+  { kind: 'cmf', label: 'Chaikin Money Flow (CMF)', pane: 'sub', color: '#14b8a6', needsVolume: true, params: [{ key: 'period', label: 'Length', def: 20, min: 2, max: 200 }] },
+  // Bar volume ÷ the average at the same time of day over the previous N sessions (daily / weekly bars: the previous N
+  // bars). Bars at or above `hi` are highlighted.
+  {
+    kind: 'rvol', label: 'Relative volume (at time of day)', pane: 'sub', color: '#64748b', needsVolume: true,
+    params: [{ key: 'days', label: 'Sessions to average', def: 10, min: 1, max: 60 }, { key: 'hi', label: 'Highlight at or above (×)', def: 2, min: 1, max: 20 }],
   },
 ];
 
@@ -188,7 +213,9 @@ export function indicatorLabel(ind: IndicatorInstance): string {
   const c = catalogEntry(ind.kind);
   // On / off settings are not numbers to show ("Structure (3)", not "(3, 1)").
   const ps = c.params.filter(p => !p.toggle).map(p => ind.params[p.key] ?? p.def).join(', ');
-  const name = ind.kind === 'vwap' ? 'VWAP' : ind.kind === 'cpr' ? 'CPR' : ind.kind === 'pivots' ? 'Pivots S/R' : ind.kind === 'daylevels' ? 'Day H/L' : ind.kind === 'structure' ? 'Structure' : c.label;
+  const name = ind.kind === 'vwap' ? 'VWAP' : ind.kind === 'cpr' ? 'CPR' : ind.kind === 'pivots' ? 'Pivots S/R' : ind.kind === 'daylevels' ? 'Day H/L' : ind.kind === 'structure' ? 'Structure'
+    : ind.kind === 'vwapbands' ? 'VWAP bands' : ind.kind === 'vwma' ? 'VWMA' : ind.kind === 'obv' ? 'OBV' : ind.kind === 'mfi' ? 'MFI'
+    : ind.kind === 'cmf' ? 'CMF' : ind.kind === 'rvol' ? 'RVOL' : c.label;
   return ps ? `${name} (${ps})` : name;
 }
 
@@ -387,6 +414,41 @@ export function shadowOf(s: OutSeries): OutSeries {
   };
 }
 
+/** The volume indicators' series, for bars that carry volume (computeSeries returns nothing without it). */
+function volumeSeries(bars: Bar[], ind: IndicatorInstance, label: string, p: (k: string) => number): IndicatorOutput {
+  switch (ind.kind) {
+    case 'vwma':
+      return { pane: 'price', series: [{ key: 'v', label, axisLabel: `VWMA(${p('period')})`, color: ind.color, style: 'line', values: vwma(bars, p('period')) }] };
+    case 'obv': {
+      const o = obv(bars);
+      const series: OutSeries[] = [{ key: 'v', label, axisLabel: 'OBV', color: ind.color, style: 'line', values: o }];
+      const ma = Math.floor(p('ma'));
+      if (ma >= 1 && o.some(x => x !== null)) {
+        series.push({ key: 'ma', label: `${label} SMA`, axisLabel: `SMA(${ma})`, color: '#f59e0b', style: 'line', values: smaArray(o.map(x => x ?? 0), ma) });
+      }
+      return { pane: 'sub', series };
+    }
+    case 'mfi':
+      return { pane: 'sub', series: [{ key: 'v', label, axisLabel: `MFI(${p('period')})`, color: ind.color, style: 'line', values: mfi(bars, p('period')), guides: [20, 80] }] };
+    case 'cmf':
+      return { pane: 'sub', series: [{ key: 'v', label, axisLabel: `CMF(${p('period')})`, color: ind.color, style: 'line', values: cmf(bars, p('period')), guides: [0] }] };
+    case 'rvol': {
+      // Histogram: amber at or above the highlight, the indicator colour at or above 1× (normal or busier), dim below.
+      const r = relativeVolume(bars, p('days'));
+      const hi = p('hi');
+      return {
+        pane: 'sub',
+        series: [{
+          key: 'v', label, axisLabel: 'RVOL', color: ind.color, style: 'histogram', values: r,
+          colors: r.map(x => (x === null ? null : x >= hi ? '#f59e0b' : x >= 1 ? ind.color : withAlpha(ind.color, 0.45))),
+        }],
+      };
+    }
+    default:
+      return { pane: 'price', series: [] };
+  }
+}
+
 function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
   const closes = bars.map(b => b.c);
   const p = (k: string) => ind.params[k] ?? catalogEntry(ind.kind).params.find(x => x.key === k)!.def;
@@ -401,6 +463,29 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
       return { pane: 'price', series: [{ key: 'v', label, axisLabel: `SMA(${p('period')})`, color: ind.color, style: 'line', values: smaArray(closes, p('period')) }] };
     case 'vwap':
       return { pane: 'price', series: [{ key: 'v', label, axisLabel: 'VWAP', color: ind.color, style: 'line', values: sessionVwap(bars) }] };
+    case 'vwapbands': {
+      // Centre = sessionVwap exactly; bands 1 px like Bollinger's, so they do not crowd the candles. A band's line breaks
+      // at the day change (the VWAP resets there), like the daily levels.
+      const { vwap, sd } = vwapWithStdev(bars);
+      const breaks = dayBreaks(bars);
+      const series: OutSeries[] = [{ key: 'v', label: `${label} VWAP`, axisLabel: 'VWAP', color: ind.color, style: 'line', values: vwap, breaks }];
+      for (const [k, n] of [['m1', 1], ['m2', 2], ['m3', 3]] as const) {
+        const m = p(k);
+        if (!(m > 0)) continue;
+        const band = (sign: 1 | -1) => vwap.map((x, i) => (x === null || sd[i] === null ? null : x + sign * m * (sd[i] as number)));
+        series.push({ key: `u${n}`, label: `${label} +${m}σ`, axisLabel: `+${m}σ`, color: ind.color, style: 'line', values: band(1), lineWidth: 1, breaks });
+        series.push({ key: `l${n}`, label: `${label} −${m}σ`, axisLabel: `−${m}σ`, color: ind.color, style: 'line', values: band(-1), lineWidth: 1, breaks });
+      }
+      return { pane: 'price', series };
+    }
+    // No volume (the NSE / BSE index): a volume indicator draws nothing, and no empty pane that would squash the
+    // candles; the picker marks these "Needs volume".
+    case 'vwma':
+    case 'obv':
+    case 'mfi':
+    case 'cmf':
+    case 'rvol':
+      return hasVolume(bars) ? volumeSeries(bars, ind, label, p) : { pane: 'price', series: [] };
     case 'supertrend': {
       // Pine-exact ta.supertrend, as on Dhan's (TradingView) charts. The default path differs where the trailing bands
       // cross in a flat stretch, and NIFTY has one every session: the index is frozen from 15:15 to ~15:28 (closing

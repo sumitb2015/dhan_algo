@@ -174,7 +174,12 @@ export default function IndicatorPicker({ open, indicators, editId, onAdd, onCha
                   <button type="button" onClick={() => onAdd(c.kind)}
                     className="w-full flex items-center justify-between px-2 py-2 rounded text-left hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60">
                     <span className="text-sm text-zinc-100">{c.label}</span>
-                    <span className="text-[10px] uppercase tracking-wider text-zinc-500">{c.pane === 'price' ? 'On price' : 'Own pane'}</span>
+                    <span className="flex items-center gap-2 shrink-0">
+                      {c.needsVolume && (
+                        <span className="text-[10px] uppercase tracking-wider text-amber-400" title="Built from traded volume: futures, options and stocks only (the index has none)">Needs volume</span>
+                      )}
+                      <span className="text-[10px] uppercase tracking-wider text-zinc-500">{c.pane === 'price' ? 'On price' : 'Own pane'}</span>
+                    </span>
                   </button>
                 </li>
               ))}
