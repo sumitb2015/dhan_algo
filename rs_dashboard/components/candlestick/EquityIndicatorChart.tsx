@@ -147,6 +147,7 @@ function EquityIndicatorChart({ bars, indicators, initialBars, viewToken, logSca
             color: s.color, lineWidth: thick as 1 | 2 | 3 | 4, priceLineVisible: false,
             lastValueVisible: !s.shadow && !s.noLabel, title: s.shadow || s.noLabel ? '' : s.axisLabel, crosshairMarkerVisible: false,
             ...(s.shadow ? { autoscaleInfoProvider: () => null } : {}),
+            ...(s.lineStyle === 'dashed' ? { lineStyle: LineStyle.Dashed } : {}),
           }, paneIdx);
         }
         // Oscillator guides, dashed as on the terminal; histograms too (MACD / AO zero, RVOL 1.0).

@@ -6,7 +6,8 @@ import { emaSmaSeeded, smaArray, rsiArray, stochRsiArray, adxDmiArray, supertren
 import { barAnchorSec, inMarketSession, inOrderSession } from './indexScalperSession.ts';
 import { marketStructure } from './indexScalperStructure.ts';
 import { cmf, hasVolume, mfi, obv, relativeVolume, vwapWithStdev, vwma } from './volumeIndicators.ts';
-import { awesomeOscillator, bbPercentB, bbWidth, bbZones, fourColor, macdPine } from './tvIndicators.ts';
+import { awesomeOscillator, bbPercentB, bbWidth, bbZones, donchian, fourColor, macdPine, slopeStates } from './tvIndicators.ts';
+import { dowDrawings, dowKeyLevel, dowStructure } from './dowStructure.ts';
 import type { Underlying } from './indexScalperInstrument.ts';
 
 /** `v` = traded volume in the bar, when the instrument has one (a future, an option); an index has none. */
@@ -15,7 +16,7 @@ export interface Bar { t: number; o: number; h: number; l: number; c: number; v?
 
 export type IndicatorKind = 'volume' | 'ema' | 'emacross' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'daylevels' | 'rsi' | 'stochrsi' | 'macd' | 'adx' | 'structure'
   | 'vwapbands' | 'obv' | 'mfi' | 'cmf' | 'vwma' | 'rvol'
-  | 'ao' | 'bbpctb' | 'bbw' | 'bbbars';
+  | 'ao' | 'bbpctb' | 'bbw' | 'bbbars' | 'ema6' | 'donchian' | 'dow';
 
 export interface IndicatorInstance {
   id: string;
@@ -170,6 +171,32 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
     kind: 'bbbars', label: 'Bollinger Bars (candle colours)', pane: 'price', color: '#26a69a', fixedStyle: true,
     params: [{ key: 'period', label: 'Length', def: 20, min: 2, max: 200 }, { key: 'mult', label: 'StdDev', def: 2, min: 0.5, max: 10 }],
   },
+  // The terminal's "Moving Average Colored 6 EMA Multiple": six EMAs of the close, each green while rising, red while
+  // falling, and its own colour while flat. A length of 0 hides that EMA.
+  {
+    kind: 'ema6', label: 'Moving Average Colored (6 EMA)', pane: 'price', color: '#26a69a', fixedStyle: true,
+    params: [
+      { key: 'l1', label: 'EMA 1 length (0 = off)', def: 8, min: 0, max: 500 }, { key: 'l2', label: 'EMA 2 length (0 = off)', def: 13, min: 0, max: 500 },
+      { key: 'l3', label: 'EMA 3 length (0 = off)', def: 21, min: 0, max: 500 }, { key: 'l4', label: 'EMA 4 length (0 = off)', def: 34, min: 0, max: 500 },
+      { key: 'l5', label: 'EMA 5 length (0 = off)', def: 55, min: 0, max: 500 }, { key: 'l6', label: 'EMA 6 length (0 = off)', def: 89, min: 0, max: 500 },
+    ],
+  },
+  // TradingView "Donchian Channels": highest high / lowest low of `period` bars and their mid-point.
+  { kind: 'donchian', label: 'Donchian Channels', pane: 'price', color: '#2196f3', params: [{ key: 'period', label: 'Length', def: 20, min: 1, max: 500 }] },
+  // "Dow Structure - Swings, BOS & CHoCH" (K'u Hero, MPL-2.0; lib/dowStructure.ts): HH / HL / LH / LL swing labels, BOS /
+  // CHoCH lines, the key level (pullback low / rally high) and the trend on its axis label. Closed bars only.
+  {
+    kind: 'dow', label: 'Dow Structure (swings, BOS & CHoCH)', pane: 'price', color: '#26a69a', fixedStyle: true,
+    params: [
+      { key: 'left', label: 'Swing: left bars', def: 3, min: 1, max: 20 },
+      { key: 'right', label: 'Swing: right bars', def: 3, min: 1, max: 20 },
+      { key: 'hhhl', label: 'Trend method HH-HL / LH-LL (off = pullback low / rally high)', def: 0, min: 0, max: 1, toggle: true },
+      { key: 'wick', label: 'Break by wick (off = close)', def: 0, min: 0, max: 1, toggle: true },
+      { key: 'swings', label: 'Swing labels (HH / HL / LH / LL)', def: 1, min: 0, max: 1, toggle: true },
+      { key: 'events', label: 'Structure breaks (BOS / CHoCH)', def: 1, min: 0, max: 1, toggle: true },
+      { key: 'level', label: 'Key level line', def: 1, min: 0, max: 1, toggle: true },
+    ],
+  },
 ];
 
 /** The terminal's colours: Bollinger Bars zones (2 / 1 / −1 / −2), the MACD and RVOL four-way histograms (growing /
@@ -180,6 +207,13 @@ const RVOL4: [string, string, string, string] = ['#26a69a', '#b2dfdb', '#ef9a9a'
 const AO_UP = '#089981', AO_DOWN = '#f23645';
 const VWAP_BAND = ['#4caf50', '#808000', '#008080'];
 const TV_ORANGE = '#ff6d00';
+/** 6 EMA ribbon: rising / falling, and each EMA's own colour while flat (the terminal's defaults). */
+const RIBBON_UP = '#26a69a', RIBBON_DOWN = '#ef5350';
+const RIBBON_FLAT = ['#f44336', '#ff9800', '#ffeb3b', '#4caf50', '#2196f3', '#9c27b0'];
+/** Dow Structure colours (the script's defaults) and how many non-overlapping lanes BOS / CHoCH segments are packed into
+ *  (a fixed number, so the chart's series count never changes with the data). */
+const DOW_UP = '#26a69a', DOW_DN = '#ef5350', DOW_RANGE = '#9e9e9e';
+const DOW_LANES = 4;
 
 /** Pine `ta.crossover` / `ta.crossunder` of `a` over `b`: bar i is a cross up when a > b now and a <= b on the bar
  *  before (down: a < b now, a >= b before). Bars where either value is missing are skipped. */
@@ -244,7 +278,8 @@ export function indicatorLabel(ind: IndicatorInstance): string {
   const name = ind.kind === 'vwap' ? 'VWAP' : ind.kind === 'cpr' ? 'CPR' : ind.kind === 'pivots' ? 'Pivots S/R' : ind.kind === 'daylevels' ? 'Day H/L' : ind.kind === 'structure' ? 'Structure'
     : ind.kind === 'vwapbands' ? 'VWAP bands' : ind.kind === 'vwma' ? 'VWMA' : ind.kind === 'obv' ? 'OBV' : ind.kind === 'mfi' ? 'MFI'
     : ind.kind === 'cmf' ? 'CMF' : ind.kind === 'rvol' ? 'RVOL' : ind.kind === 'ao' ? 'AO' : ind.kind === 'bbpctb' ? '%B'
-    : ind.kind === 'bbw' ? 'BBW' : ind.kind === 'bbbars' ? 'BB Bars' : c.label;
+    : ind.kind === 'bbw' ? 'BBW' : ind.kind === 'bbbars' ? 'BB Bars' : ind.kind === 'ema6' ? '6 EMA' : ind.kind === 'donchian' ? 'DC'
+    : ind.kind === 'dow' ? 'Dow Structure' : c.label;
   return ps ? `${name} (${ps})` : name;
 }
 
@@ -289,6 +324,14 @@ export interface OutSeries {
   }[];
   /** No name / last value on the price scale (the structure zig-zag's last point is a past swing, not a level now). */
   noLabel?: boolean;
+  /** Per-point `colors` WITHOUT the transparent gap before a colour change (a rising / falling coloured MA): the line
+   *  stays continuous and just changes colour. Default (Supertrend) leaves TradingView's gap at a flip. */
+  continuousColors?: boolean;
+  /** Dashed line (a BOS segment); default solid. */
+  lineStyle?: 'dashed';
+  /** Changes whenever points BEFORE the last bar change (a new swing label or BOS / CHoCH segment): the chart then
+   *  re-sends this one series on a tick instead of updating only its last point. */
+  dataKey?: string;
 }
 
 export interface IndicatorOutput {
@@ -443,6 +486,67 @@ export function shadowOf(s: OutSeries): OutSeries {
     key: `${s.key}:shadow`, label: `${s.label} shadow`, axisLabel: '', style: 'line', shadow: true,
     color: withAlpha(s.color, SHADOW_ALPHA), lineWidth: (s.lineWidth ?? 1) + SHADOW_EXTRA, values: s.values, breaks: s.breaks, ...(s.flat ? { flat: true } : {}),
   };
+}
+
+/** Dow Structure drawn with line series: two hidden series carry the swing labels (markers above highs / below lows), BOS
+ *  (dashed) and CHoCH (solid) segments are packed into DOW_LANES lanes each (a lane holds segments that do not overlap,
+ *  each ending in a break; the label is a marker at the segment's middle bar), and the key level is one line coloured by
+ *  the trend with a gap where it moves. The forming (last) bar is never processed: the script runs on closed bars only. */
+function dowSeries(bars: Bar[], ind: IndicatorInstance, label: string, p: (k: string) => number): IndicatorOutput {
+  const right = p('right');
+  const hhhl = p('hhhl') === 1;
+  const d = dowStructure(bars, { left: p('left'), right, method: hhhl ? 'hhhl' : 'pullback', breakBy: p('wick') === 1 ? 'wick' : 'close', lastClosedIndex: bars.length - 2 });
+  const { swings, events } = dowDrawings(bars, d, right);
+  const n = bars.length;
+  const nulls = () => bars.map(() => null as number | null);
+  const tone = (t: 1 | -1 | 0) => (t === 1 ? DOW_UP : t === -1 ? DOW_DN : DOW_RANGE);
+  const series: OutSeries[] = [];
+  const key = `${swings.length}:${events.length}`;
+  // swing labels: text above highs / below lows, on two invisible series (a marker needs a value at its bar)
+  const showSw = p('swings') === 1, showEv = p('events') === 1, showLv = p('level') === 1;
+  for (const high of [true, false]) {
+    const values = nulls();
+    const sw = showSw ? swings.filter(x => x.high === high) : [];
+    for (const x of sw) values[x.i] = x.price;
+    series.push({
+      key: high ? 'swh' : 'swl', label: `${label} swing ${high ? 'highs' : 'lows'}`, axisLabel: '', color: 'transparent', style: 'line', values,
+      lineWidth: 1, noLabel: true, dataKey: key,
+      markers: sw.map(x => ({ i: x.i, price: x.price, up: high, color: tone(x.tone), text: x.text, size: 0, shape: 'circle' as const, position: (high ? 'aboveBar' : 'belowBar') as 'aboveBar' | 'belowBar' })),
+    });
+  }
+  // BOS (dashed) and CHoCH (solid) lanes
+  for (const bos of [true, false]) {
+    const lanes = Array.from({ length: DOW_LANES }, () => ({ values: nulls(), colors: bars.map(() => null as string | null), breaks: bars.map(() => false), end: -1, markers: [] as NonNullable<OutSeries['markers']> }));
+    for (const e of showEv ? events.filter(x => x.bos === bos) : []) {
+      // the first lane free before this segment starts; else the one that ends first, the new segment starting after it
+      let lane = lanes.find(l => l.end < e.from);
+      if (!lane) lane = lanes.reduce((a, b) => (b.end < a.end ? b : a));
+      const from = Math.max(e.from, lane.end + 1);
+      if (from > e.to) continue;
+      const c = e.up ? DOW_UP : DOW_DN;
+      for (let i = from; i <= e.to; i++) { lane.values[i] = e.level; lane.colors[i] = c; }
+      lane.breaks[e.to] = true;
+      lane.end = e.to;
+      const mid = Math.min(Math.max(e.mid, from), e.to);
+      lane.markers.push({ i: mid, price: e.level, up: e.up, color: c, text: bos ? 'BOS' : 'CHoCH', size: 0, shape: 'circle', position: e.up ? 'aboveBar' : 'belowBar' });
+    }
+    lanes.forEach((l, k) => series.push({
+      key: `${bos ? 'bos' : 'choch'}${k}`, label: `${label} ${bos ? 'BOS' : 'CHoCH'}`, axisLabel: '', color: DOW_UP, style: 'line', values: l.values,
+      colors: l.colors, continuousColors: true, breaks: l.breaks, lineWidth: 1, noLabel: true, dataKey: key, markers: l.markers,
+      ...(bos ? { lineStyle: 'dashed' as const } : {}),
+    }));
+  }
+  // key level: the trend's colour, a gap where it moves; its axis label carries the trend state (the script's box)
+  const kl = showLv ? dowKeyLevel(d) : nulls();
+  const last = d[n - 1];
+  const state = !last ? '' : last.dir === 1 ? 'Up' : last.dir === -1 ? 'Down' : 'Range';
+  const what = !last || last.dir === 0 ? '' : hhhl ? (last.dir === 1 ? ' · Last swing low' : ' · Last swing high') : (last.dir === 1 ? ' · Pullback low' : ' · Rally high');
+  series.push({
+    key: 'lvl', label: `${label} key level`, axisLabel: `${state}${what}`, color: tone((last?.dir ?? 0) as 1 | -1 | 0), style: 'line', values: kl,
+    colors: d.map(x => tone(x.dir as 1 | -1 | 0)), continuousColors: true, breaks: kl.map((v, i) => v !== null && (i + 1 >= n || kl[i + 1] === null)),
+    lineWidth: 2, dataKey: `${key}:${last?.dir}:${last?.lvl}`,
+  });
+  return { pane: 'price', series };
 }
 
 /** The volume indicators' series, for bars that carry volume (computeSeries returns nothing without it). */
@@ -638,6 +742,34 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
       const z = bbZones(closes, p('period'), p('mult'));
       return { pane: 'price', series: [], barColors: z.map(x => (x === null ? null : BB_BAR_COLORS[x])) };
     }
+    case 'ema6': {
+      // Pine ta.ema of the close (SMA-seeded) for each length; coloured by its own slope, continuous (no gap at a change).
+      const series: OutSeries[] = [];
+      (['l1', 'l2', 'l3', 'l4', 'l5', 'l6'] as const).forEach((k, n) => {
+        const len = Math.floor(p(k));
+        if (!(len >= 1)) return;
+        const v = emaSmaSeeded(closes, len);
+        const st = slopeStates(v);
+        series.push({
+          key: k, label: `${label} ${len}`, axisLabel: `EMA ${len}`, color: RIBBON_FLAT[n], style: 'line', values: v, lineWidth: 1,
+          colors: st.map(x => (x === null ? null : x === 'up' ? RIBBON_UP : x === 'down' ? RIBBON_DOWN : RIBBON_FLAT[n])), continuousColors: true,
+        });
+      });
+      return { pane: 'price', series };
+    }
+    case 'dow':
+      return dowSeries(bars, ind, label, p);
+    case 'donchian': {
+      const dc = donchian(bars, p('period'));
+      return {
+        pane: 'price',
+        series: [
+          { key: 'up', label: `${label} upper`, axisLabel: 'DC upper', color: ind.color, style: 'line', values: dc.upper, lineWidth: 1 },
+          { key: 'mid', label: `${label} basis`, axisLabel: 'DC basis', color: TV_ORANGE, style: 'line', values: dc.basis, lineWidth: 1 },
+          { key: 'lo', label: `${label} lower`, axisLabel: 'DC lower', color: ind.color, style: 'line', values: dc.lower, lineWidth: 1 },
+        ],
+      };
+    }
     case 'adx': {
       const d = adxDmiArray(bars.map(b => b.h), bars.map(b => b.l), closes, p('period'));
       return {
@@ -760,7 +892,7 @@ export function pointColor(s: OutSeries, i: number): string | undefined {
   if (s.breaks?.[i]) return 'transparent';
   if (!s.colors) return undefined;
   const c = s.colors[i] ?? s.color;
-  if (s.style !== 'line') return c;
+  if (s.style !== 'line' || s.continuousColors) return c;
   const next = i + 1 < s.colors.length ? s.colors[i + 1] : null;
   return next && s.colors[i] && next !== s.colors[i] ? 'transparent' : c;
 }
@@ -772,6 +904,7 @@ export function flipsAtLast(s: OutSeries): boolean {
   if (s.style !== 'line' || n < 2) return false;
   // A daily level whose last bar opened a new day: the point before it turned transparent (the day-change gap).
   if (s.breaks?.[n - 2]) return true;
+  if (s.continuousColors) return false;   // no gap: the previous point's colour never depends on the last bar
   return !!s.colors && !!s.colors[n - 1] && !!s.colors[n - 2] && s.colors[n - 1] !== s.colors[n - 2];
 }
 

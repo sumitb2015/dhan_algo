@@ -236,6 +236,8 @@ function ScalperChart(props: Props) {
   const indSeriesRef = useRef<ISeriesApi<SeriesType>[]>([]);
   /** Last value sent per flat day-level series (index into indSeriesRef): a change repaints the whole series. */
   const flatLastRef = useRef(new Map<number, number | null>());
+  /** Last `dataKey` sent per indicator series index (see OutSeries.dataKey). */
+  const dataKeyRef = useRef(new Map<number, string>());
   const volSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const volMaRef = useRef<ISeriesApi<'Line'> | null>(null);
   const volPrevRef = useRef<{ n: number; first: number; lastT: number } | null>(null);
@@ -600,6 +602,10 @@ function ScalperChart(props: Props) {
             if (!api) continue;
             if (recolor && (s.colors || s.breaks) && s.style === 'line') { api.setData(seriesData(s, bars) as never); continue; }
             const v = s.values[s.values.length - 1];
+            // Points before the last bar changed (a new Dow Structure swing label or BOS / CHoCH segment): re-send it.
+            if (s.dataKey !== undefined && dataKeyRef.current.get(k - 1) !== s.dataKey) {
+              api.setData(seriesData(s, bars) as never); dataKeyRef.current.set(k - 1, s.dataKey); syncMarkers(k - 1, s, api); continue;
+            }
             // A flat day level (DH / DL) that moved: today's whole line moves with it, so re-send just this series.
             if (s.flat && flatLastRef.current.get(k - 1) !== v) { api.setData(seriesData(s, bars) as never); flatLastRef.current.set(k - 1, v); continue; }
             if (v === null) continue;
@@ -619,6 +625,7 @@ function ScalperChart(props: Props) {
       for (const s of indSeriesRef.current) { try { chart.removeSeries(s); } catch { /* gone */ } }
       indSeriesRef.current = [];
       flatLastRef.current.clear();
+      dataKeyRef.current.clear();
       // their marker plugins went with the series
       markerApisRef.current.clear();
       markerSigRef.current.clear();
@@ -645,6 +652,7 @@ function ScalperChart(props: Props) {
               // A shadow line (Day High / Low) is a faint wide copy under its level: no label of its own.
               color: s.color, lineWidth: thick as 1 | 2 | 3 | 4, priceLineVisible: false, lastValueVisible: !s.shadow && !s.noLabel, title: s.shadow || s.noLabel ? '' : s.axisLabel,
               crosshairMarkerVisible: false, ...(noScale ? { autoscaleInfoProvider: () => null } : {}),
+              ...(s.lineStyle === 'dashed' ? { lineStyle: LineStyle.Dashed } : {}),
             }, paneIdx);
           }
           // Oscillator guides (RSI 30 / 70, MFI 20 / 80, the MACD / AO zero, RVOL 1.0), dashed as on the terminal; histograms too.
@@ -667,6 +675,7 @@ function ScalperChart(props: Props) {
         if (!api) continue;
         api.setData(seriesData(s, bars) as never);
         if (s.flat) flatLastRef.current.set(k - 1, s.values[s.values.length - 1]);
+        if (s.dataKey !== undefined) dataKeyRef.current.set(k - 1, s.dataKey);
         syncMarkers(k - 1, s, api);
       }
     }

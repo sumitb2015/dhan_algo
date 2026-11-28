@@ -88,3 +88,26 @@ export function fourColor(values: (number | null)[], ref: number, c: [string, st
     return v >= ref ? (up ? c[0] : c[1]) : (up ? c[2] : c[3]);
   });
 }
+
+/** Rising / falling / flat of a line against its own previous value (TradingView's "Moving Average Colored": `ma >
+ *  ma[1]` rising, `<` falling, else flat). The first value (no previous) is flat. */
+export function slopeStates(values: (number | null)[]): ('up' | 'down' | 'flat' | null)[] {
+  return values.map((v, i) => {
+    if (v === null) return null;
+    const prev = i > 0 ? values[i - 1] : null;
+    if (prev === null) return 'flat';
+    return v > prev ? 'up' : v < prev ? 'down' : 'flat';
+  });
+}
+
+/** TradingView "Donchian Channels": highest high / lowest low over `len` bars, basis = their average. */
+export function donchian(bars: Bar[], len = 20): { upper: (number | null)[]; basis: (number | null)[]; lower: (number | null)[] } {
+  const upper: (number | null)[] = [], lower: (number | null)[] = [], basis: (number | null)[] = [];
+  for (let i = 0; i < bars.length; i++) {
+    if (i < len - 1) { upper.push(null); lower.push(null); basis.push(null); continue; }
+    let hi = -Infinity, lo = Infinity;
+    for (let k = i - len + 1; k <= i; k++) { if (bars[k].h > hi) hi = bars[k].h; if (bars[k].l < lo) lo = bars[k].l; }
+    upper.push(hi); lower.push(lo); basis.push((hi + lo) / 2);
+  }
+  return { upper, basis, lower };
+}

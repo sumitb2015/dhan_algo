@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { awesomeOscillator, bbPercentB, bbWidth, bbZones, fourColor, macdPine } from './tvIndicators.ts';
-import { BB_BAR_COLORS, bollinger, catalogEntry, computeIndicator, newIndicator, type Bar } from './indexScalperIndicators.ts';
+import { BB_BAR_COLORS, bollinger, catalogEntry, computeIndicator, flipsAtLast, newIndicator, pointColor, type Bar } from './indexScalperIndicators.ts';
 
 // Parity with the tradingcharts.co terminal (tvIndicators.parity.json `_source`): its legend values on BHARTIARTL 1-minute
 // bars of 27 Nov 2026, against our functions on the same Dhan bars from where its loaded history started.
@@ -85,4 +85,38 @@ test('catalog defaults and colours follow the terminal', () => {
   assert.deepEqual(computeIndicator(bars, newIndicator('ao', 'a')).series[0].guides, [0]);
   assert.deepEqual(computeIndicator(bars, newIndicator('bbpctb', 'p')).series[0].guides, [0, 1]);
   assert.deepEqual(computeIndicator(bars, newIndicator('rvol', 'r')).series[0].guides, [1]);
+});
+
+// 6 EMA ribbon + Donchian Channels against the same terminal (tvIndicators.ribbon.parity.json `_source`).
+const rib = JSON.parse(readFileSync(new URL('./tvIndicators.ribbon.parity.json', import.meta.url), 'utf8')) as {
+  rows: { sample: number; o: number; h: number; l: number; c: number; ema: number[]; slope: string; dcUpper: number; dcBasis: number; dcLower: number }[];
+};
+
+test('6 EMA colored ribbon and Donchian Channels match the terminal exactly (values and rising / falling colours)', () => {
+  const out = computeIndicator(bars, newIndicator('ema6', 'e'));
+  const dc = computeIndicator(bars, newIndicator('donchian', 'd'));
+  assert.deepEqual(out.series.map(s => s.axisLabel), ['EMA 8', 'EMA 13', 'EMA 21', 'EMA 34', 'EMA 55', 'EMA 89']);
+  let i = bars.length - 1;
+  for (let k = rib.rows.length - 1; k >= 0; k--) {
+    const r = rib.rows[k];
+    while (i >= 0 && !(bars[i].o === r.o && bars[i].h === r.h && bars[i].l === r.l && bars[i].c === r.c)) i--;
+    assert.ok(i >= 0, `row ${r.sample} not found`);
+    out.series.forEach((s, n) => {
+      assert.equal(Number((s.values[i] as number).toFixed(4)), r.ema[n], `sample ${r.sample} ${s.axisLabel}`);
+      const want = r.slope[n] === 'r' ? '#26a69a' : r.slope[n] === 'f' ? '#ef5350' : s.color;
+      assert.equal(s.colors?.[i], want, `sample ${r.sample} ${s.axisLabel} colour`);
+    });
+    assert.deepEqual(dc.series.map(s => Number((s.values[i] as number).toFixed(4))), [r.dcUpper, r.dcBasis, r.dcLower], `sample ${r.sample} Donchian`);
+    i--;
+  }
+});
+
+test('the ribbon stays continuous: no transparent gap where an EMA changes colour, and no forced redraw', () => {
+  const s = computeIndicator(bars, newIndicator('ema6', 'e')).series[0];
+  const change = s.colors!.findIndex((c, i) => i > 0 && c && s.colors![i - 1] && c !== s.colors![i - 1]);
+  assert.ok(change > 0);
+  assert.notEqual(pointColor(s, change - 1), 'transparent');
+  assert.equal(flipsAtLast({ ...s, colors: [...s.colors!.slice(0, -1), s.colors!.at(-2) === '#26a69a' ? '#ef5350' : '#26a69a'] }), false);
+  // a length of 0 hides that EMA
+  assert.equal(computeIndicator(bars, { ...newIndicator('ema6', 'e'), params: { l1: 8, l2: 0, l3: 21, l4: 0, l5: 0, l6: 0 } }).series.length, 2);
 });
