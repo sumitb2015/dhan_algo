@@ -30,7 +30,10 @@ test('VWAP and its stdev match the reference; the centre is exactly sessionVwap'
 
 test('OBV, MFI(14), CMF(20), VWMA(20) match the reference', () => {
   close(obv(bars), fx.obv, 1e-12, 'obv');
-  close(mfi(bars, 14), fx.mfi14, 1e-9, 'mfi');
+  // The reference is Pine's (first value at bar 13); the terminal's, and ours, starts at bar 14.
+  const m = mfi(bars, 14);
+  assert.equal(m.findIndex(x => x !== null), 14);
+  close(m, fx.mfi14.map((x, i) => (i < 14 ? null : x)), 1e-9, 'mfi');
   close(cmf(bars, 20), fx.cmf20, 1e-9, 'cmf');
   close(vwma(bars, 20), fx.vwma20, 1e-9, 'vwma');
 });

@@ -111,6 +111,19 @@ test('6 EMA colored ribbon and Donchian Channels match the terminal exactly (val
   }
 });
 
+test('6 EMA ribbon is seeded with the first close and MFI starts at bar 14, as the terminal (BHARTIARTL 15 m)', async () => {
+  // Read 2026-11-28 by running the terminal's own indicator worker on these same 288 bars (volumeIndicators.parity.json
+  // tf15): every EMA has a value from bar 0, and its last values are these. Pine's SMA seed gave EMA 89 2102.4476.
+  const v15 = JSON.parse(readFileSync(new URL('./volumeIndicators.parity.json', import.meta.url), 'utf8')) as { tf15: { bars: number[][] } };
+  const b15: Bar[] = v15.tf15.bars.map(([t, o, h, l, c, v]) => ({ t, o, h, l, c, v }));
+  const s = computeIndicator(b15, newIndicator('ema6', 'e')).series;
+  const last = Object.fromEntries(s.map(x => [x.axisLabel, Number((x.values.at(-1) as number).toFixed(4))]));
+  assert.deepEqual([last['EMA 8'], last['EMA 21'], last['EMA 55'], last['EMA 89']], [2063.1436, 2071.2041, 2090.939, 2102.5539]);
+  for (const x of s) assert.equal(x.values[0], b15[0].c);
+  const { mfi } = await import('./volumeIndicators.ts');
+  assert.equal(mfi(b15, 14).findIndex(x => x !== null), 14);
+});
+
 test('the ribbon stays continuous: no transparent gap where an EMA changes colour, and no forced redraw', () => {
   const s = computeIndicator(bars, newIndicator('ema6', 'e')).series[0];
   const change = s.colors!.findIndex((c, i) => i > 0 && c && s.colors![i - 1] && c !== s.colors![i - 1]);

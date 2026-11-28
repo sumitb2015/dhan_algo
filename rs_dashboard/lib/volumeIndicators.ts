@@ -73,7 +73,8 @@ function rollingSum(xs: number[], len: number): (number | null)[] {
 /**
  * Pine `ta.mfi(hlc3, len)` (TradingView "Money Flow Index", 14): upper = Σ volume·tp over bars whose tp rose, lower = Σ
  * over bars whose tp fell (an unchanged tp counts in neither), MFI = 100 − 100 / (1 + upper / lower). Pine compares a
- * missing change as false, so the very first bar counts in both sums; we do the same. No falling flow in the window
+ * missing change as false, so the very first bar counts in both sums; we do the same, but print nothing until bar
+ * `len` (the terminal's first value; Pine's comes one bar earlier). No falling flow in the window
  * (lower 0) reads 100, no flow at all null. All null without volume.
  */
 export function mfi(bars: Bar[], len: number): (number | null)[] {
@@ -90,7 +91,8 @@ export function mfi(bars: Bar[], len: number): (number | null)[] {
   const su = rollingSum(up, L), sd = rollingSum(dn, L);
   return su.map((u, i) => {
     const d = sd[i];
-    if (u === null || d === null) return null;
+    // First value at bar `len` (len changes in the window), as the tradingcharts.co terminal; Pine starts one bar earlier.
+    if (u === null || d === null || i < L) return null;
     if (d === 0) return u > 0 ? 100 : null;
     return 100 - 100 / (1 + u / d);
   });

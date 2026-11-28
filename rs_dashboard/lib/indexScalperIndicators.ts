@@ -2,7 +2,7 @@
 // indicator instance it returns plain series the chart component draws. Maths comes from lib/indicators.ts (never a
 // private copy), except VWAP, which has no shared index-safe version.
 
-import { emaSmaSeeded, smaArray, rsiArray, stochRsiArray, adxDmiArray, supertrendSeries } from './indicators.ts';
+import { emaArray, emaSmaSeeded, smaArray, rsiArray, stochRsiArray, adxDmiArray, supertrendSeries } from './indicators.ts';
 import { barAnchorSec, inMarketSession, inOrderSession } from './indexScalperSession.ts';
 import { marketStructure } from './indexScalperStructure.ts';
 import { cmf, hasVolume, mfi, obv, relativeVolume, vwapWithStdev, vwma } from './volumeIndicators.ts';
@@ -761,12 +761,14 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance, lastClosed: boolean)
       return { pane: 'price', series: [], barColors: z.map(x => (x === null ? null : BB_BAR_COLORS[x])) };
     }
     case 'ema6': {
-      // Pine ta.ema of the close (SMA-seeded) for each length; coloured by its own slope, continuous (no gap at a change).
+      // The terminal's EMA of the close for each length, seeded with the FIRST close (a value from bar 0), not Pine's
+      // SMA seed: on a short history the SMA seed left EMA 89 up to 0.44% off the terminal (BHARTIARTL 15 m, 2026-11-28).
+      // Coloured by its own slope, continuous (no gap at a change).
       const series: OutSeries[] = [];
       (['l1', 'l2', 'l3', 'l4', 'l5', 'l6'] as const).forEach((k, n) => {
         const len = Math.floor(p(k));
         if (!(len >= 1)) return;
-        const v = emaSmaSeeded(closes, len);
+        const v: (number | null)[] = emaArray(closes, len);
         const st = slopeStates(v);
         series.push({
           key: k, label: `${label} ${len}`, axisLabel: `EMA ${len}`, color: RIBBON_FLAT[n], style: 'line', values: v, lineWidth: 1,
