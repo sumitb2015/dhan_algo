@@ -15,7 +15,7 @@ import type { ChartViewport } from './ScalperChart';
 import type { PickedContract } from './OptionChainPanel';
 import type { IndexScalperFeed } from './useIndexScalperFeed';
 import { nearestStrike, resolveSource } from '@/lib/indexScalperChartSource';
-import { BUILDUP_STYLE, chipStats, compactPct, strikesAroundAtm, visibleStrikeRows, type QuickSettings, type StrikeRow } from '@/lib/indexScalperQuickTrade';
+import { BUILDUP_STYLE, chipStats, compactPct, quickRowGapPx, strongTag, strikesAroundAtm, visibleStrikeRows, type QuickSettings, type StrikeRow } from '@/lib/indexScalperQuickTrade';
 import { INSTRUMENTS, isMcx, type Underlying } from '@/lib/indexScalperInstrument';
 import { cn } from '@/lib/utils';
 
@@ -35,9 +35,6 @@ interface Props {
  *  (right-[84px]) and the OI profile's bars + labels. A row whose strike holds a position (Quick Trade anchors it on the
  *  strike line) measures that chip, which grows with its TP / SL badges, and sits just left of it. */
 const CHIPS_RIGHT = 430;
-/** Minimum pixel gap between ladder rows: a chip (22 px), plus its price % / OI % line above it (~14 px) when shown. */
-const ROW_GAP_PX = 38;
-const ROW_GAP_NO_STATS_PX = 24;
 /** Width of one row's label + C + P chips (every cell has a fixed width so the ladder lines up in columns): a narrow
  *  pane (two charts on a laptop) pulls the chips right so they never leave the plot on the left. */
 const ROW_W = 234;
@@ -55,8 +52,8 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
   const shownStrikes = useMemo(() => strikesAroundAtm(strikes, atm, settings.range), [strikes, atm, settings.range]);
   const strikesRef = useRef(shownStrikes);
   const atmRef = useRef(atm);
-  const gapRef = useRef(ROW_GAP_PX);
-  useEffect(() => { strikesRef.current = shownStrikes; atmRef.current = atm; gapRef.current = settings.showStats ? ROW_GAP_PX : ROW_GAP_NO_STATS_PX; });
+  const gapRef = useRef(quickRowGapPx(settings.showStats, settings.showStrong));
+  useEffect(() => { strikesRef.current = shownStrikes; atmRef.current = atm; gapRef.current = quickRowGapPx(settings.showStats, settings.showStrong); });
   useEffect(() => {
     const tick = () => {
       const vp = viewportRef.current;
@@ -182,6 +179,7 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
                 const bu = st.buildup ? BUILDUP_STYLE[st.buildup] : undefined;
                 const priceCls = st.pricePct === null || st.pricePct === 0 ? 'text-zinc-500' : st.pricePct > 0 ? 'text-emerald-400' : 'text-rose-400';
                 const oiCls = st.oiPct === null ? 'text-zinc-500' : bu ? bu.text : 'text-zinc-400';
+                const strong = settings.showStrong ? strongTag(st, settings.strongPricePct, settings.strongOiPct) : null;
                 return (
                   <div key={t} className="relative">
                     {/* price % and OI % vs the previous day; OI coloured by the buildup it makes with the price move */}
@@ -204,6 +202,15 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
                       <span className={cn('w-4 flex items-center justify-center font-bold text-oncolor', t === 'CE' ? 'bg-sky-600' : 'bg-violet-600')}>{t === 'CE' ? 'C' : 'P'}</span>
                       <span data-live={live ? '1' : '0'} className={cn('w-[64px] pr-1 flex items-center justify-end bg-zinc-900', live && !why ? 'text-zinc-100' : shown !== null ? 'text-zinc-400 italic' : 'text-zinc-500')}>{fmt(shown)}</span>
                     </button>
+                    {strong && (
+                      // the option's own strong move: price up / down by the set % with fresh OI (OI up by the set %)
+                      <div data-testid="quick-chip-strong" data-strong={strong}
+                        title={`${r.strike} ${t}: price ${compactPct(st.pricePct)}, OI ${compactPct(st.oiPct)} (thresholds: price ±${settings.strongPricePct}%, OI +${settings.strongOiPct}%; Quick Trade settings)`}
+                        className={cn('absolute top-full left-0 right-0 mt-0.5 h-[11px] flex items-center justify-center gap-0.5 rounded-sm text-[9px] leading-none font-bold text-oncolor whitespace-nowrap pointer-events-auto cursor-default',
+                          strong === 'bull' ? 'bg-emerald-600' : 'bg-rose-600')}>
+                        {strong === 'bull' ? '▲ Strong Bullish' : '▼ Strong Bearish'}
+                      </div>
+                    )}
                     {isOpen && (
                       // Compact: two small B / S buttons LEFT of the chip (lots and any reason in the tooltip). Not right of
                       // it: that is where the strike's position chip sits once it holds a leg, and it would cover them.

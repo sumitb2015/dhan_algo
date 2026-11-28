@@ -87,7 +87,7 @@ import { parseOiMode, type OiMode } from '@/lib/indexScalperOiProfile';
 import { editLotsError, isEditable, movedLevels, orderEditError } from '@/lib/indexScalperOrderEdit';
 import { DEFAULT_BRACKETS, DEFAULT_BRACKETS_KEY, SL_PCT_OPTIONS, TP_PCT_OPTIONS, bracketLabel, clampDefaultBrackets, parseBracketPoints, type BracketUnit, defaultBracketPlan, opensPosition, pendingLeg, type DefaultBracketSettings, type PendingDefault } from '@/lib/indexScalperDefaultBrackets';
 import { optionStopLimit, placedOrderState, premiumBracketsFor } from '@/lib/indexScalperPremiumBrackets';
-import { QUICK_ON_KEY, QUICK_SETTINGS_KEY, DEFAULT_QUICK, MAX_QUICK_RANGE, clampQuickSettings, lotsToRemove, type QuickSettings } from '@/lib/indexScalperQuickTrade';
+import { QUICK_ON_KEY, QUICK_SETTINGS_KEY, DEFAULT_QUICK, MAX_QUICK_RANGE, STRONG_OI_CHOICES, STRONG_PRICE_CHOICES, clampQuickSettings, lotsToRemove, type QuickSettings } from '@/lib/indexScalperQuickTrade';
 
 // v2: v1 could hold an ATM pin taken before any spot was known (the middle of the strike list, e.g. 24200). v1 is
 // read for the layout, instruments and timeframes only; its option strikes go back to ATM.
@@ -2607,6 +2607,9 @@ export default function IndexScalperTerminal() {
 }
 
 
+/** A select's choices plus the saved value when it is not one of them (so a hand-edited setting still shows as itself). */
+const withChoice = (choices: number[], v: number): number[] => (choices.includes(v) ? choices : [...choices, v].sort((a, b) => a - b));
+
 /** Quick Trade settings popover: lots per click for Buy and for Sell (a select: a discrete choice commits at once and a
  *  half-typed number can never size an order, see dhan-commit-on-blur) and the product. CRUDEOILM opens NRML only. */
 function QuickSettingsMenu({ settings, onPatch, nrmlLocked, maxLots, onClose }: {
@@ -2670,6 +2673,27 @@ function QuickSettingsMenu({ settings, onPatch, nrmlLocked, maxLots, onClose }: 
         title="Price % (vs previous close) and OI % (vs previous day) above each C / P chip; OI coloured by its buildup. Display only">
         <span>Show price % / OI %</span>
         <Switch size="sm" checked={settings.showStats} onCheckedChange={v => onPatch({ showStats: v })} aria-label="Show price and OI change" />
+      </label>
+      <label className="flex items-center justify-between gap-2 text-zinc-300 cursor-pointer"
+        title="Strong Bullish / Strong Bearish tag below a C / P chip when the option's price moves by the set % with OI up by the set % (fresh positions). Display only">
+        <span>Strong bull / bear tag</span>
+        <Switch size="sm" checked={settings.showStrong} onCheckedChange={v => onPatch({ showStrong: v })} aria-label="Strong bull or bear tag" />
+      </label>
+      <label className={cn('flex items-center justify-between gap-2 text-zinc-300 pl-3', !settings.showStrong && 'opacity-50')}
+        title="Strong Bullish: price up at least this much; Strong Bearish: price down at least this much (vs previous close)">
+        <span>Price move ≥ (%)</span>
+        <select aria-label="Strong tag price move" value={settings.strongPricePct} disabled={!settings.showStrong}
+          onChange={e => onPatch({ strongPricePct: Number(e.target.value) })} className={sel}>
+          {withChoice(STRONG_PRICE_CHOICES, settings.strongPricePct).map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
+      </label>
+      <label className={cn('flex items-center justify-between gap-2 text-zinc-300 pl-3', !settings.showStrong && 'opacity-50')}
+        title="OI must also be up at least this much vs the previous day (new positions behind the move)">
+        <span>OI up ≥ (%)</span>
+        <select aria-label="Strong tag OI change" value={settings.strongOiPct} disabled={!settings.showStrong}
+          onChange={e => onPatch({ strongOiPct: Number(e.target.value) })} className={sel}>
+          {withChoice(STRONG_OI_CHOICES, settings.strongOiPct).map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
       </label>
       <p className="text-[10px] leading-snug text-zinc-500">One click on Buy / Sell sends a market order at once (REAL only when armed). Max {maxLots} lots per order.</p>
     </div>

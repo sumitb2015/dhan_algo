@@ -16,17 +16,30 @@ export interface QuickSettings {
   stepLots: number;
   /** Price % and OI % (vs the previous day) above each C / P chip. Display only. */
   showStats: boolean;
+  /** "Strong Bullish" / "Strong Bearish" tag below each C / P chip, on the option's own move: price up (bullish) or down
+   *  (bearish) by at least `strongPricePct` % with OI up by at least `strongOiPct` % (fresh positions). Display only. */
+  showStrong: boolean;
+  strongPricePct: number;
+  strongOiPct: number;
 }
 
 export const QUICK_SETTINGS_KEY = 'indexScalper.quick.v1';
 export const QUICK_ON_KEY = 'indexScalper.quickTrade';
-export const DEFAULT_QUICK: QuickSettings = { buyLots: 1, sellLots: 1, product: 'INTRADAY', range: 10, stepLots: 1, showStats: true };
+export const DEFAULT_QUICK: QuickSettings = { buyLots: 1, sellLots: 1, product: 'INTRADAY', range: 10, stepLots: 1, showStats: true, showStrong: true, strongPricePct: 10, strongOiPct: 20 };
+/** Choices for the strong-tag thresholds (selects: a discrete choice commits at once, nothing half-typed). */
+export const STRONG_PRICE_CHOICES = [2, 3, 5, 7.5, 10, 15, 20, 25, 30, 40, 50, 75, 100];
+export const STRONG_OI_CHOICES = [5, 10, 15, 20, 25, 30, 40, 50, 75, 100, 150, 200];
 export const MAX_QUICK_RANGE = 50;
 
 const lots = (v: unknown, d: number): number => {
   const n = typeof v === 'string' ? Number(v) : v;
   if (typeof n !== 'number' || !Number.isFinite(n)) return d;
   return Math.min(MAX_LOTS, Math.max(1, Math.floor(n)));
+};
+
+const pctSetting = (v: unknown, d: number, min: number, max: number): number => {
+  const n = typeof v === 'string' ? Number(v) : v;
+  return typeof n === 'number' && Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : d;
 };
 
 /** Whole lots within 1..MAX_LOTS (a fraction rounds DOWN: never a bigger order than asked); anything else -> default. */
@@ -42,6 +55,9 @@ export function clampQuickSettings(x: unknown): QuickSettings {
     })(),
     stepLots: lots(o.stepLots, DEFAULT_QUICK.stepLots),
     showStats: o.showStats !== false, // on unless switched off (settings saved before it existed keep it on)
+    showStrong: o.showStrong !== false,
+    strongPricePct: pctSetting(o.strongPricePct, DEFAULT_QUICK.strongPricePct, 0.5, 500),
+    strongOiPct: pctSetting(o.strongOiPct, DEFAULT_QUICK.strongOiPct, 1, 1000),
   };
 }
 
@@ -145,4 +161,21 @@ export function chipStats(side: ChipSide | undefined | null, shown: number | nul
     ? null : raw;
   const buildup = pricePct !== null && oiPct !== null ? classifyBuildup(pricePct, oiPct) ?? null : null;
   return { pricePct, oiPct, buildup };
+}
+
+export type StrongTag = 'bull' | 'bear';
+
+/** The chip's strong tag on the option's own move, or null: OI up by at least `oiMin` % with the price up (bull) or down
+ *  (bear) by at least `priceMin` %. Unknown price or OI (null) never tags. */
+export function strongTag(st: Pick<ChipStats, 'pricePct' | 'oiPct'>, priceMin: number, oiMin: number): StrongTag | null {
+  if (st.pricePct === null || st.oiPct === null || st.oiPct < oiMin) return null;
+  if (st.pricePct >= priceMin) return 'bull';
+  if (st.pricePct <= -priceMin) return 'bear';
+  return null;
+}
+
+/** Minimum pixel gap between Quick Trade ladder rows: the chip (22 px) plus the stats line above it (14 px) and the
+ *  strong tag below it (13 px) when they are on, so neither reaches the next row; 24 px with both off. */
+export function quickRowGapPx(showStats: boolean, showStrong: boolean): number {
+  return Math.max(24, 24 + (showStats ? 14 : 0) + (showStrong ? 13 : 0));
 }

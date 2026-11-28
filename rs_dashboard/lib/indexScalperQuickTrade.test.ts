@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chipStats, clampQuickSettings, compactPct, DEFAULT_QUICK, lotsToRemove, strikesAroundAtm, visibleStrikeRows } from './indexScalperQuickTrade.ts';
+import { chipStats, clampQuickSettings, compactPct, quickRowGapPx, strongTag, DEFAULT_QUICK, lotsToRemove, strikesAroundAtm, visibleStrikeRows } from './indexScalperQuickTrade.ts';
 
 const STRIKES = Array.from({ length: 41 }, (_, i) => 24500 + i * 50); // 24500..26500
 
 test('settings: whole lots within 1..20, fractions round down, junk falls back to defaults', () => {
-  assert.deepEqual(clampQuickSettings({ buyLots: 2, sellLots: 5, product: 'MARGIN', range: 4, stepLots: 3, showStats: false }), { buyLots: 2, sellLots: 5, product: 'MARGIN', range: 4, stepLots: 3, showStats: false });
-  assert.deepEqual(clampQuickSettings({ buyLots: 99, sellLots: 0 }), { buyLots: 20, sellLots: 1, product: 'INTRADAY', range: 10, stepLots: 1, showStats: true });
+  assert.deepEqual(clampQuickSettings({ buyLots: 2, sellLots: 5, product: 'MARGIN', range: 4, stepLots: 3, showStats: false, showStrong: false, strongPricePct: 5, strongOiPct: 30 }), { buyLots: 2, sellLots: 5, product: 'MARGIN', range: 4, stepLots: 3, showStats: false, showStrong: false, strongPricePct: 5, strongOiPct: 30 });
+  assert.deepEqual(clampQuickSettings({ buyLots: 99, sellLots: 0 }), { buyLots: 20, sellLots: 1, product: 'INTRADAY', range: 10, stepLots: 1, showStats: true, showStrong: true, strongPricePct: 10, strongOiPct: 20 });
   assert.equal(clampQuickSettings({ stepLots: 99 }).stepLots, 20);
   assert.equal(clampQuickSettings({ stepLots: 2.7 }).stepLots, 2);
   assert.equal(clampQuickSettings({ range: 5 }).stepLots, 1); // saved before the setting existed
@@ -108,4 +108,30 @@ test('chipStats: unknown values are null, never a fake 0% or a buildup made from
   // price known, OI unknown: no buildup
   assert.equal(chipStats({ prev_close: 100 }, 130).buildup, null);
   assert.deepEqual(chipStats(undefined, 100), { pricePct: null, oiPct: null, buildup: null });
+});
+
+test('strong-tag thresholds: kept within range, junk falls back to the defaults', () => {
+  assert.equal(clampQuickSettings({ strongPricePct: 7.5 }).strongPricePct, 7.5);
+  assert.equal(clampQuickSettings({ strongPricePct: '15' }).strongPricePct, 15);
+  assert.equal(clampQuickSettings({ strongPricePct: 0 }).strongPricePct, 0.5); // 0 would tag every tick
+  assert.equal(clampQuickSettings({ strongOiPct: -5 }).strongOiPct, 1);
+  assert.equal(clampQuickSettings({ strongOiPct: 'x' }).strongOiPct, 20);
+  assert.equal(clampQuickSettings({}).showStrong, true); // saved before it existed: on
+});
+
+test('strongTag: the option\'s own move with fresh OI, at or past both thresholds', () => {
+  assert.equal(strongTag({ pricePct: 10, oiPct: 20 }, 10, 20), 'bull');
+  assert.equal(strongTag({ pricePct: -12, oiPct: 50 }, 10, 20), 'bear');
+  assert.equal(strongTag({ pricePct: 9.9, oiPct: 50 }, 10, 20), null); // price move too small
+  assert.equal(strongTag({ pricePct: 30, oiPct: 19.9 }, 10, 20), null); // OI not up enough
+  assert.equal(strongTag({ pricePct: 30, oiPct: -40 }, 10, 20), null); // OI falling (covering / unwinding): not strong
+  assert.equal(strongTag({ pricePct: null, oiPct: 50 }, 10, 20), null);
+  assert.equal(strongTag({ pricePct: 30, oiPct: null }, 10, 20), null);
+});
+
+test('quickRowGapPx: room for the stats line and the strong tag when they are on', () => {
+  assert.equal(quickRowGapPx(false, false), 24);
+  assert.equal(quickRowGapPx(true, false), 38);
+  assert.equal(quickRowGapPx(false, true), 37);
+  assert.equal(quickRowGapPx(true, true), 51);
 });

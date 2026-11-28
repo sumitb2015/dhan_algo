@@ -227,6 +227,24 @@ test.describe('Index Scalper - SENSEX (BSE)', () => {
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem('indexScalper.quick.v1') ?? '{}').showStats)).toBe(false);
     await statsSwitch.click();
     await expect(stats.nth(0)).toBeVisible();
+    // strong tag below the chip: none at the defaults (price ±10%, OI +20%); CE -2.1% with OI +30% is Strong Bearish at
+    // price ±2%, PE +1.5% stays untagged; OI ≥ 40% takes the CE tag away again
+    const strong = overlay.locator('[data-strike="85000"]').getByTestId('quick-chip-strong');
+    await expect(strong).toHaveCount(0);
+    await page.getByRole('combobox', { name: 'Strong tag price move' }).selectOption('2');
+    await expect(strong).toHaveCount(1);
+    await expect(strong).toHaveAttribute('data-strong', 'bear');
+    await expect(strong).toHaveText(/Strong Bearish/);
+    const tagBox = (await strong.boundingBox())!;
+    const ceNow = (await overlay.getByRole('button', { name: 'Quick 85000 CE' }).boundingBox())!;
+    expect(tagBox.y).toBeGreaterThanOrEqual(ceNow.y + ceNow.height - 0.5); // below the chip
+    expect(await strong.evaluate(el => el.scrollWidth)).toBeLessThanOrEqual(ceNow.width + 0.5);
+    if (process.env.ISX_SHOT2) await page.screenshot({ path: process.env.ISX_SHOT2, clip: { x: ceNow.x - 120, y: ceNow.y - 60, width: 340, height: 120 } });
+    await page.getByRole('combobox', { name: 'Strong tag OI change' }).selectOption('40');
+    await expect(strong).toHaveCount(0);
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('indexScalper.quick.v1') ?? '{}'))).toMatchObject({ strongPricePct: 2, strongOiPct: 40 });
+    await page.getByRole('switch', { name: 'Strong bull or bear tag' }).click();
+    await expect(page.getByRole('combobox', { name: 'Strong tag price move' })).toBeDisabled();
     await page.keyboard.press('Escape');
     await overlay.getByRole('button', { name: 'Quick 85000 CE' }).click();
     await overlay.getByRole('button', { name: 'Quick buy 85000 CE 1 lot' }).click();
