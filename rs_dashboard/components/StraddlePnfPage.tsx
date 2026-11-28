@@ -62,6 +62,7 @@ import { detectTriangles, type PnfTriangle } from '@/lib/pnfTriangle';
 import { isSellSignal } from '@/lib/straddlePnf';
 import type { PnfScope } from '@/lib/pnfScope';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent, type AutoPyramid } from './straddlePnf/usePnfAuto';
+import { paperEodReason } from '@/lib/pnfPaperEod';
 import { autoDaySummary, autoMarkers, holdsPosition, isLive, markPnl, PYRAMID_HARD_MAX } from '@/lib/pnfAutoLedger';
 import { armNeedsGuardStop, guardStopProblem, levelsHaveStop, limitsText, NEEDS_STOP_TEXT, parseLimits, type AutoLimits } from '@/lib/pnfAutoSafety';
 import type { ServerGuardCfg } from '@/lib/autoServerGuard';
@@ -572,6 +573,16 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // ── resting LIMIT / SL-limit orders from each chart's B / S rail (ladder-style) ──
   // The paper ledger lives here (not in the trade bar) so a rail fill and a trade-bar order build one paper position.
   const [paper, setPaper] = useState<Record<string, PaperLeg[]>>({});
+  // A SIM position never carries into the next session: a tab left open overnight starts the new IST day with an empty paper book
+  // (the day's markers are already day-stamped, lib/pnfMarkerStore.ts).
+  const paperDayRef = useRef(istToday());
+  useEffect(() => {
+    const id = setInterval(() => {
+      const d = istToday();
+      if (d !== paperDayRef.current) { paperDayRef.current = d; setPaper({}); }
+    }, 30_000);
+    return () => clearInterval(id);
+  }, []);
   const [sizing, setSizing] = useState<{ lots: number; product: PnfProduct }>({ lots: 1, product: 'INTRADAY' });
   const onSizing = useCallback((s: { lots: number; product: PnfProduct }) => {
     setSizing(prev => (prev.lots === s.lots && prev.product === s.product ? prev : s));
@@ -911,7 +922,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // charts may show the same index, and each holds its own option position (a contract's position is shared; an index chart's is not).
   const indexGuardPos = (c: ChartId): LadderPosition | null => {
     const tk = targetKey(c === 2 ? target2 : target1);
-    const ar = autoLedger.rows.find(x => x.chart === c && x.mode === tradeMode && holdsPosition(x) && !!x.traded && x.targetKey === tk && (tradeMode === 'PAPER' || x.broker === broker));
+    const ar = autoLedger.rows.find(x => x.chart === c && x.mode === tradeMode && holdsPosition(x) && !paperEodReason(x, Date.now() / 1000) && !!x.traded && x.targetKey === tk && (tradeMode === 'PAPER' || x.broker === broker));
     const traded = c === 2 ? autoTraded2 : autoTraded1, opt = (c === 2 ? autoOpt2 : autoOpt1).ltp;
     const aLeg = ar ? autoIndexLeg(ar, traded?.ids === ar.traded!.ids && opt != null && opt > 0 ? markPnl(ar, opt) : null) : null;
     // the hand-held part: this chart's own mark, only while the ledger still holds the same row (a mark one render behind a close is not a position)
@@ -922,7 +933,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // An index chart's entry lines: AUTO's option row and the option held by hand, each at the INDEX level it was entered at (display only).
   const indexLinesOf = (c: ChartId): IndexEntryLine[] => {
     const tk = targetKey(c === 2 ? target2 : target1);
-    const ar = autoLedger.rows.find(x => x.chart === c && x.mode === tradeMode && holdsPosition(x) && !!x.traded && x.targetKey === tk && (tradeMode === 'PAPER' || x.broker === broker)) ?? null;
+    const ar = autoLedger.rows.find(x => x.chart === c && x.mode === tradeMode && holdsPosition(x) && !paperEodReason(x, Date.now() / 1000) && !!x.traded && x.targetKey === tk && (tradeMode === 'PAPER' || x.broker === broker)) ?? null;
     const traded = c === 2 ? autoTraded2 : autoTraded1, opt = (c === 2 ? autoOpt2 : autoOpt1).ltp;
     const autoPnl = ar && traded?.ids === ar.traded!.ids && opt != null && opt > 0 ? markPnl(ar, opt) : null;
     const h = heldOf(c).held, m = ownMarks[c];
@@ -1186,7 +1197,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const staleWarnedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     for (const r of autoLedger.rows) {
-      if (!holdsPosition(r) || r.day === istToday() || carriesOvernight(r, r.entryT) || staleWarnedRef.current.has(r.id)) continue;
+      // PAPER rows are closed by the server at the end of the day (lib/pnfPaperEod.ts): only a REAL position is worth this alarm.
+      if (r.mode !== 'REAL' || !holdsPosition(r) || r.day === istToday() || carriesOvernight(r, r.entryT) || staleWarnedRef.current.has(r.id)) continue;
       staleWarnedRef.current.add(r.id);
       toast.error(`AUTO chart ${r.chart} [${r.mode}${autoProductOf(r.product) === 'MARGIN' ? ' NRML' : ''}] ${r.side} ${r.lots}L from ${r.day} is STILL OPEN: its end-of-day exit was missed. Close it at the broker, then resolve it here.`, { duration: Infinity });
     }

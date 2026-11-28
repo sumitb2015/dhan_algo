@@ -3,6 +3,7 @@
 import { serverBrickDiffers } from '@/lib/pnfServerBrick';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { trailLevel, trailOf } from '@/lib/pnfAuto';
+import { paperEodReason } from '@/lib/pnfPaperEod';
 import { EMPTY_LEDGER, isLive, type AutoLedger, type AutoLogEntry, type AutoOp } from '@/lib/pnfAutoLedger';
 import { targetKey, type Target } from '@/lib/pnfTarget';
 import type { PanelModel } from '@/lib/straddlePnfModel';
@@ -102,7 +103,9 @@ export function usePnfAuto({ chart, target, model, price, ledger, engine, post, 
 }) {
   const k = String(chart) as '1' | '2';
   const view = engine?.file?.charts[k];
-  const row = ledger.rows.find(r => r.chart === chart && isLive(r));
+  // A SIM row left open past its market's close is not the chart's position: the server closes it (lib/pnfPaperEod.ts), and until then it
+  // must not lock the chart, its instrument or manual trading.
+  const row = ledger.rows.find(r => r.chart === chart && isLive(r) && !paperEodReason(r, nowMs / 1000));
   const tk = targetKey(target);
   // Quiet: the dashboard process serving this page has not ticked the engine lately (it is down, or another process holds the engine lock),
   // or it is working but its status file has stopped moving. An idle engine (nothing armed or open) writes no status: that is not quiet.

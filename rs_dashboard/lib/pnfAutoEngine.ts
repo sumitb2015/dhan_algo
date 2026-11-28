@@ -26,6 +26,7 @@ import type { WantedPair } from '@/lib/pnfWanted';
 import { keyOf, readServerGuards } from '@/lib/autoServerWatcher';
 import type { ServerGuardCfg } from '@/lib/autoServerGuard';
 import { armNeedsGuardStop, carryAllowed, carryLapsed, guardStopProblem } from '@/lib/pnfAutoSafety';
+import { paperEodRows } from '@/lib/pnfPaperEod';
 
 // The P&F / Renko AUTO engine on the dashboard SERVER: it builds each armed chart from the saved arming (target + settings, lib/
 // pnfAutoLedger.ts ArmRun) and runs the AUTO rules on it (lib/pnfAutoChart.ts, the same engine the page used to run) with every tab
@@ -239,6 +240,19 @@ async function sweepOrphans(scope: PnfScope, ledger: AutoLedger, nowS: number) {
   }
 }
 
+/**
+ * PAPER rows still open after their market closed, or from an earlier day (the dashboard was down at the end-of-day time, or the row was
+ * carried NRML): closed here, so a SIM position never carries into the next session and never locks its chart (lib/pnfPaperEod.ts). No
+ * price is asked for after the close: the row is closed at its entry price and its P&L counted as 0, which the note says.
+ */
+async function sweepPaperEod(scope: PnfScope, ledger: AutoLedger, nowS: number) {
+  for (const { row, why } of paperEodRows(ledger.rows, nowS)) {
+    if (state.charts.get(`${scope}:${row.chart}`)?.busy) continue;
+    const r = await applyAutoLedgerOp(scope, { op: 'close', id: row.id, exitT: nowS, exitPrice: row.entryPrice, reason: 'eod', note: `${why} (no closing price: P&L counted as 0)` });
+    if (r.ok) await applyAutoLedgerOp(scope, { op: 'log', chart: row.chart, t: nowS, kind: 'info', text: `AUTO C${row.chart}: ${why}` });
+  }
+}
+
 /** The arming as the engine runs it; its watermark rebuilt from the ledger (lib/pnfAutoArm.ts), so a restart never re-enters a signal. */
 const arming = (rec: AutoArmRecord | undefined, row: AutoRow | undefined, ledger: AutoLedger, chart: 1 | 2): AutoArm => rec
   ? { on: true, mode: rec.mode, watermarkT: armWatermark(rec, ledger.rows, chart), armT: rec.t, ...(rec.product ? { product: rec.product } : {}) }
@@ -339,7 +353,11 @@ async function tick(): Promise<void> {
     state.lastTickAt = nowMs;
     state.idle = false;
     const guardCfgs = readServerGuards().cfg;                         // once per pass, for every chart of both pages
-    for (const { scope, ledger } of ledgers) {
+    for (const entry of ledgers) {
+      const { scope } = entry;
+      // SIM positions left open past the close go first, so no chart below runs on (or stays locked to) one of them
+      if (paperEodRows(entry.ledger.rows, nowMs / 1000).length) { await sweepPaperEod(scope, entry.ledger, nowMs / 1000); entry.ledger = readAutoLedger(scope); }
+      const ledger = entry.ledger;
       // the views written before a restart: read once, for the chart of an open position whose arming was switched off
       const saved: EngineState['saved'] = (state.saved ??= {});
       const prev = saved[scope] !== undefined ? saved[scope] : (saved[scope] = readEngineFile(scope));

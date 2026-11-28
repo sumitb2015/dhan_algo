@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { istDateIso } from '@/lib/nseHolidays';
 import { applyHeldOp, emptyHeld, heldFor, type HeldLedger, type HeldOp, type HeldRow } from '@/lib/pnfIndexHeld';
 import { scopeQuery, type PnfScope } from '@/lib/pnfScope';
 import type { Broker } from '@/hooks/useBrokerSelector';
@@ -36,6 +37,15 @@ export function useIndexHeld({ enabled, scope, chart, indexKey, broker, mode }: 
   const [paper, setPaper] = useState<HeldLedger>(emptyHeld);
   const paperRef = useRef(paper);
   useEffect(() => { paperRef.current = paper; });
+  // The PAPER held-option ledger is SIM only: it is emptied when the IST day rolls over (a tab left open overnight).
+  useEffect(() => {
+    let day = istDateIso(Date.now());
+    const id = setInterval(() => {
+      const d = istDateIso(Date.now());
+      if (d !== day) { day = d; paperRef.current = emptyHeld(); setPaper(emptyHeld()); }
+    }, 30_000);
+    return () => clearInterval(id);
+  }, []);
   // Replies are taken in the order their REQUESTS were sent: a poll sent before an op must not overwrite the op's newer reply. Not by the
   // file's rev: a ledger file that was reset or deleted starts again from rev 0, and a rev guard would ignore it for good.
   const seqRef = useRef(0);
