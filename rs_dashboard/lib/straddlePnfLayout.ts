@@ -88,3 +88,35 @@ export function layoutPanel(
     padR: padX,
   };
 }
+
+/** Empty boxes kept above / below the visible bricks by the auto-fit, so the newest brick never touches the time axis or the top edge. */
+const AUTO_FIT_MARGIN_BOXES = 2;
+
+/**
+ * Renko auto-scale (TradingView's "Auto" price scale): with the newest column against the price axis, the box height is chosen so the
+ * bricks that fit across the view (and the live price) fill the plot's height; the column pitch stays the fitted one (`xScale` takes up
+ * the change). Returns the `zoom` / `xScale` to lay out with and `topPrice`, the price to put at the top of the view, or null when there
+ * is nothing to fit. `plotH`: the plot's height without the time axis. `visibleW`: the width the columns are really shown in (the scroller's
+ * own width, without the rail), which can differ from the `viewW` the panel is laid out with.
+ */
+export function autoFitView(
+  columns: { low: number; high: number }[],
+  box: number,
+  liveValue: number | null,
+  viewW: number,
+  viewH: number,
+  plotH: number,
+  visibleW = viewW,
+): { zoom: number; xScale: number; topPrice: number } | null {
+  if (!(box > 0) || columns.length === 0 || viewW <= AXIS_W) return null;
+  const base = layoutPanel(columns, box, liveValue, viewW, viewH, 1, true, 1);
+  const n = Math.max(1, Math.floor((visibleW - AXIS_W) / base.colW));
+  let lo = Infinity, hi = -Infinity;
+  for (let i = Math.max(0, columns.length - n); i < columns.length; i++) { const c = columns[i]; if (c.low < lo) lo = c.low; if (c.high > hi) hi = c.high; }
+  if (liveValue !== null && Number.isFinite(liveValue)) { lo = Math.min(lo, liveValue); hi = Math.max(hi, liveValue); }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+  const rows = Math.max(1, Math.ceil((hi - lo) / box - 1e-6)) + 2 * AUTO_FIT_MARGIN_BOXES;
+  const target = Math.max(ZOOM_MIN_CELL, Math.min(ZOOM_MAX_CELL, Math.floor((plotH - PAD_TOP) / rows)));
+  // layoutPanel turns zoom back into round(fitted x zoom): the target cell exactly, and colW = round(target x xScale) = the fitted pitch.
+  return { zoom: target / base.cell, xScale: base.colW / target, topPrice: hi + AUTO_FIT_MARGIN_BOXES * box };
+}

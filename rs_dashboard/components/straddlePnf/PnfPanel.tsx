@@ -12,15 +12,18 @@ import { columnAtOrBefore, isSellSignal, type PnfExecutionMarker } from '@/lib/s
 import { AlignLeft, AlignRight, Eye, EyeOff, MapPin, MapPinOff, Minus, Plus, RotateCcw, ChevronsLeftRight, ChevronsRightLeft } from 'lucide-react';
 import { layoutTags } from '@/lib/pnfTagLayout';
 import { timeAxisLabels, crosshairStamp } from '@/lib/straddlePnfTimeAxis';
-import { layoutPanel, AXIS_W, PAD_TOP, XSCALE_MIN, XSCALE_MAX } from '@/lib/straddlePnfLayout';
+import { layoutPanel, autoFitView, AXIS_W, PAD_TOP, XSCALE_MIN, XSCALE_MAX } from '@/lib/straddlePnfLayout';
 import { MIN_BOX_PTS_PCT } from '@/lib/straddlePnfSettings';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Spinner } from '@/components/Spinner';
 
 // One straddle P&F chart: X (green) / O (red) glyphs on a visible box grid, VWAP or SMA line, a bar at the level every double
 // top / double bottom broke, date dividers where a new session starts and a tag at the live price. Every column is drawn: the
 // chart scrolls (it opens on the newest column) and the price axis stays pinned to the right edge while you pan.
 
 const MIN_HEIGHT = 420;
+/** Height of the time axis strip along the chart's bottom edge. */
+const TIME_AXIS_H = 24;
 /** Columns are drawn in windows of this many (see `w0` / `w1` in the panel). */
 const WINDOW_CHUNK = 256;
 
@@ -652,6 +655,26 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const touchedRef = useRef(false);
   const centeredFor = useRef<number | null>(null);
   const lastY = liveValue ?? (liveCols.length ? (liveCols[liveCols.length - 1].low + liveCols[liveCols.length - 1].high) / 2 : null);
+  const pendingRef = useRef<{ left: number; top: number } | 'reset' | 'fit' | null>(null);
+  const [scrollTick, setScrollTick] = useState(0);
+  // Renko auto-scale (TradingView's "Auto" price scale): until the user zooms or drags, the boxes are sized so the bricks across the
+  // view fill the plot's height, the newest brick against the price axis - on load, on each new brick, and on the Fit button.
+  const fitTopRef = useRef<number | null>(null);
+  const autoFit = (el: HTMLElement) => {
+    const fit = autoFitView(liveCols, box, liveValue, viewW, HEIGHT, el.clientHeight - (timeAxis ? TIME_AXIS_H : 0), el.clientWidth - (rail ? RAIL_W : 0));
+    if (!fit) return false;
+    fitTopRef.current = fit.topPrice;
+    if (Math.abs(fit.zoom - zoom) > 1e-9 || Math.abs(fit.xScale - xScale) > 1e-9) {
+      pendingRef.current = 'fit';
+      setZoom(fit.zoom);
+      setXScale(fit.xScale);
+      setScrollTick(n => n + 1);
+    } else {
+      el.scrollLeft = followLeft(el);
+      el.scrollTop = Math.max(0, yOf(fit.topPrice));
+    }
+    return true;
+  };
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || liveCols.length === 0) return;
@@ -660,7 +683,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     setViewLeft(Math.round(el.scrollLeft));
     setViewTop(Math.round(el.scrollTop));
     if (centeredFor.current !== strike) { touchedRef.current = false; centeredFor.current = strike; }
-    if (!touchedRef.current && lastY !== null && box > 0) {
+    if (!touchedRef.current && renko) autoFit(el);
+    else if (!touchedRef.current && lastY !== null && box > 0) {
       el.scrollTop = topFor(el);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -668,8 +692,6 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
 
   // TradingView-style controls (same as the options charts): wheel zooms around the cursor, dragging the price axis zooms, drag pans freely, double-click or the
   // round-arrow button fits the chart back to the newest column, and − / + zoom around the view centre. No scrollbars.
-  const pendingRef = useRef<{ left: number; top: number } | 'reset' | null>(null);
-  const [scrollTick, setScrollTick] = useState(0);
   const zoomBy = (factor: number, ax?: number, ay?: number) => {
     const el = wrapRef.current;
     const next = Math.min(6, Math.max(0.3, +(zoom * factor).toFixed(3)));
@@ -715,13 +737,21 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     touchedRef.current = true;
     setXScale(next);
   };
-  const resetView = () => { touchedRef.current = false; pendingRef.current = 'reset'; stickRef.current = false; gapRef.current = 0; setZoom(1); setXScale(1); setScrollTick(n => n + 1); };
+  const resetView = () => {
+    touchedRef.current = false; gapRef.current = 0;
+    const el = wrapRef.current;
+    if (renko && el) { stickRef.current = true; if (autoFit(el)) return; }
+    pendingRef.current = 'reset'; stickRef.current = false; setZoom(1); setXScale(1); setScrollTick(n => n + 1);
+  };
   useLayoutEffect(() => {
     const el = wrapRef.current;
     const pending = pendingRef.current;
     if (!el || !pending) return;
     pendingRef.current = null;
-    if (pending === 'reset') {
+    if (pending === 'fit') {
+      el.scrollLeft = followLeft(el);
+      if (fitTopRef.current !== null) el.scrollTop = Math.max(0, yOf(fitTopRef.current));
+    } else if (pending === 'reset') {
       // Centre the newest column (the plot is the view minus the pinned axis) and the latest price.
       el.scrollLeft = Math.max(0, xOf(liveCols.length - 0.5) - (el.clientWidth - AXIS_W) / 2);
       if (lastY !== null && box > 0) el.scrollTop = topFor(el);
@@ -778,7 +808,6 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     setHover({ x: vx + el.scrollLeft, y: e.clientY - r.top + el.scrollTop, overAxis: vx > el.clientWidth - AXIS_W - (rail ? RAIL_W : 0) });
   };
   const rowTop = padY + PAD_TOP;
-  const TIME_AXIS_H = 24;
   // The VWAP tag stays on the axis when the level is scrolled out of view (or beyond the price range): pinned to the visible
   // edge with an arrow pointing at where it is, as TradingView does. The line itself stays at its true price.
   const vwapTag = (() => {
@@ -1548,7 +1577,10 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         {error ? (
           <p className="p-3 text-xs text-red-400">{error}</p>
         ) : loading ? (
-          <p className="p-3 text-xs text-zinc-400">Loading…</p>
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2" data-testid="pnf-loading">
+            <Spinner size={22} />
+            <span className="text-xs text-zinc-400">{renko ? 'Loading Renko bars…' : 'Loading P&F chart…'}</span>
+          </div>
         ) : liveCols.length === 0 ? (
           <p className="p-3 text-xs text-zinc-400">{`Building chart — the first ${renko ? 'brick' : 'column'} needs a ${model.boxMode === 'pts' ? 'one-box' : logPct !== null ? `${logPct}% (log)` : `${boxPct}%`} move${interval > 1 ? ` on closed ${intervalLabel(interval)} bars` : ''}.`}</p>
         ) : (
