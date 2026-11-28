@@ -1371,7 +1371,6 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
         nowSec: now > 0 ? now / 1000 : undefined, targetMinutes: 30,
       })
       : null),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [renko, activeSettings.autoBox, activeFeed.loaded, activeFeed.bars, activeFeed.market, activeTarget, now],
   );
   // the same result keeps the same object, so the memoised header controls do not re-render on every bar / clock tick
@@ -1386,6 +1385,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     if (locked(active)) return;
     lastAutoTargetKeyRef.current = autoApplied;
     if (autoBlock.boxPts !== activeSettings.boxPts || activeSettings.boxMode !== 'pts') {
+      // syncing the saved setting to a size derived from the price feed (an external source), once per new result
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       applySettings({ ...activeSettings, boxMode: 'pts', boxPts: autoBlock.boxPts });
       toast.info(`Auto Renko block: ${autoBlock.boxPts} pts (${activeTarget.symbol} · ${autoBlock.formula})`);
     }
