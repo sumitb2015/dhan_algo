@@ -2666,6 +2666,11 @@ function QuickSettingsMenu({ settings, onPatch, nrmlLocked, maxLots, onClose }: 
           ))}
         </div>
       </div>
+      <label className="flex items-center justify-between gap-2 text-zinc-300 cursor-pointer"
+        title="Price % (vs previous close) and OI % (vs previous day) above each C / P chip; OI coloured by its buildup. Display only">
+        <span>Show price % / OI %</span>
+        <Switch size="sm" checked={settings.showStats} onCheckedChange={v => onPatch({ showStats: v })} aria-label="Show price and OI change" />
+      </label>
       <p className="text-[10px] leading-snug text-zinc-500">One click on Buy / Sell sends a market order at once (REAL only when armed). Max {maxLots} lots per order.</p>
     </div>
   );

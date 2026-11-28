@@ -14,11 +14,13 @@ export interface QuickSettings {
   range: number;
   /** Lots one click of a position chip's + adds, or its - takes off. */
   stepLots: number;
+  /** Price % and OI % (vs the previous day) above each C / P chip. Display only. */
+  showStats: boolean;
 }
 
 export const QUICK_SETTINGS_KEY = 'indexScalper.quick.v1';
 export const QUICK_ON_KEY = 'indexScalper.quickTrade';
-export const DEFAULT_QUICK: QuickSettings = { buyLots: 1, sellLots: 1, product: 'INTRADAY', range: 10, stepLots: 1 };
+export const DEFAULT_QUICK: QuickSettings = { buyLots: 1, sellLots: 1, product: 'INTRADAY', range: 10, stepLots: 1, showStats: true };
 export const MAX_QUICK_RANGE = 50;
 
 const lots = (v: unknown, d: number): number => {
@@ -39,6 +41,7 @@ export function clampQuickSettings(x: unknown): QuickSettings {
       return typeof n === 'number' && Number.isFinite(n) ? Math.min(MAX_QUICK_RANGE, Math.max(1, Math.floor(n))) : DEFAULT_QUICK.range;
     })(),
     stepLots: lots(o.stepLots, DEFAULT_QUICK.stepLots),
+    showStats: o.showStats !== false, // on unless switched off (settings saved before it existed keep it on)
   };
 }
 

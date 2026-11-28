@@ -5,14 +5,15 @@ import { chipStats, clampQuickSettings, compactPct, DEFAULT_QUICK, lotsToRemove,
 const STRIKES = Array.from({ length: 41 }, (_, i) => 24500 + i * 50); // 24500..26500
 
 test('settings: whole lots within 1..20, fractions round down, junk falls back to defaults', () => {
-  assert.deepEqual(clampQuickSettings({ buyLots: 2, sellLots: 5, product: 'MARGIN', range: 4, stepLots: 3 }), { buyLots: 2, sellLots: 5, product: 'MARGIN', range: 4, stepLots: 3 });
-  assert.deepEqual(clampQuickSettings({ buyLots: 99, sellLots: 0 }), { buyLots: 20, sellLots: 1, product: 'INTRADAY', range: 10, stepLots: 1 });
+  assert.deepEqual(clampQuickSettings({ buyLots: 2, sellLots: 5, product: 'MARGIN', range: 4, stepLots: 3, showStats: false }), { buyLots: 2, sellLots: 5, product: 'MARGIN', range: 4, stepLots: 3, showStats: false });
+  assert.deepEqual(clampQuickSettings({ buyLots: 99, sellLots: 0 }), { buyLots: 20, sellLots: 1, product: 'INTRADAY', range: 10, stepLots: 1, showStats: true });
   assert.equal(clampQuickSettings({ stepLots: 99 }).stepLots, 20);
   assert.equal(clampQuickSettings({ stepLots: 2.7 }).stepLots, 2);
   assert.equal(clampQuickSettings({ range: 5 }).stepLots, 1); // saved before the setting existed
   assert.equal(clampQuickSettings({ buyLots: 2.9 }).buyLots, 2); // never a bigger order than asked
   assert.equal(clampQuickSettings({ sellLots: '3' }).sellLots, 3);
   assert.deepEqual(clampQuickSettings(null), DEFAULT_QUICK);
+  assert.equal(clampQuickSettings({ showStats: 'no' }).showStats, true); // only an explicit false turns the stats off
   assert.deepEqual(clampQuickSettings({ buyLots: 'x', product: 'CO' }), DEFAULT_QUICK);
 });
 

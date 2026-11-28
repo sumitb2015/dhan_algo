@@ -35,11 +35,12 @@ interface Props {
  *  (right-[84px]) and the OI profile's bars + labels. A row whose strike holds a position (Quick Trade anchors it on the
  *  strike line) measures that chip, which grows with its TP / SL badges, and sits just left of it. */
 const CHIPS_RIGHT = 430;
-/** Minimum pixel gap between ladder rows: a chip (22 px) plus its price % / OI % line above it (~11 px). */
-const ROW_GAP_PX = 36;
+/** Minimum pixel gap between ladder rows: a chip (22 px), plus its price % / OI % line above it (~14 px) when shown. */
+const ROW_GAP_PX = 38;
+const ROW_GAP_NO_STATS_PX = 24;
 /** Width of one row's label + C + P chips (every cell has a fixed width so the ladder lines up in columns): a narrow
  *  pane (two charts on a laptop) pulls the chips right so they never leave the plot on the left. */
-const ROW_W = 210;
+const ROW_W = 234;
 
 export default function QuickStrikeOverlay({ viewportRef, underlying, feed, settings, real, onTrade }: Props) {
   const strikes = useMemo(() => [...feed.strikeIds.keys()].sort((a, b) => a - b), [feed.strikeIds]);
@@ -54,12 +55,13 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
   const shownStrikes = useMemo(() => strikesAroundAtm(strikes, atm, settings.range), [strikes, atm, settings.range]);
   const strikesRef = useRef(shownStrikes);
   const atmRef = useRef(atm);
-  useEffect(() => { strikesRef.current = shownStrikes; atmRef.current = atm; });
+  const gapRef = useRef(ROW_GAP_PX);
+  useEffect(() => { strikesRef.current = shownStrikes; atmRef.current = atm; gapRef.current = settings.showStats ? ROW_GAP_PX : ROW_GAP_NO_STATS_PX; });
   useEffect(() => {
     const tick = () => {
       const vp = viewportRef.current;
       if (!vp) return;
-      const { rows, step } = visibleStrikeRows(strikesRef.current, vp.priceToY, vp.plotHeight(), atmRef.current, ROW_GAP_PX);
+      const { rows, step } = visibleStrikeRows(strikesRef.current, vp.priceToY, vp.plotHeight(), atmRef.current, gapRef.current);
       const plotW = vp.plotWidth();
       // Position chips on a strike line (the chart draws them; they grow with TP / SL badges): measure where each starts.
       const rights: Record<number, number> = {};
@@ -183,12 +185,12 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
                 return (
                   <div key={t} className="relative">
                     {/* price % and OI % vs the previous day; OI coloured by the buildup it makes with the price move */}
-                    <div data-testid="quick-chip-stats" data-buildup={st.buildup ?? ''}
+                    {settings.showStats && <div data-testid="quick-chip-stats" data-buildup={st.buildup ?? ''}
                       title={`${r.strike} ${t}: price ${compactPct(st.pricePct)} · OI ${compactPct(st.oiPct)}${bu ? ` · ${bu.label}` : ''} (vs previous day)`}
-                      className="absolute bottom-full left-0 right-0 mb-px flex justify-between gap-0.5 text-[9px] leading-none font-mono tabular-nums whitespace-nowrap pointer-events-auto cursor-default">
+                      className="absolute bottom-full left-0 right-0 mb-0.5 px-0.5 flex justify-between gap-0.5 rounded-sm bg-zinc-900 text-[10px] leading-[11px] font-mono font-semibold tabular-nums whitespace-nowrap pointer-events-auto cursor-default">
                       <span className={priceCls}>{compactPct(st.pricePct)}</span>
                       <span className={cn(oiCls, bu && 'font-bold')}>{compactPct(st.oiPct)}</span>
-                    </div>
+                    </div>}
                     <button
                       type="button"
                       data-quick-chip
@@ -200,7 +202,7 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
                         t === 'CE' ? 'border-sky-500/70' : 'border-violet-500/70', isOpen && 'ring-2 ring-offset-0 ring-sky-400')}
                     >
                       <span className={cn('w-4 flex items-center justify-center font-bold text-oncolor', t === 'CE' ? 'bg-sky-600' : 'bg-violet-600')}>{t === 'CE' ? 'C' : 'P'}</span>
-                      <span data-live={live ? '1' : '0'} className={cn('w-[52px] pr-1 flex items-center justify-end bg-zinc-900', live && !why ? 'text-zinc-100' : shown !== null ? 'text-zinc-400 italic' : 'text-zinc-500')}>{fmt(shown)}</span>
+                      <span data-live={live ? '1' : '0'} className={cn('w-[64px] pr-1 flex items-center justify-end bg-zinc-900', live && !why ? 'text-zinc-100' : shown !== null ? 'text-zinc-400 italic' : 'text-zinc-500')}>{fmt(shown)}</span>
                     </button>
                     {isOpen && (
                       // Compact: two small B / S buttons LEFT of the chip (lots and any reason in the tooltip). Not right of

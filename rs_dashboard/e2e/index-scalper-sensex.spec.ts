@@ -207,7 +207,27 @@ test.describe('Index Scalper - SENSEX (BSE)', () => {
     const stBox = (await stats.nth(0).boundingBox())!;
     expect(stBox.y + stBox.height).toBeLessThanOrEqual(ceBox.y + 0.5);
     expect(stBox.width).toBeLessThanOrEqual(ceBox.width + 0.5);
-    if (process.env.ISX_SHOT) await page.screenshot({ path: process.env.ISX_SHOT, clip: { x: ceBox.x - 120, y: ceBox.y - 120, width: 320, height: 260 } });
+    // the widest values it can show (two 6-character percents) still fit inside the chip's width
+    const worst = await stats.nth(0).evaluate(el => {
+      const [a, b] = Array.from(el.querySelectorAll('span'));
+      const keep = [a.textContent, b.textContent];
+      a.textContent = '-99.9%'; b.textContent = '+99.9%';
+      const w = el.scrollWidth;
+      a.textContent = keep[0]; b.textContent = keep[1];
+      return w;
+    });
+    expect(worst).toBeLessThanOrEqual(ceBox.width + 0.5);
+    if (process.env.ISX_SHOT) await page.screenshot({ path: process.env.ISX_SHOT, clip: { x: ceBox.x - 120, y: ceBox.y - 60, width: 340, height: 120 } });
+    // the Quick Trade settings switch hides the line (and back on), remembered
+    await page.getByRole('button', { name: 'Quick Trade settings' }).click();
+    const statsSwitch = page.getByRole('switch', { name: 'Show price and OI change' });
+    await expect(statsSwitch).toBeChecked();
+    await statsSwitch.click();
+    await expect(overlay.getByTestId('quick-chip-stats')).toHaveCount(0);
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('indexScalper.quick.v1') ?? '{}').showStats)).toBe(false);
+    await statsSwitch.click();
+    await expect(stats.nth(0)).toBeVisible();
+    await page.keyboard.press('Escape');
     await overlay.getByRole('button', { name: 'Quick 85000 CE' }).click();
     await overlay.getByRole('button', { name: 'Quick buy 85000 CE 1 lot' }).click();
     const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
