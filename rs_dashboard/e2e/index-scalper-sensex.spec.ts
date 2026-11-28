@@ -246,7 +246,18 @@ test.describe('Index Scalper - SENSEX (BSE)', () => {
     await page.getByRole('switch', { name: 'Strong bull or bear tag' }).click();
     await expect(page.getByRole('combobox', { name: 'Strong tag price move' })).toBeDisabled();
     await page.keyboard.press('Escape');
+    // B / S open on the chip's outer side: left of C, right of P, so P's pair never covers C's price
+    const peChip = overlay.getByRole('button', { name: 'Quick 85000 PE' });
+    await peChip.click();
+    const pePop = (await overlay.getByRole('group', { name: 'Trade 85000 PE' }).boundingBox())!;
+    const peBox = (await peChip.boundingBox())!;
+    expect(pePop.x).toBeGreaterThanOrEqual(peBox.x + peBox.width);
+    if (process.env.ISX_SHOT3) await page.screenshot({ path: process.env.ISX_SHOT3, clip: { x: ceNow.x - 120, y: ceNow.y - 60, width: 400, height: 120 } });
+    await peChip.click();
+    await expect(overlay.getByRole('group', { name: 'Trade 85000 PE' })).toHaveCount(0);
     await overlay.getByRole('button', { name: 'Quick 85000 CE' }).click();
+    const cePop = (await overlay.getByRole('group', { name: 'Trade 85000 CE' }).boundingBox())!;
+    expect(cePop.x + cePop.width).toBeLessThanOrEqual(ceNow.x);
     await overlay.getByRole('button', { name: 'Quick buy 85000 CE 1 lot' }).click();
     const chip = page.getByTestId('chart-pane-0').getByTestId('position-chip');
     await expect(chip.getByTestId('position-lots')).toHaveAttribute('aria-label', 'Long 1 lot (20 units)', { timeout: 15_000 });

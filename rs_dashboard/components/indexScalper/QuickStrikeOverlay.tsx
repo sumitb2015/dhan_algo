@@ -154,7 +154,9 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
   const right = Math.max(baseRight, ...rows.map(r => rights[r.strike] ?? 0));
 
   return (
-    <div ref={rootRef} className="absolute inset-0 z-[3] pointer-events-none" data-testid="quick-overlay">
+    // While a B / S pair is open it rises above the chart's position chips (z-55/56): P's pair opens right of the
+    // ladder, where a strike's position chip sits. The root stays pointer-events-none, so nothing else is blocked.
+    <div ref={rootRef} className={cn('absolute inset-0 pointer-events-none', open ? 'z-[57]' : 'z-[3]')} data-testid="quick-overlay">
       {step > 1 && (
         <div className="absolute left-1/2 -translate-x-1/2 bottom-8 px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-[10px] text-zinc-400">
           Every {step === 2 ? '2nd' : `${step}th`} strike: zoom in for all
@@ -214,10 +216,12 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
                       </div>
                     )}
                     {isOpen && (
-                      // Compact: two small B / S buttons LEFT of the chip (lots and any reason in the tooltip). Not right of
-                      // it: that is where the strike's position chip sits once it holds a leg, and it would cover them.
-                      <div ref={popRef} role="group" aria-label={`Trade ${r.strike} ${t}`} data-reason={why ?? ''}
-                        className="absolute right-full top-1/2 -translate-y-1/2 mr-1 z-10 flex items-center gap-0.5 p-0.5 rounded-md border border-zinc-600 bg-zinc-900 shadow-xl">
+                      // Compact: two small B / S buttons on the outer side of the chip (lots and any reason in the tooltip):
+                      // left of C, right of P, so P's pair never covers the C chip's price. While open, P's pair can sit
+                      // over the strike's position chip (just right of the ladder); it closes after the trade.
+                      <div ref={popRef} role="group" aria-label={`Trade ${r.strike} ${t}`} data-reason={why ?? ''} data-side={t === 'CE' ? 'left' : 'right'}
+                        className={cn('absolute top-1/2 -translate-y-1/2 z-10 flex items-center gap-0.5 p-0.5 rounded-md border border-zinc-600 bg-zinc-900 shadow-xl',
+                          t === 'CE' ? 'right-full mr-1' : 'left-full ml-1')}>
                         <button type="button" disabled={!!why || sending} onClick={() => void send(r.strike, t, 'BUY')}
                           aria-label={`Quick buy ${r.strike} ${t} ${settings.buyLots} lot${settings.buyLots === 1 ? '' : 's'}`}
                           title={why ? `${why}${shownTitle}` : `Buy ${settings.buyLots} lot${settings.buyLots === 1 ? '' : 's'} ${r.strike} ${t} at market${real ? ' (REAL)' : ' (SIM)'}`}
