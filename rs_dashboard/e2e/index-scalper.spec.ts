@@ -328,9 +328,11 @@ test.describe('Index Scalper', () => {
     expect(state.calls).toEqual([]);
     expect(state.cancels ?? []).toEqual([]);
 
-    // 21 lots: the other side would be one 21-lot order, above NIFTY's 20-lot cap
+    // 21 lots: the other side would be one 21-lot order, above NIFTY's 20-lot cap. Averaged at the live price (229.95):
+    // at 200 the day P&L would be +40,882, past the header's default MTM target (8,000), and its Exit All would close
+    // the position before Reverse is clicked.
     state.orders = [];
-    state.positions = [{ ...state.positions[0], netQty: 1365 }];
+    state.positions = [{ ...state.positions[0], netQty: 1365, buyAvg: 229.95, costPrice: 229.95 }];
     await expect(chip.getByTestId('position-lots')).toHaveText('21', { timeout: 15_000 });
     await chip.getByRole('button', { name: 'Reverse PE 25350' }).click();
     await dlg.getByRole('button', { name: 'Reverse to short' }).click();

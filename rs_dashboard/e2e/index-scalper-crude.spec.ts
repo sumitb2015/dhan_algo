@@ -188,7 +188,7 @@ test.describe('Index Scalper - CRUDEOILM Integration', () => {
 
     // While REAL is armed, underlying switch buttons must be disabled
     await expect(crudeBtn).toBeDisabled();
-    await expect(page.getByRole('button', { name: 'NIFTY' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'NIFTY', exact: true })).toBeDisabled();
 
     // One-click (Scalper) mode: without it Buy FUT only opens the order ticket
     await page.getByRole('button', { name: 'Scalper', exact: true }).click();
