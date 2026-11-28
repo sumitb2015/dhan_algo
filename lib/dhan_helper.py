@@ -3457,7 +3457,7 @@ class DhanHelper:
             logger.error(f"Exception in get_quote_data: {e}")
         return {}
 
-    def get_expired_options_data(self, 
+    def get_expired_options_data(self,
                                security_id: int,
                                exchange_segment: str,
                                instrument_type: str,
@@ -3470,8 +3470,69 @@ class DhanHelper:
                                to_date: str,
                                interval: int = 1) -> pd.DataFrame:
         """
-        Fetch historical data for expired options using the SDK's native method.
+        Expired options data for every NSE session in [from_date, to_date] (both inclusive, YYYY-MM-DD).
+
+        Dhan's /charts/rollingoption takes toDate INCLUSIVE and rejects fromDate/toDate more than one day apart with a
+        generic DH-905 "Missing required fields, bad values for parameters" (observed 2026-11-28: 18->18 Nov = one
+        session, 18->19 = two, 15->17 Oct and week windows that downloaded fine in October = DH-905). So the range is
+        fetched one session per request (fromDate = toDate = the day; weekdays that are not NSE holidays, plus Muhurat
+        sessions), each reply is cut to that day's own rows, and the days are joined. Never ask day -> day+1: on an
+        expiry day the extra session is already the NEXT week's contract under expiry_code 1.
+        Returns an empty DataFrame only when no session returned data; `last_api_error` then holds the last failure.
         """
+        from lib.nse_holidays import NSE_MUHURAT_SESSIONS, is_nse_trading_day
+        if not hasattr(self, "_expired_options_next_t"):
+            self._expired_options_next_t = 0.0
+        start = datetime.strptime(str(from_date)[:10], "%Y-%m-%d").date()
+        end = datetime.strptime(str(to_date)[:10], "%Y-%m-%d").date()
+        days = []
+        d = start
+        while d <= end:
+            if is_nse_trading_day(d) or d.isoformat() in NSE_MUHURAT_SESSIONS:
+                days.append(d)
+            d += timedelta(days=1)
+        frames, last_err = [], None
+        for day in days:
+            for attempt in range(4):
+                # Back-to-back calls trip DH-904 (observed 2026-11-28 with no gap); one call per ~1.1 s does not.
+                wait = self._expired_options_next_t - time.monotonic()
+                if wait > 0:
+                    time.sleep(wait)
+                self._expired_options_next_t = time.monotonic() + 1.1
+                df = self._expired_options_one_day(
+                    security_id, exchange_segment, instrument_type, expiry_flag, expiry_code, strike, drv_option_type,
+                    required_data, day.isoformat(), day.isoformat(), interval)
+                if not df.empty and 'datetime' in df.columns:
+                    df = df[df['datetime'].dt.date == day]
+                if not df.empty or str((self.last_api_error or {}).get("code", "")).upper() != "DH-904":
+                    break
+                time.sleep(3 * (attempt + 1))          # rate limited: back off 3 / 6 / 9 s and ask again
+            if df.empty:
+                last_err = self.last_api_error or last_err
+            else:
+                frames.append(df)
+        if not frames:
+            self.last_api_error = last_err
+            return pd.DataFrame()
+        self.last_api_error = None
+        out = pd.concat(frames, ignore_index=True)
+        if 'timestamp' in out.columns:
+            out = out.drop_duplicates(subset='timestamp').sort_values('timestamp').reset_index(drop=True)
+        return out
+
+    def _expired_options_one_day(self,
+                               security_id: int,
+                               exchange_segment: str,
+                               instrument_type: str,
+                               expiry_flag: str,
+                               expiry_code: int,
+                               strike: Union[str, float, int],
+                               drv_option_type: str,
+                               required_data: List[str],
+                               from_date: str,
+                               to_date: str,
+                               interval: int = 1) -> pd.DataFrame:
+        """One /charts/rollingoption request (toDate inclusive; get_expired_options_data asks one session: from = to)."""
         try:
             self.last_api_error = None
             logger.info(f"Fetching Expired Options Data for ID {security_id} ({from_date} to {to_date})")

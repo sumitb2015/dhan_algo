@@ -246,14 +246,23 @@ export default function OptionsCharts() {
                   </span>
                 </div>
               ) : (
-                <button
-                  onClick={startDownload}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-sky-500/25 bg-sky-500/10 text-sky-400 hover:bg-sky-500/15 hover:border-sky-500/35 transition-all"
-                  title="Download fresh historical options data (runs download_expired_options.py)"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  Download Options
-                </button>
+                <>
+                  <button
+                    onClick={startDownload}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-sky-500/25 bg-sky-500/10 text-sky-400 hover:bg-sky-500/15 hover:border-sky-500/35 transition-all"
+                    title="Download fresh historical options data (runs download_expired_options.py)"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    Download Options
+                  </button>
+                  {/* a run that left files missing reports `error`; show it instead of finishing silently */}
+                  {dlStatus?.done && dlStatus.error && (
+                    <span className="px-2 py-1 text-[11px] font-mono text-red-400 border border-red-500/30 bg-red-500/10 rounded-lg truncate max-w-[220px]"
+                          title={dlStatus.error}>
+                      Download incomplete
+                    </span>
+                  )}
+                </>
               )}
             </>
           )}

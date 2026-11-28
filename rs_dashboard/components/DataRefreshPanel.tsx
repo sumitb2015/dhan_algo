@@ -374,8 +374,19 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
                       Up to date
                     </span>
                   )}
+                  {/* the downloader sets `error` when a missing file did not download (e.g. a Dhan DH-905): never "up to date" */}
+                  {optStatus?.done && optStatus?.error && (
+                    <span className="text-[10px] text-red-400 flex items-center gap-1 font-mono">
+                      <XCircle className="h-3 w-3" />
+                      Incomplete
+                    </span>
+                  )}
                 </Button>
-                {optStatus?.message && !optStatus?.running && (
+                {optStatus?.error && !optStatus?.running ? (
+                  <p className="text-[10px] text-red-400 font-mono mt-1 px-1 truncate" title={optStatus.error}>
+                    {optStatus.error}
+                  </p>
+                ) : optStatus?.message && !optStatus?.running && (
                   <p className="text-[10px] text-zinc-400 font-mono mt-1 px-1 truncate" title={optStatus.message}>
                     {optStatus.message}
                   </p>
