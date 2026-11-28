@@ -2,10 +2,11 @@
 // indicator instance it returns plain series the chart component draws. Maths comes from lib/indicators.ts (never a
 // private copy), except VWAP, which has no shared index-safe version.
 
-import { emaSmaSeeded, smaArray, rsiArray, stochRsiArray, macdSeries, adxDmiArray, supertrendSeries } from './indicators.ts';
+import { emaSmaSeeded, smaArray, rsiArray, stochRsiArray, adxDmiArray, supertrendSeries } from './indicators.ts';
 import { barAnchorSec, inMarketSession, inOrderSession } from './indexScalperSession.ts';
 import { marketStructure } from './indexScalperStructure.ts';
 import { cmf, hasVolume, mfi, obv, relativeVolume, vwapWithStdev, vwma } from './volumeIndicators.ts';
+import { awesomeOscillator, bbPercentB, bbWidth, bbZones, fourColor, macdPine } from './tvIndicators.ts';
 import type { Underlying } from './indexScalperInstrument.ts';
 
 /** `v` = traded volume in the bar, when the instrument has one (a future, an option); an index has none. */
@@ -13,7 +14,8 @@ import type { Underlying } from './indexScalperInstrument.ts';
 export interface Bar { t: number; o: number; h: number; l: number; c: number; v?: number; oi?: number }
 
 export type IndicatorKind = 'volume' | 'ema' | 'emacross' | 'sma' | 'vwap' | 'supertrend' | 'bbands' | 'cpr' | 'pivots' | 'daylevels' | 'rsi' | 'stochrsi' | 'macd' | 'adx' | 'structure'
-  | 'vwapbands' | 'obv' | 'mfi' | 'cmf' | 'vwma' | 'rvol';
+  | 'vwapbands' | 'obv' | 'mfi' | 'cmf' | 'vwma' | 'rvol'
+  | 'ao' | 'bbpctb' | 'bbw' | 'bbbars';
 
 export interface IndicatorInstance {
   id: string;
@@ -92,7 +94,7 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
     params: [{ key: 'period', label: 'ATR length', def: 10, min: 1, max: 100 }, { key: 'mult', label: 'Factor', def: 2, min: 0.5, max: 20 }],
   },
   {
-    kind: 'bbands', label: 'Bollinger Bands', pane: 'price', color: '#a78bfa',
+    kind: 'bbands', label: 'Bollinger Bands', pane: 'price', color: '#2196f3',
     params: [{ key: 'period', label: 'Length', def: 20, min: 2, max: 200 }, { key: 'mult', label: 'StdDev', def: 2, min: 0.5, max: 10 }],
   },
   // Daily levels from the previous IST day's high / low / close of the chart's own bars (TradingView "Pivot Points
@@ -117,7 +119,7 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
     ],
   },
   {
-    kind: 'macd', label: 'MACD', pane: 'sub', color: '#06b6d4',
+    kind: 'macd', label: 'MACD', pane: 'sub', color: '#2196f3',
     params: [{ key: 'fast', label: 'Fast', def: 12, min: 2, max: 100 }, { key: 'slow', label: 'Slow', def: 26, min: 3, max: 200 }, { key: 'signal', label: 'Signal', def: 9, min: 2, max: 100 }],
   },
   { kind: 'adx', label: 'ADX / DMI', pane: 'sub', color: '#eab308', params: [{ key: 'period', label: 'Length', def: 14, min: 2, max: 100 }] },
@@ -134,24 +136,50 @@ export const INDICATOR_CATALOG: CatalogEntry[] = [
   // Session VWAP with TradingView's standard-deviation bands (± mult × stdev of hlc3 around the VWAP); a multiplier of 0
   // hides that band. Equal-weighted on the index, like the plain VWAP.
   {
-    kind: 'vwapbands', label: 'VWAP bands (± std dev)', pane: 'price', color: '#ec4899',
+    kind: 'vwapbands', label: 'VWAP bands (± std dev)', pane: 'price', color: '#2196f3',
     params: [
       { key: 'm1', label: 'Band 1 × std dev (0 = off)', def: 1, min: 0, max: 5 },
-      { key: 'm2', label: 'Band 2 × std dev (0 = off)', def: 2, min: 0, max: 5 },
+      { key: 'm2', label: 'Band 2 × std dev (0 = off)', def: 0, min: 0, max: 5 },
       { key: 'm3', label: 'Band 3 × std dev (0 = off)', def: 0, min: 0, max: 5 },
     ],
   },
-  { kind: 'vwma', label: 'VWMA (volume-weighted MA)', pane: 'price', color: '#84cc16', needsVolume: true, params: [{ key: 'period', label: 'Length', def: 20, min: 1, max: 500 }] },
-  { kind: 'obv', label: 'On-Balance Volume (OBV)', pane: 'sub', color: '#0ea5e9', needsVolume: true, params: [{ key: 'ma', label: 'SMA length (0 = off)', def: 0, min: 0, max: 200 }] },
-  { kind: 'mfi', label: 'Money Flow Index (MFI)', pane: 'sub', color: '#f97316', needsVolume: true, params: [{ key: 'period', label: 'Length', def: 14, min: 2, max: 100 }] },
-  { kind: 'cmf', label: 'Chaikin Money Flow (CMF)', pane: 'sub', color: '#14b8a6', needsVolume: true, params: [{ key: 'period', label: 'Length', def: 20, min: 2, max: 200 }] },
+  { kind: 'vwma', label: 'VWMA (volume-weighted MA)', pane: 'price', color: '#2196f3', needsVolume: true, params: [{ key: 'period', label: 'Length', def: 20, min: 1, max: 500 }] },
+  { kind: 'obv', label: 'On-Balance Volume (OBV)', pane: 'sub', color: '#2196f3', needsVolume: true, params: [{ key: 'ma', label: 'SMA length (0 = off)', def: 0, min: 0, max: 200 }] },
+  { kind: 'mfi', label: 'Money Flow Index (MFI)', pane: 'sub', color: '#7e57c2', needsVolume: true, params: [{ key: 'period', label: 'Length', def: 14, min: 2, max: 100 }] },
+  { kind: 'cmf', label: 'Chaikin Money Flow (CMF)', pane: 'sub', color: '#43a047', needsVolume: true, params: [{ key: 'period', label: 'Length', def: 20, min: 2, max: 200 }] },
   // Bar volume ÷ the average at the same time of day over the previous N sessions (daily / weekly bars: the previous N
-  // bars). Bars at or above `hi` are highlighted. Default 20, as the tradingcharts.co terminal's "Relative Volume at Time".
+  // bars). Default 20, as the tradingcharts.co terminal's "Relative Volume at Time"; coloured like it (rising / falling,
+  // above / below 1×).
   {
-    kind: 'rvol', label: 'Relative volume (at time of day)', pane: 'sub', color: '#64748b', needsVolume: true,
-    params: [{ key: 'days', label: 'Sessions to average', def: 20, min: 1, max: 60 }, { key: 'hi', label: 'Highlight at or above (×)', def: 2, min: 1, max: 20 }],
+    kind: 'rvol', label: 'Relative volume (at time of day)', pane: 'sub', color: '#26a69a', needsVolume: true, fixedStyle: true,
+    params: [{ key: 'days', label: 'Sessions to average', def: 20, min: 1, max: 60 }],
+  },
+  // ── tradingcharts.co built-ins (lib/tvIndicators.ts), their defaults and colours ──
+  { kind: 'ao', label: 'Awesome Oscillator', pane: 'sub', color: '#089981', fixedStyle: true, params: [] },
+  {
+    kind: 'bbpctb', label: 'Bollinger Bands %B', pane: 'sub', color: '#22ab94',
+    params: [{ key: 'period', label: 'Length', def: 20, min: 2, max: 200 }, { key: 'mult', label: 'StdDev', def: 2, min: 0.5, max: 10 }],
+  },
+  {
+    kind: 'bbw', label: 'Bollinger Bands Width', pane: 'sub', color: '#ff6d00',
+    params: [{ key: 'period', label: 'Length', def: 20, min: 2, max: 200 }, { key: 'mult', label: 'StdDev', def: 2, min: 0.5, max: 10 }],
+  },
+  // Colours each candle by where it closed against the Bollinger Bands (above upper / above basis / below basis / below
+  // lower), as the terminal's "Bollinger Bars". Draws no line.
+  {
+    kind: 'bbbars', label: 'Bollinger Bars (candle colours)', pane: 'price', color: '#26a69a', fixedStyle: true,
+    params: [{ key: 'period', label: 'Length', def: 20, min: 2, max: 200 }, { key: 'mult', label: 'StdDev', def: 2, min: 0.5, max: 10 }],
   },
 ];
+
+/** The terminal's colours: Bollinger Bars zones (2 / 1 / −1 / −2), the MACD and RVOL four-way histograms (growing /
+ *  falling above, growing / falling below the reference), AO rising / falling, the VWAP bands. */
+export const BB_BAR_COLORS = { 2: '#00c853', 1: '#26a69a', [-1]: '#ef9a9a', [-2]: '#d50000' } as Record<number, string>;
+const HIST4: [string, string, string, string] = ['#22ab94', '#ace5dc', '#fccbcd', '#ff5252'];
+const RVOL4: [string, string, string, string] = ['#26a69a', '#b2dfdb', '#ef9a9a', '#ef5350'];
+const AO_UP = '#089981', AO_DOWN = '#f23645';
+const VWAP_BAND = ['#4caf50', '#808000', '#008080'];
+const TV_ORANGE = '#ff6d00';
 
 /** Pine `ta.crossover` / `ta.crossunder` of `a` over `b`: bar i is a cross up when a > b now and a <= b on the bar
  *  before (down: a < b now, a >= b before). Bars where either value is missing are skipped. */
@@ -215,7 +243,8 @@ export function indicatorLabel(ind: IndicatorInstance): string {
   const ps = c.params.filter(p => !p.toggle).map(p => ind.params[p.key] ?? p.def).join(', ');
   const name = ind.kind === 'vwap' ? 'VWAP' : ind.kind === 'cpr' ? 'CPR' : ind.kind === 'pivots' ? 'Pivots S/R' : ind.kind === 'daylevels' ? 'Day H/L' : ind.kind === 'structure' ? 'Structure'
     : ind.kind === 'vwapbands' ? 'VWAP bands' : ind.kind === 'vwma' ? 'VWMA' : ind.kind === 'obv' ? 'OBV' : ind.kind === 'mfi' ? 'MFI'
-    : ind.kind === 'cmf' ? 'CMF' : ind.kind === 'rvol' ? 'RVOL' : c.label;
+    : ind.kind === 'cmf' ? 'CMF' : ind.kind === 'rvol' ? 'RVOL' : ind.kind === 'ao' ? 'AO' : ind.kind === 'bbpctb' ? '%B'
+    : ind.kind === 'bbw' ? 'BBW' : ind.kind === 'bbbars' ? 'BB Bars' : c.label;
   return ps ? `${name} (${ps})` : name;
 }
 
@@ -265,6 +294,9 @@ export interface OutSeries {
 export interface IndicatorOutput {
   pane: 'price' | 'sub';
   series: OutSeries[];
+  /** Per-bar candle colour (Bollinger Bars); null = the chart's own colour. The chart paints the candles with the last
+   *  visible indicator that sets it. */
+  barColors?: (string | null)[];
 }
 
 const UP = '#22c55e';
@@ -353,7 +385,6 @@ export function dayBreaks(bars: Bar[]): boolean[] {
 }
 
 /** Bollinger basis colour (TradingView's default orange); the bands take the indicator's own colour. */
-const BB_BASIS = '#f97316';
 /** EMA Cross: the slow EMA's colour (the fast one takes the indicator's own). */
 const EMA_CROSS_SLOW = '#f59e0b';
 
@@ -418,13 +449,13 @@ export function shadowOf(s: OutSeries): OutSeries {
 function volumeSeries(bars: Bar[], ind: IndicatorInstance, label: string, p: (k: string) => number): IndicatorOutput {
   switch (ind.kind) {
     case 'vwma':
-      return { pane: 'price', series: [{ key: 'v', label, axisLabel: `VWMA(${p('period')})`, color: ind.color, style: 'line', values: vwma(bars, p('period')) }] };
+      return { pane: 'price', series: [{ key: 'v', label, axisLabel: `VWMA(${p('period')})`, color: ind.color, style: 'line', values: vwma(bars, p('period')), lineWidth: 1 }] };
     case 'obv': {
       const o = obv(bars);
       const series: OutSeries[] = [{ key: 'v', label, axisLabel: 'OBV', color: ind.color, style: 'line', values: o }];
       const ma = Math.floor(p('ma'));
       if (ma >= 1 && o.some(x => x !== null)) {
-        series.push({ key: 'ma', label: `${label} SMA`, axisLabel: `SMA(${ma})`, color: '#f59e0b', style: 'line', values: smaArray(o.map(x => x ?? 0), ma) });
+        series.push({ key: 'ma', label: `${label} SMA`, axisLabel: `SMA(${ma})`, color: TV_ORANGE, style: 'line', values: smaArray(o.map(x => x ?? 0), ma) });
       }
       return { pane: 'sub', series };
     }
@@ -433,15 +464,11 @@ function volumeSeries(bars: Bar[], ind: IndicatorInstance, label: string, p: (k:
     case 'cmf':
       return { pane: 'sub', series: [{ key: 'v', label, axisLabel: `CMF(${p('period')})`, color: ind.color, style: 'line', values: cmf(bars, p('period')), guides: [0] }] };
     case 'rvol': {
-      // Histogram: amber at or above the highlight, the indicator colour at or above 1× (normal or busier), dim below.
+      // The terminal's histogram: rising / falling bars above 1× and below it in four colours, a dashed 1.0 line.
       const r = relativeVolume(bars, p('days'));
-      const hi = p('hi');
       return {
         pane: 'sub',
-        series: [{
-          key: 'v', label, axisLabel: 'RVOL', color: ind.color, style: 'histogram', values: r,
-          colors: r.map(x => (x === null ? null : x >= hi ? '#f59e0b' : x >= 1 ? ind.color : withAlpha(ind.color, 0.45))),
-        }],
+        series: [{ key: 'v', label, axisLabel: 'RVOL', color: ind.color, style: 'histogram', values: r, colors: fourColor(r, 1, RVOL4), guides: [1] }],
       };
     }
     default:
@@ -468,13 +495,13 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
       // at the day change (the VWAP resets there), like the daily levels.
       const { vwap, sd } = vwapWithStdev(bars);
       const breaks = dayBreaks(bars);
-      const series: OutSeries[] = [{ key: 'v', label: `${label} VWAP`, axisLabel: 'VWAP', color: ind.color, style: 'line', values: vwap, breaks }];
+      const series: OutSeries[] = [{ key: 'v', label: `${label} VWAP`, axisLabel: 'VWAP', color: ind.color, style: 'line', values: vwap, breaks, lineWidth: 1 }];
       for (const [k, n] of [['m1', 1], ['m2', 2], ['m3', 3]] as const) {
         const m = p(k);
         if (!(m > 0)) continue;
         const band = (sign: 1 | -1) => vwap.map((x, i) => (x === null || sd[i] === null ? null : x + sign * m * (sd[i] as number)));
-        series.push({ key: `u${n}`, label: `${label} +${m}σ`, axisLabel: `+${m}σ`, color: ind.color, style: 'line', values: band(1), lineWidth: 1, breaks });
-        series.push({ key: `l${n}`, label: `${label} −${m}σ`, axisLabel: `−${m}σ`, color: ind.color, style: 'line', values: band(-1), lineWidth: 1, breaks });
+        series.push({ key: `u${n}`, label: `${label} +${m}σ`, axisLabel: `+${m}σ`, color: VWAP_BAND[n - 1], style: 'line', values: band(1), lineWidth: 1, breaks });
+        series.push({ key: `l${n}`, label: `${label} −${m}σ`, axisLabel: `−${m}σ`, color: VWAP_BAND[n - 1], style: 'line', values: band(-1), lineWidth: 1, breaks });
       }
       return { pane: 'price', series };
     }
@@ -505,10 +532,10 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
       return {
         pane: 'price',
         series: [
-          // TradingView's look: thin (1 px) bands in the indicator's colour, the basis in its own orange. At the default 2 px
-          // three lines (plus Supertrend / EMA / VWAP) crowded the candles.
-          { key: 'up', label: `${label} upper`, axisLabel: 'BB upper', color: ind.color, style: 'line', values: bb.up, lineWidth: 1 },
-          { key: 'mid', label: `${label} basis`, axisLabel: 'BB basis', color: BB_BASIS, style: 'line', values: bb.mid, lineWidth: 1 },
+          // The tradingcharts.co terminal's look: thin (1 px) lines, the upper band orange, basis and lower band in the
+          // indicator's colour (blue by default). At 2 px three lines (plus Supertrend / EMA / VWAP) crowded the candles.
+          { key: 'up', label: `${label} upper`, axisLabel: 'BB upper', color: TV_ORANGE, style: 'line', values: bb.up, lineWidth: 1 },
+          { key: 'mid', label: `${label} basis`, axisLabel: 'BB basis', color: ind.color, style: 'line', values: bb.mid, lineWidth: 1 },
           { key: 'lo', label: `${label} lower`, axisLabel: 'BB lower', color: ind.color, style: 'line', values: bb.lo, lineWidth: 1 },
         ],
       };
@@ -581,17 +608,35 @@ function computeSeries(bars: Bar[], ind: IndicatorInstance): IndicatorOutput {
       };
     }
     case 'macd': {
-      const m = macdSeries(closes, p('fast'), p('slow'), p('signal'));
-      const warm = p('slow') - 1;
-      const hist = m.macdLine.map((x, i) => (i < warm ? null : x - m.signalLine[i]));
+      // Pine ta.macd (SMA-seeded EMAs; checked bar by bar against the tradingcharts.co terminal), its colours.
+      const m = macdPine(closes, p('fast'), p('slow'), p('signal'));
       return {
         pane: 'sub',
         series: [
-          { key: 'hist', label: `${label} hist`, axisLabel: 'Hist', color: ind.color, style: 'histogram', values: hist, colors: hist.map(h => (h === null ? null : h >= 0 ? UP : DOWN)) },
-          { key: 'macd', label: `${label} MACD`, axisLabel: 'MACD', color: ind.color, style: 'line', values: m.macdLine.map((x, i) => (i < warm ? null : x)) },
-          { key: 'sig', label: `${label} signal`, axisLabel: 'Signal', color: '#f59e0b', style: 'line', values: m.signalLine.map((x, i) => (i < warm ? null : x)) },
+          { key: 'hist', label: `${label} hist`, axisLabel: 'Hist', color: HIST4[0], style: 'histogram', values: m.hist, colors: fourColor(m.hist, 0, HIST4), guides: [0] },
+          { key: 'macd', label: `${label} MACD`, axisLabel: 'MACD', color: ind.color, style: 'line', values: m.macd },
+          { key: 'sig', label: `${label} signal`, axisLabel: 'Signal', color: TV_ORANGE, style: 'line', values: m.signal },
         ],
       };
+    }
+    case 'ao': {
+      // SMA(hl2, 5) − SMA(hl2, 34); a bar is green when AO rose from the bar before, else red (TradingView's rule).
+      const ao = awesomeOscillator(bars);
+      return {
+        pane: 'sub',
+        series: [{
+          key: 'v', label, axisLabel: 'AO', color: AO_UP, style: 'histogram', values: ao, guides: [0],
+          colors: ao.map((x, i) => (x === null ? null : i > 0 && ao[i - 1] !== null && x - (ao[i - 1] as number) > 0 ? AO_UP : AO_DOWN)),
+        }],
+      };
+    }
+    case 'bbpctb':
+      return { pane: 'sub', series: [{ key: 'v', label, axisLabel: '%B', color: ind.color, style: 'line', values: bbPercentB(closes, p('period'), p('mult')), guides: [0, 1] }] };
+    case 'bbw':
+      return { pane: 'sub', series: [{ key: 'v', label, axisLabel: 'BBW', color: ind.color, style: 'line', values: bbWidth(closes, p('period'), p('mult')) }] };
+    case 'bbbars': {
+      const z = bbZones(closes, p('period'), p('mult'));
+      return { pane: 'price', series: [], barColors: z.map(x => (x === null ? null : BB_BAR_COLORS[x])) };
     }
     case 'adx': {
       const d = adxDmiArray(bars.map(b => b.h), bars.map(b => b.l), closes, p('period'));

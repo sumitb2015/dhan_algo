@@ -70,7 +70,7 @@ test('no volume (the index): every volume indicator is empty, the VWAP bands sti
   // and on the chart they open no pane (an empty pane would squash the candles)
   for (const k of ['obv', 'mfi', 'cmf', 'vwma', 'rvol'] as const) assert.deepEqual(computeIndicator(idx, newIndicator(k, 'x')), { pane: 'price', series: [] });
   const vb = computeIndicator(idx, newIndicator('vwapbands', 'x'));
-  assert.equal(vb.series.length, 5);   // VWAP + band 1 and band 2 (band 3 is off by default)
+  assert.equal(vb.series.length, 3);   // VWAP + band 1 (bands 2 and 3 are off by default, as on the terminal)
   assert.ok(vb.series.every(s => s.values.some(x => x !== null)));
 });
 
@@ -82,7 +82,7 @@ test('catalog wiring: panes, series and the band switches', () => {
   assert.equal(computeIndicator(bars, newIndicator('vwma', 'a')).pane, 'price');
   const rv = computeIndicator(bars, newIndicator('rvol', 'a')).series[0];
   assert.equal(rv.style, 'histogram');
-  assert.ok(rv.colors?.some(c => c === '#f59e0b'), 'some bar is highlighted at 2× or more');
+  assert.ok(rv.colors?.some(c => c === '#26a69a') && rv.colors?.some(c => c === '#ef5350'), 'rising-above and falling-below bars');
   const vb = computeIndicator(bars, { ...newIndicator('vwapbands', 'a'), params: { m1: 1, m2: 0, m3: 3 } });
   assert.deepEqual(vb.series.map(s => s.axisLabel), ['VWAP', '+1σ', '−1σ', '+3σ', '−3σ']);
 });

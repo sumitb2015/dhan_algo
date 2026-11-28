@@ -49,6 +49,11 @@ const trendColor = (st: TrendState | undefined) => {
   const c = TREND_COLOR[st];
   return { color: c, borderColor: c, wickColor: c };
 };
+/** A candle's colour fields: an indicator's per-bar colour (Bollinger Bars) first, else the trend rule's. */
+const candleColor = (barColor: (string | null)[] | null, trend: TrendState[] | null, i: number) => {
+  const c = barColor?.[i];
+  return c ? { color: c, borderColor: c, wickColor: c } : trendColor(trend?.[i]);
+};
 /** How long a dragged / typed TP / SL level shows before the order book confirms it (then it is dropped). */
 const TENTATIVE_TTL_MS = 15_000;
 /** Drawings of the underlying chart; an option chart stores its own under `${DRAW_KEY}:<securityId>` (drawKey prop). */
@@ -539,6 +544,11 @@ function ScalperChart(props: Props) {
     [bars, indicators],
   );
   const trend = useMemo(() => trendStates(bars, candleColorRule), [bars, candleColorRule]);
+  // Candle colours from an indicator (Bollinger Bars), else the candle-colour rule's trend: the last visible one wins.
+  const barColor = useMemo(() => {
+    for (let k = outputs.length - 1; k >= 0; k--) { const bc = outputs[k].out.barColors; if (bc) return bc; }
+    return null;
+  }, [outputs]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -582,7 +592,7 @@ function ScalperChart(props: Props) {
 
     if (tail) {
       try {
-        candles.update({ time: toTime(lastBar.t), open: lastBar.o, high: lastBar.h, low: lastBar.l, close: lastBar.c, ...trendColor(trend?.[bars.length - 1]) });
+        candles.update({ time: toTime(lastBar.t), open: lastBar.o, high: lastBar.h, low: lastBar.l, close: lastBar.c, ...candleColor(barColor, trend, bars.length - 1) });
         let k = 0;
         for (const { out } of outputs) {
           for (const s of out.series) {
@@ -603,7 +613,7 @@ function ScalperChart(props: Props) {
       return;
     }
 
-    candles.setData(bars.map((b, i) => ({ time: toTime(b.t), open: b.o, high: b.h, low: b.l, close: b.c, ...trendColor(trend?.[i]) })));
+    candles.setData(bars.map((b, i) => ({ time: toTime(b.t), open: b.o, high: b.h, low: b.l, close: b.c, ...candleColor(barColor, trend, i) })));
 
     if (sig !== sigRef.current) {
       for (const s of indSeriesRef.current) { try { chart.removeSeries(s); } catch { /* gone */ } }
@@ -636,8 +646,9 @@ function ScalperChart(props: Props) {
               color: s.color, lineWidth: thick as 1 | 2 | 3 | 4, priceLineVisible: false, lastValueVisible: !s.shadow && !s.noLabel, title: s.shadow || s.noLabel ? '' : s.axisLabel,
               crosshairMarkerVisible: false, ...(noScale ? { autoscaleInfoProvider: () => null } : {}),
             }, paneIdx);
-            for (const g of s.guides ?? []) api.createPriceLine({ price: g, color: chrome.baseline, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' });
           }
+          // Oscillator guides (RSI 30 / 70, MFI 20 / 80, the MACD / AO zero, RVOL 1.0), dashed as on the terminal; histograms too.
+          for (const g of s.guides ?? []) api.createPriceLine({ price: g, color: chrome.baseline, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: '' });
           indSeriesRef.current.push(api);
         }
       }
@@ -660,7 +671,7 @@ function ScalperChart(props: Props) {
       }
     }
     prevRef.current = { n: bars.length, first: bars[0].t, tail: bars.slice(-2), flip };
-  }, [bars, outputs, indicators, chrome, trend, candleColorRule]);
+  }, [bars, outputs, indicators, chrome, trend, candleColorRule, barColor]);
 
   // Visible range request (1D / 1W / ... buttons). Applied on every click (`seq`), and again when a different history
   // lands (its first bar moves: a longer range or another interval loaded), so 2M / 1M are framed on their own bars

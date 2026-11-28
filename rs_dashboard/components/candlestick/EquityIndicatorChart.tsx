@@ -122,7 +122,12 @@ function EquityIndicatorChart({ bars, indicators, initialBars, viewToken, logSca
   useEffect(() => {
     const chart = chartRef.current, candles = candleRef.current;
     if (!chart || !candles) return;
-    candles.setData(bars.map(b => ({ time: toTime(b.t), open: b.o, high: b.h, low: b.l, close: b.c })));
+    // Candle colours from an indicator (Bollinger Bars): the last visible one that sets them.
+    const barColor = [...outputs].reverse().find(o => o.out.barColors)?.out.barColors ?? null;
+    candles.setData(bars.map((b, i) => {
+      const c = barColor?.[i];
+      return { time: toTime(b.t), open: b.o, high: b.h, low: b.l, close: b.c, ...(c ? { color: c, borderColor: c, wickColor: c } : {}) };
+    }));
     for (const m of markerRef.current) { try { m.detach(); } catch { /* gone */ } }
     markerRef.current = [];
     for (const s of indRef.current) { try { chart.removeSeries(s); } catch { /* gone */ } }
@@ -143,8 +148,9 @@ function EquityIndicatorChart({ bars, indicators, initialBars, viewToken, logSca
             lastValueVisible: !s.shadow && !s.noLabel, title: s.shadow || s.noLabel ? '' : s.axisLabel, crosshairMarkerVisible: false,
             ...(s.shadow ? { autoscaleInfoProvider: () => null } : {}),
           }, paneIdx);
-          for (const g of s.guides ?? []) api.createPriceLine({ price: g, color: chrome.baseline, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' });
         }
+        // Oscillator guides, dashed as on the terminal; histograms too (MACD / AO zero, RVOL 1.0).
+        for (const g of s.guides ?? []) api.createPriceLine({ price: g, color: chrome.baseline, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: '' });
         api.setData(seriesData(s, bars) as never);
         if (s.markers?.length) {
           const plugin = createSeriesMarkers(api, s.markers.filter(m => bars[m.i]).map(m => {
