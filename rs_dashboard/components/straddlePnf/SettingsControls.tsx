@@ -7,6 +7,7 @@ import {
   MAX_BOX_PCT, MIN_BOX_PCT, MAX_BOX_PTS, MIN_BOX_PTS, MIN_BOX_PTS_PCT, MAX_SMA_PERIOD, MIN_SMA_PERIOD, MAX_ST_MULT, MAX_ST_PERIOD, MIN_ST_MULT, MIN_ST_PERIOD, REVERSALS, parseBoxPct, parseBoxPts, parseSmaPeriod, parseStMult, parseStPeriod, stepBox, stepBoxBy, RENKO_BOX_STEP, boxLogOf,
   type BoxMode, type PnfSettings, type Reversal,
 } from '@/lib/straddlePnfSettings';
+import { calculateAutoBlockSize } from '@/lib/renkoAutoBrick';
 
 // Bar interval, box size, reversal and the SMA period: shared by the live page and the simulator so they behave identically.
 
@@ -143,7 +144,11 @@ export function SupertrendControls({ settings, onChange, shown, onToggleShown, l
  * `renko`: the Reversal select becomes "Confirm", the N bricks a Renko signal waits
  * for after a reversal; it is stored in the same `reversal` field (1-5), so the settings parse and persist unchanged.
  */
-export default function SettingsControls({ settings, onChange, equity = false, renko = false }: { settings: PnfSettings; onChange: (next: PnfSettings) => void; equity?: boolean; renko?: boolean }) {
+export default function SettingsControls({
+  settings, onChange, equity = false, renko = false, targetSymbol,
+}: {
+  settings: PnfSettings; onChange: (next: PnfSettings) => void; equity?: boolean; renko?: boolean; targetSymbol?: string;
+}) {
   // A Log % box is Renko only. A P&F page given 'log' (settings carried over from elsewhere) is shown, built (straddlePnfModel) and
   // edited as its % box, so one unit button is always pressed and the value shown is the one in use.
   const boxMode: BoxMode = !renko && settings.boxMode === 'log' ? 'pct' : settings.boxMode;
@@ -154,7 +159,7 @@ export default function SettingsControls({ settings, onChange, equity = false, r
   const stepUnit = logMode ? `${RENKO_BOX_STEP.log}%` : boxMode === 'pts' ? `${RENKO_BOX_STEP.pts} point` : `${RENKO_BOX_STEP.pct}%`;
   const setBox = (n: number) => {
     if (n === boxValue) return;
-    onChange(logMode ? { ...settings, boxLog: n } : boxMode === 'pts' ? { ...settings, boxPts: n } : { ...settings, boxPct: n });
+    onChange(logMode ? { ...settings, boxLog: n, autoBox: false } : boxMode === 'pts' ? { ...settings, boxPts: n, autoBox: false } : { ...settings, boxPct: n, autoBox: false });
   };
   const modes: BoxMode[] = renko ? ['pct', 'pts', 'log'] : ['pct', 'pts'];
   return (
@@ -171,12 +176,38 @@ export default function SettingsControls({ settings, onChange, equity = false, r
         <span>Box</span>
         <div className="inline-flex items-center gap-0.5 p-0.5 rounded-md border border-zinc-800 bg-zinc-900" role="group" aria-label="Box unit">
           {modes.map(m => (
-            <button key={m} type="button" aria-pressed={boxMode === m} onClick={() => settings.boxMode !== m && onChange({ ...settings, boxMode: m })}
+            <button key={m} type="button" aria-pressed={boxMode === m} onClick={() => settings.boxMode !== m && onChange({ ...settings, boxMode: m, ...(m !== 'pts' ? { autoBox: false } : {}) })}
                     title={m === 'log' ? 'Log %: each brick is this % of the previous brick\'s close (Definedge Log brick), on a fixed log grid that never redraws' : m === 'pct' ? 'Box as a % of the first price' : 'Box in price points'}
                     className={`px-1.5 h-5 rounded text-[10px] font-bold normal-case tracking-normal ${boxMode === m ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-100'}`}>
               {m === 'pct' ? '%' : m === 'log' ? 'log%' : 'pts'}
             </button>
           ))}
+          {renko && (
+            <button
+              type="button"
+              role="switch"
+              aria-checked={Boolean(settings.autoBox)}
+              aria-label={settings.autoBox ? 'Auto block size: ON' : 'Auto block size: OFF'}
+              title={settings.autoBox ? 'Auto block size: ON (auto-configures brick size per chosen index/ATR)' : 'Auto block size: OFF (click to auto-configure per chosen index)'}
+              onClick={() => {
+                const nextAuto = !settings.autoBox;
+                if (nextAuto) {
+                  const autoRes = calculateAutoBlockSize({ symbol: targetSymbol, targetMinutes: 30 });
+                  onChange({ ...settings, autoBox: true, boxMode: 'pts', boxPts: autoRes.boxPts });
+                } else {
+                  onChange({ ...settings, autoBox: false });
+                }
+              }}
+              className={`px-1.5 h-5 rounded text-[10px] font-bold normal-case tracking-normal transition-colors flex items-center gap-1 border-l border-zinc-800 ml-0.5 pl-1.5 ${
+                settings.autoBox
+                  ? 'bg-amber-500/20 text-amber-300 font-extrabold'
+                  : 'text-zinc-400 hover:text-zinc-100'
+              }`}
+            >
+              <span>AUTO</span>
+              {settings.autoBox && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" aria-hidden="true" />}
+            </button>
+          )}
         </div>
         <div className="inline-flex items-center">
           {/* − / + step (Renko: 1 pt / 0.5 %; P&F: the next round size) and apply at once, from the applied value (a half-typed draft is discarded). */}

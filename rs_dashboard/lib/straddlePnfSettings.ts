@@ -16,7 +16,7 @@ export type BoxMode = 'pct' | 'pts' | 'log';
  * `boxLog` (Renko page only, boxMode 'log'): the Definedge Log % brick — each brick is this % of the previous brick's close, on a fixed
  * log grid (lib/renko.ts buildLogRenko). Optional so settings saved before it existed read unchanged; absent = DEFAULT_BOX_LOG.
  */
-export type PnfSettings = { interval: Interval; boxMode: BoxMode; boxPct: number; boxPts: number; boxLog?: number; reversal: Reversal; smaPeriod: number; stPeriod: number; stMult: number };
+export type PnfSettings = { interval: Interval; boxMode: BoxMode; boxPct: number; boxPts: number; boxLog?: number; autoBox?: boolean; reversal: Reversal; smaPeriod: number; stPeriod: number; stMult: number };
 /** The Log % brick when none is stored (Definedge suggests ~1 % for a stock's daily chart; an intraday index wants far less). */
 export const DEFAULT_BOX_LOG = 0.1;
 export const boxLogOf = (s: Pick<PnfSettings, 'boxLog'>) => s.boxLog ?? DEFAULT_BOX_LOG;
@@ -33,7 +33,7 @@ export const DEFAULT_CHART2_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pct
  * The Renko page (both charts): a 10-point box on 1-minute closes, TradingView's "Renko [Traditional, 10]" on NIFTY (the % box,
  * `boxPct`, is there too). `reversal` is the N-brick confirmation its signals wait for (2), not a P&F reversal.
  */
-export const DEFAULT_RENKO_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pts', boxPct: 0.1, boxPts: 10, reversal: 2, smaPeriod: 50, stPeriod: 10, stMult: 3 };
+export const DEFAULT_RENKO_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pts', boxPct: 0.1, boxPts: 10, autoBox: false, reversal: 2, smaPeriod: 50, stPeriod: 10, stMult: 3 };
 /** SMA period limits, in P&F boxes (a small box over 10 sessions draws a few hundred to a few thousand boxes). */
 export const MIN_SMA_PERIOD = 2;
 export const MAX_SMA_PERIOD = 500;
@@ -154,9 +154,10 @@ export function readSettings(raw: string | null, fallback: PnfSettings = DEFAULT
   const boxMode: BoxMode = o.boxMode === 'pts' ? 'pts' : o.boxMode === 'log' ? 'log' : fallback.boxMode;
   const boxLog = typeof o.boxLog === 'number' && Number.isFinite(o.boxLog) && o.boxLog >= MIN_BOX_PCT && o.boxLog <= MAX_BOX_PCT ? o.boxLog : fallback.boxLog;
   const boxPts = typeof o.boxPts === 'number' && boxPtsOk(o.boxPts) ? o.boxPts : fallback.boxPts;
+  const autoBox = typeof o.autoBox === 'boolean' ? o.autoBox : fallback.autoBox;
   const stPeriod = typeof o.stPeriod === 'number' && stPeriodOk(o.stPeriod) ? o.stPeriod : fallback.stPeriod;
   const stMult = typeof o.stMult === 'number' && stMultOk(o.stMult) ? o.stMult : fallback.stMult;
-  return { interval, boxMode, boxPct, boxPts, ...(boxLog !== undefined ? { boxLog } : {}), reversal, smaPeriod, stPeriod, stMult };
+  return { interval, boxMode, boxPct, boxPts, ...(boxLog !== undefined ? { boxLog } : {}), ...(autoBox !== undefined ? { autoBox } : {}), reversal, smaPeriod, stPeriod, stMult };
 }
 
 export function serializeSettings(s: PnfSettings): string {

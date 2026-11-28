@@ -9,6 +9,7 @@ import PnfPanel from './straddlePnf/PnfPanel';
 import AlertLog, { type LogEntry } from './straddlePnf/AlertLog';
 import InstrumentBar from './straddlePnf/InstrumentBar';
 import { effectiveInterval, hasLongIntervals, intervalLabel, isTickInterval, tickBucketSec } from '@/lib/straddlePnfInterval';
+import { calculateAutoBlockSize } from '@/lib/renkoAutoBrick';
 import SettingsControls, { SmaPeriodInput, SupertrendControls } from './straddlePnf/SettingsControls';
 import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import ScalperWindow, { type ScalperPos } from './straddlePnf/ScalperWindow';
@@ -1344,6 +1345,21 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     saveP(c === 1 ? TARGETS_KEY : TARGETS_KEY_2, JSON.stringify(picksRef.current[c].targets));
     saveP(c === 1 ? SEGMENT_KEY : SEGMENT_KEY_2, next.kind);
     (c === 1 ? setTarget1 : setTarget2)(t => (targetKey(t) === targetKey(next) ? t : next));
+
+    const currentSettings = c === 1 ? settings : settings2;
+    if (renko && currentSettings.autoBox) {
+      const autoRes = calculateAutoBlockSize({
+        symbol: next.symbol,
+        targetMinutes: 30,
+      });
+      const updated: PnfSettings = {
+        ...currentSettings,
+        boxMode: 'pts',
+        boxPts: autoRes.boxPts,
+      };
+      applySettings(updated);
+      toast.info(`Auto Renko block: ${autoRes.boxPts} pts (${next.symbol})`);
+    }
   };
   const pickSegment = (s: Segment) => { if (s !== activeTarget.kind) choose(picksRef.current[active].targets[s]); };
   const activate = (c: ChartId) => { setActiveChart(c); saveP(ACTIVE_CHART_KEY, String(c)); };
@@ -1619,7 +1635,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
               </>
             )}
 
-            <fieldset disabled={activeLocked} className="contents"><SettingsControls settings={activeSettings} onChange={h.applySettings} equity={longIntervals} renko={renko} /></fieldset>
+            <fieldset disabled={activeLocked} className="contents"><SettingsControls settings={activeSettings} onChange={h.applySettings} equity={longIntervals} renko={renko} targetSymbol={activeTarget.symbol} /></fieldset>
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Overlay">
               {/* An index has no traded volume, so no VWAP: the button is disabled and the SMA is drawn (the saved choice is kept for
@@ -1673,7 +1689,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   ), [chartView, renko, dual, active, settings, settings2, label1, label2, activeLocked, activeSettings, longIntervals, overlayShown, shownOverlay,
       vwapAllowed, indexNoVwap, coverShown, stLocked, supertrendShown, workingCount, replay.active, logOpen, logCount, muted, tradeOpen,
-      scalperOpen, activeTarget.kind]);
+      scalperOpen, activeTarget.kind, activeTarget.symbol]);
 
   return (
     <div className={`flex flex-col h-screen bg-zinc-950 text-white ${tradeMode === 'REAL' ? 'border-t-4 border-red-500' : ''}`} data-trade-mode={tradeMode}>

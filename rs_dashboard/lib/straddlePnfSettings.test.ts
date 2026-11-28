@@ -133,3 +133,12 @@ test('Log % box: the mode and its % are stored and read back; a file without box
   assert.equal(stepBoxBy('log', 0.1, 1), 0.15);
   assert.equal(stepBoxBy('log', 0.05, -1), MIN_BOX_PCT);
 });
+
+test('autoBox: stored and read back; absent reads as fallback/undefined', () => {
+  const s = readSettings('{"autoBox":true}');
+  assert.equal(s.autoBox, true);
+  assert.deepEqual(readSettings(serializeSettings(s)), s);
+  assert.equal(readSettings('{"autoBox":false}').autoBox, false);
+  assert.equal(readSettings('{}').autoBox, undefined);
+  assert.equal(readSettings('{"autoBox":"yes"}').autoBox, undefined);
+});
