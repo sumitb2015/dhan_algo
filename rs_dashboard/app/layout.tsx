@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Inter, Geist_Mono, Poppins, DM_Sans, Playfair_Display, Lora, Montserrat } from "next/font/google";
+import localFont from "next/font/local";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import ThemeInit from "@/components/ThemeInit";
 import Sidebar from "@/components/Sidebar";
@@ -9,6 +9,12 @@ import { Toaster } from "sonner";
 import ThemeInitScript from "@/components/ThemeInitScript";
 import "./globals.css";
 
+// Fonts are self-hosted (app/fonts/, the latin .woff2 files Google Fonts serves) rather than loaded through
+// next/font/google: Google intermittently answers with a new file-URL form (fonts.gstatic.com/l/font?kit=...) that
+// Next 16.3.3's Turbopack font loader cannot parse ("next/font/google queries have exactly one entry"). Turbopack then
+// caches the failure and every page returns 500 until the dev cache is cleared (2026-11-28, Montserrat). Local files
+// need no network at build time. Same weights / variables as before.
+
 // Inter over Geist: hand-tuned hinting for small UI text (this app's sidebar
 // and tables run 11-12px), which is what this app needs most.
 // Named `--font-sans` (not `--font-geist-sans`) to match the `--font-sans`
@@ -17,41 +23,50 @@ import "./globals.css";
 // (applied explicitly in several components, e.g. BreadthAnalysis.tsx
 // tooltips) only worked by accident, via inheriting body's own explicit
 // font-family rule rather than resolving its own theme token.
-const inter = Inter({
+const inter = localFont({
+  src: "./fonts/inter-100-900.woff2",
+  weight: "100 900",
   variable: "--font-sans",
-  subsets: ["latin"],
 });
 
-const geistMono = Geist_Mono({
+const geistMono = localFont({
+  src: "./fonts/geist-mono-100-900.woff2",
+  weight: "100 900",
   variable: "--font-geist-mono",
-  subsets: ["latin"],
 });
 
 // Selectable heading fonts (Settings > Typography, lib/preferences.ts).
 // All five load unconditionally — next/font requires a static import per
 // font — but only the user's chosen one is ever assigned to `--heading-font`
 // (app/globals.css), so the unused ones cost a stylesheet entry, not a paint.
-const poppins = Poppins({
+const poppins = localFont({
+  src: [
+    { path: "./fonts/poppins-500.woff2", weight: "500" },
+    { path: "./fonts/poppins-600.woff2", weight: "600" },
+    { path: "./fonts/poppins-700.woff2", weight: "700" },
+  ],
   variable: "--font-poppins",
-  subsets: ["latin"],
-  weight: ["500", "600", "700"],
 });
-const dmSans = DM_Sans({
+const dmSans = localFont({
+  src: "./fonts/dm-sans-100-1000.woff2",
+  weight: "100 1000",
   variable: "--font-dm-sans",
-  subsets: ["latin"],
 });
-const playfair = Playfair_Display({
+const playfair = localFont({
+  src: "./fonts/playfair-display-400-900.woff2",
+  weight: "400 900",
   variable: "--font-playfair",
-  subsets: ["latin"],
 });
-const lora = Lora({
+const lora = localFont({
+  src: "./fonts/lora-400-700.woff2",
+  weight: "400 700",
   variable: "--font-lora",
-  subsets: ["latin"],
 });
-const montserrat = Montserrat({
+// Google serves Montserrat 500 / 600 / 700 as one variable file.
+const montserrat = localFont({
+  src: "./fonts/montserrat-500-700.woff2",
+  weight: "500 700",
   variable: "--font-montserrat",
-  subsets: ["latin"],
-  weight: ["500", "600", "700"],
 });
 
 export const metadata: Metadata = {
