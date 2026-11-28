@@ -7,8 +7,7 @@ import {
   MAX_BOX_PCT, MIN_BOX_PCT, MAX_BOX_PTS, MIN_BOX_PTS, MIN_BOX_PTS_PCT, MAX_SMA_PERIOD, MIN_SMA_PERIOD, MAX_ST_MULT, MAX_ST_PERIOD, MIN_ST_MULT, MIN_ST_PERIOD, REVERSALS, parseBoxPct, parseBoxPts, parseSmaPeriod, parseStMult, parseStPeriod, stepBox, stepBoxBy, RENKO_BOX_STEP, boxLogOf,
   type BoxMode, type PnfSettings, type Reversal,
 } from '@/lib/straddlePnfSettings';
-import { calculateAutoBlockSize } from '@/lib/renkoAutoBrick';
-import type { Bar } from '@/lib/straddlePnf';
+import type { AutoBlockResult } from '@/lib/renkoAutoBrick';
 
 // Bar interval, box size, reversal and the SMA period: shared by the live page and the simulator so they behave identically.
 
@@ -146,9 +145,10 @@ export function SupertrendControls({ settings, onChange, shown, onToggleShown, l
  * for after a reversal; it is stored in the same `reversal` field (1-5), so the settings parse and persist unchanged.
  */
 export default function SettingsControls({
-  settings, onChange, equity = false, renko = false, targetSymbol, bars, market,
+  settings, onChange, equity = false, renko = false, autoBlock = null,
 }: {
-  settings: PnfSettings; onChange: (next: PnfSettings) => void; equity?: boolean; renko?: boolean; targetSymbol?: string; bars?: Bar[]; market?: string;
+  /** `autoBlock`: the page's auto-brick result for this chart (null while AUTO is off or the history is loading); the page applies it. */
+  settings: PnfSettings; onChange: (next: PnfSettings) => void; equity?: boolean; renko?: boolean; autoBlock?: AutoBlockResult | null;
 }) {
   // A Log % box is Renko only. A P&F page given 'log' (settings carried over from elsewhere) is shown, built (straddlePnfModel) and
   // edited as its % box, so one unit button is always pressed and the value shown is the one in use.
@@ -163,8 +163,6 @@ export default function SettingsControls({
     onChange(logMode ? { ...settings, boxLog: n, autoBox: false } : boxMode === 'pts' ? { ...settings, boxPts: n, autoBox: false } : { ...settings, boxPct: n, autoBox: false });
   };
   const modes: BoxMode[] = renko ? ['pct', 'pts', 'log'] : ['pct', 'pts'];
-
-  const autoBlockInfo = renko && settings.autoBox ? calculateAutoBlockSize({ symbol: targetSymbol, bars, market, targetMinutes: 30 }) : null;
 
   return (
     <>
@@ -193,17 +191,10 @@ export default function SettingsControls({
               aria-checked={Boolean(settings.autoBox)}
               aria-label={settings.autoBox ? 'Auto block size: ON' : 'Auto block size: OFF'}
               title={settings.autoBox
-                ? `Auto block size: ON (${autoBlockInfo?.formula ?? 'calculating from live ATR'})`
-                : 'Auto block size: OFF (click to automatically calculate from current index ATR)'}
-              onClick={() => {
-                const nextAuto = !settings.autoBox;
-                if (nextAuto) {
-                  const autoRes = calculateAutoBlockSize({ symbol: targetSymbol, bars, market, targetMinutes: 30 });
-                  onChange({ ...settings, autoBox: true, boxMode: 'pts', boxPts: autoRes.boxPts });
-                } else {
-                  onChange({ ...settings, autoBox: false });
-                }
-              }}
+                ? `Auto block size: ON (${autoBlock?.formula ?? 'waiting for the price history'})`
+                : 'Auto block size: OFF (click to size the brick from the last 5 finished sessions\' ATR / 12 half-hours, 28 on MCX)'}
+              // the page sizes the brick once the history is in (and again as each session finishes)
+              onClick={() => onChange(settings.autoBox ? { ...settings, autoBox: false } : { ...settings, autoBox: true, boxMode: 'pts' })}
               className={`px-1.5 h-5 rounded text-[10px] font-bold normal-case tracking-normal transition-colors flex items-center gap-1 border-l border-zinc-800 ml-0.5 pl-1.5 ${
                 settings.autoBox
                   ? 'bg-amber-500/20 text-amber-300 font-extrabold'

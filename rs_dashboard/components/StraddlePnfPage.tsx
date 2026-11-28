@@ -9,7 +9,7 @@ import PnfPanel from './straddlePnf/PnfPanel';
 import AlertLog, { type LogEntry } from './straddlePnf/AlertLog';
 import InstrumentBar from './straddlePnf/InstrumentBar';
 import { effectiveInterval, hasLongIntervals, intervalLabel, isTickInterval, tickBucketSec } from '@/lib/straddlePnfInterval';
-import { calculateAutoBlockSize } from '@/lib/renkoAutoBrick';
+import { calculateAutoBlockSize, type AutoBlockResult } from '@/lib/renkoAutoBrick';
 import SettingsControls, { SmaPeriodInput, SupertrendControls } from './straddlePnf/SettingsControls';
 import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import ScalperWindow, { type ScalperPos } from './straddlePnf/ScalperWindow';
@@ -1361,23 +1361,36 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     else { setSettings(next); saveP(SETTINGS_KEY, serializeSettings(next)); }
   };
 
+  // Auto brick (lib/renkoAutoBrick.ts): session ATR(5) over FINISHED sessions / 12 (NSE) or 28 (MCX) half-hours. Recomputed as bars
+  // arrive (cheap: a tail scan) and re-applied whenever its result changes — a newly finished session, or the history growing past
+  // the baseline fallback — but never on a chart running AUTO, whose bricks must not move under an open strategy.
+  const autoBlockRaw = useMemo(
+    () => (renko && activeSettings.autoBox && activeFeed.loaded && activeFeed.bars?.length
+      ? calculateAutoBlockSize({
+        symbol: activeTarget.symbol, kind: activeTarget.kind, bars: activeFeed.bars, market: activeFeed.market,
+        nowSec: now > 0 ? now / 1000 : undefined, targetMinutes: 30,
+      })
+      : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [renko, activeSettings.autoBox, activeFeed.loaded, activeFeed.bars, activeFeed.market, activeTarget, now],
+  );
+  // the same result keeps the same object, so the memoised header controls do not re-render on every bar / clock tick
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const autoBlock: AutoBlockResult | null = useMemo(() => autoBlockRaw, [autoBlockRaw?.formula, autoBlockRaw?.boxPts]);
+  const autoApplied = autoBlock ? `${active}:${targetKey(activeTarget)}:${autoBlock.source}:${autoBlock.lastSession ?? ''}:${autoBlock.boxPts ?? ''}` : null;
   useEffect(() => {
-    if (!renko || !activeSettings.autoBox || !activeFeed.loaded || !activeFeed.bars?.length) return;
-    const key = `${active}:${targetKey(activeTarget)}`;
-    if (lastAutoTargetKeyRef.current === key) return;
-    lastAutoTargetKeyRef.current = key;
-
-    const autoRes = calculateAutoBlockSize({
-      symbol: activeTarget.symbol,
-      bars: activeFeed.bars,
-      market: activeFeed.market,
-      targetMinutes: 30,
-    });
-    if (autoRes.boxPts !== activeSettings.boxPts || activeSettings.boxMode !== 'pts') {
-      applySettings({ ...activeSettings, boxMode: 'pts', boxPts: autoRes.boxPts });
-      toast.info(`Auto Renko block: ${autoRes.boxPts} pts (${activeTarget.symbol} · ${autoRes.formula})`);
+    // AUTO off (or no result yet): forget what was applied, so switching it back on applies the size again
+    if (!autoBlock || !autoApplied) { lastAutoTargetKeyRef.current = null; return; }
+    if (autoBlock.boxPts === null) return;
+    if (lastAutoTargetKeyRef.current === autoApplied) return;
+    if (locked(active)) return;
+    lastAutoTargetKeyRef.current = autoApplied;
+    if (autoBlock.boxPts !== activeSettings.boxPts || activeSettings.boxMode !== 'pts') {
+      applySettings({ ...activeSettings, boxMode: 'pts', boxPts: autoBlock.boxPts });
+      toast.info(`Auto Renko block: ${autoBlock.boxPts} pts (${activeTarget.symbol} · ${autoBlock.formula})`);
     }
-  }, [renko, activeSettings, activeFeed.loaded, activeFeed.bars?.length, activeFeed.market, activeTarget, active]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoApplied]);
   const toggleChartView = (v: '1' | '2') => {
     if (v === '1' && locked(2)) { toast.warning('Chart 2 is running AUTO: stop it (and let its position close) before hiding it'); return; }
     setChartView(v);
@@ -1641,7 +1654,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
               </>
             )}
 
-            <fieldset disabled={activeLocked} className="contents"><SettingsControls settings={activeSettings} onChange={h.applySettings} equity={longIntervals} renko={renko} targetSymbol={activeTarget.symbol} bars={activeFeed.bars} market={activeFeed.market} /></fieldset>
+            <fieldset disabled={activeLocked} className="contents"><SettingsControls settings={activeSettings} onChange={h.applySettings} equity={longIntervals} renko={renko} autoBlock={autoBlock} /></fieldset>
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Overlay">
               {/* An index has no traded volume, so no VWAP: the button is disabled and the SMA is drawn (the saved choice is kept for
@@ -1695,7 +1708,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   ), [chartView, renko, dual, active, settings, settings2, label1, label2, activeLocked, activeSettings, longIntervals, overlayShown, shownOverlay,
       vwapAllowed, indexNoVwap, coverShown, stLocked, supertrendShown, workingCount, replay.active, logOpen, logCount, muted, tradeOpen,
-      scalperOpen, activeTarget.kind, activeTarget.symbol, activeFeed.bars?.length, activeFeed.market]);
+      scalperOpen, activeTarget.kind, autoBlock]);
 
   return (
     <div className={`flex flex-col h-screen bg-zinc-950 text-white ${tradeMode === 'REAL' ? 'border-t-4 border-red-500' : ''}`} data-trade-mode={tradeMode}>
